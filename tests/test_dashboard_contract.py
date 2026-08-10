@@ -36,7 +36,12 @@ class TestEndpointsExist:
         async for client in make_client(ok_json([])):
             results = {path: (await client.get(path)).status_code for path in paths}
 
-        assert all(status == 200 for status in results.values()), results
+        # A 405 means the route exists but is POST/DELETE-only, which is fine — the
+        # failure this guards against is the dashboard calling a path that isn't routed.
+        missing = {path: status for path, status in results.items() if status == 404}
+        assert not missing, f"dashboard calls unrouted path(s): {missing}"
+        unexpected = {path: status for path, status in results.items() if status not in (200, 405)}
+        assert not unexpected, unexpected
 
     async def test_the_documented_endpoint_set_is_covered(self):
         for path in ("/health", "/api/accounts", "/api/keys", "/api/usage/summary", "/api/usage/requests"):
@@ -150,3 +155,50 @@ class TestMutationsTheDashboardPerforms:
         assert disabled.status_code == 200
         assert disabled.json()["enabled"] is False
         assert removed.status_code == 204
+
+
+class TestDashboardAuthWiring:
+    """The dashboard must be able to render its own login gate."""
+
+    def test_it_calls_the_auth_status_endpoint(self):
+        assert "/api/auth/status" in INDEX
+
+    def test_it_has_both_a_login_and_a_first_run_setup_path(self):
+        assert "/api/auth/login" in INDEX
+        assert "/api/auth/password" in INDEX
+        assert 'dataset.mode === "setup"' in INDEX
+
+    def test_it_sends_the_bootstrap_token_header_when_one_is_entered(self):
+        assert "x-claude-lb-bootstrap" in INDEX
+
+    def test_it_distinguishes_401_from_other_errors(self):
+        # Otherwise an expired session renders as a generic red toast instead of the gate.
+        assert "AuthRequired" in INDEX
+        assert "res.status === 401" in INDEX
+
+    async def test_auth_status_fields_read_by_the_gate_exist(self):
+        async for client in make_client(ok_json([])):
+            status = (await client.get("/api/auth/status")).json()
+        for field in ("configured", "totp_enabled", "authenticated"):
+            assert field in status, f"login gate reads status.{field}"
+
+    async def test_settings_fields_rendered_as_controls_exist(self):
+        async for client in make_client(ok_json([])):
+            payload = (await client.get("/api/settings")).json()
+        assert "available_strategies" in payload
+        for field in (
+            "routing_strategy",
+            "max_attempts",
+            "sticky_sessions_enabled",
+            "sticky_ttl_seconds",
+            "health_probe_enabled",
+            "model_sync_enabled",
+        ):
+            assert field in payload["settings"], f"dashboard renders a control for {field}"
+
+    async def test_audit_fields_read_by_the_dashboard_exist(self):
+        async for client in make_client(ok_json([])):
+            await client.post("/api/accounts", json={"name": "x", "api_key": "sk-ant-y"})
+            row = (await client.get("/api/audit?limit=1")).json()[0]
+        for field in ("created_at", "action", "target", "detail", "client_ip", "ok"):
+            assert field in row, f"dashboard reads e.{field}"

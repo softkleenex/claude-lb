@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.db.models import ApiKey
 from app.dependencies import SessionDep
 from app.modules.api_keys.service import create_api_key
+from app.modules.audit import service as audit
+from app.modules.auth.dependencies import client_ip
 
 router = APIRouter(prefix="/api/keys", tags=["api-keys"])
 
@@ -55,28 +57,42 @@ async def list_keys(session: SessionDep) -> list[ApiKeyOut]:
 
 
 @router.post("", response_model=ApiKeyCreated, status_code=201)
-async def create_key(payload: ApiKeyCreate, session: SessionDep) -> ApiKeyCreated:
+async def create_key(payload: ApiKeyCreate, request: Request, session: SessionDep) -> ApiKeyCreated:
     existing = await session.execute(select(ApiKey).where(ApiKey.name == payload.name))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(409, f"a key named {payload.name!r} already exists")
 
     issued = await create_api_key(session, **payload.model_dump())
+    await audit.record(
+        session,
+        action="api_key.created",
+        target=issued.record.name,
+        detail=f"hint …{issued.record.key_hint}",
+        client_ip=client_ip(request),
+    )
     return ApiKeyCreated(api_key=issued.plaintext, **ApiKeyOut.of(issued.record).model_dump())
 
 
 @router.patch("/{key_id}", response_model=ApiKeyOut)
-async def update_key(key_id: str, enabled: bool, session: SessionDep) -> ApiKeyOut:
+async def update_key(key_id: str, enabled: bool, request: Request, session: SessionDep) -> ApiKeyOut:
     key = await session.get(ApiKey, key_id)
     if key is None:
         raise HTTPException(404, "API key not found")
     key.enabled = enabled
     await session.flush()
+    await audit.record(
+        session,
+        action="api_key.enabled" if enabled else "api_key.disabled",
+        target=key.name,
+        client_ip=client_ip(request),
+    )
     return ApiKeyOut.of(key)
 
 
 @router.delete("/{key_id}", status_code=204)
-async def delete_key(key_id: str, session: SessionDep) -> None:
+async def delete_key(key_id: str, request: Request, session: SessionDep) -> None:
     key = await session.get(ApiKey, key_id)
     if key is None:
         raise HTTPException(404, "API key not found")
+    await audit.record(session, action="api_key.deleted", target=key.name, client_ip=client_ip(request))
     await session.delete(key)

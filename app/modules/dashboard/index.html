@@ -17,7 +17,8 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
   header {
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
@@ -46,17 +47,56 @@
     background: var(--panel); color: var(--text); cursor: pointer;
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { border-color: var(--accent); color: var(--accent); }
   input, select {
     font: inherit; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text);
   }
+  label.field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
   form.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
   code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
   .empty { color: var(--muted); padding: 10px 0; }
   .toast { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); color: var(--accent); }
+  .toast code { word-break: break-all; }
+  .banner {
+    margin: 0 24px; margin-top: 18px; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid var(--warn); color: var(--warn); font-size: 13px;
+  }
+  /* Login gate */
+  #gate {
+    position: fixed; inset: 0; display: none; place-items: center;
+    background: var(--bg); padding: 24px; z-index: 10;
+  }
+  #gate.show { display: grid; }
+  #gate .card {
+    width: min(420px, 100%); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px;
+  }
+  #gate h1 { margin-bottom: 4px; }
+  #gate p { color: var(--muted); font-size: 13px; margin: 8px 0 18px; }
+  #gate input { width: 100%; margin-bottom: 10px; }
+  #gate button { width: 100%; }
+  #gate .msg { margin-top: 12px; font-size: 13px; }
+  body.locked > header, body.locked > main, body.locked > .banner { display: none; }
 </style>
 </head>
 <body>
+
+<div id="gate">
+  <div class="card">
+    <h1>claude-lb</h1>
+    <p id="gate-hint"></p>
+    <form id="gate-form">
+      <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <input id="gate-password2" type="password" placeholder="Confirm password" autocomplete="new-password" style="display:none">
+      <input id="gate-totp" type="text" inputmode="numeric" placeholder="6-digit code" autocomplete="one-time-code" style="display:none">
+      <input id="gate-bootstrap" type="text" placeholder="Bootstrap token (from the server log)" style="display:none">
+      <button class="primary" type="submit" id="gate-submit">Sign in</button>
+    </form>
+    <div class="msg err" id="gate-error"></div>
+  </div>
+</div>
+
 <header>
   <h1>claude-lb</h1>
   <span class="sub" id="meta">loading…</span>
@@ -68,7 +108,10 @@
     <option value="720">last 30d</option>
   </select>
   <button id="refresh">Refresh</button>
+  <button id="signout" style="display:none">Sign out</button>
 </header>
+
+<div class="banner" id="insecure-banner" style="display:none"></div>
 
 <main>
   <section>
@@ -87,6 +130,12 @@
       <button type="submit">Add account</button>
     </form>
     <div class="scroll"><table id="accounts"></table></div>
+  </section>
+
+  <section>
+    <h2>Routing</h2>
+    <div class="row" id="settings-row"></div>
+    <div class="sub" id="settings-note"></div>
   </section>
 
   <section>
@@ -109,6 +158,17 @@
     <h2>Recent requests</h2>
     <div class="scroll"><table id="requests"></table></div>
   </section>
+
+  <section>
+    <h2>Security</h2>
+    <div class="row" id="security-row"></div>
+    <div id="totp-setup"></div>
+  </section>
+
+  <section>
+    <h2>Audit log</h2>
+    <div class="scroll"><table id="audit"></table></div>
+  </section>
 </main>
 
 <script>
@@ -119,11 +179,15 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
 ));
 
-async function api(path, options) {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...options,
-  });
+let bootstrapToken = null;
+
+class AuthRequired extends Error {}
+
+async function api(path, options = {}) {
+  const headers = { "content-type": "application/json", ...(options.headers || {}) };
+  if (bootstrapToken) headers["x-claude-lb-bootstrap"] = bootstrapToken;
+  const res = await fetch(path, { ...options, headers });
+  if (res.status === 401) throw new AuthRequired("authentication required");
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch {}
@@ -142,9 +206,68 @@ function table(el, columns, rows, renderRow) {
 }
 
 function toast(message, isError) {
-  $("#toast").innerHTML = `<div class="toast" style="${isError ? "border-color:var(--err);color:var(--err)" : ""}">${esc(message)}</div>`;
-  if (!isError) setTimeout(() => ($("#toast").innerHTML = ""), 12000);
+  $("#toast").innerHTML =
+    `<div class="toast" style="${isError ? "border-color:var(--err);color:var(--err)" : ""}">${message}</div>`;
+  if (!isError) setTimeout(() => ($("#toast").innerHTML = ""), 20000);
 }
+
+// ---------------------------------------------------------------- auth gate
+
+function showGate(status) {
+  document.body.classList.add("locked");
+  $("#gate").classList.add("show");
+  const setup = !status.configured;
+  $("#gate-hint").textContent = setup
+    ? "No password is set yet. Choose one to protect the dashboard and management API."
+    : "Sign in to continue.";
+  $("#gate-password").placeholder = setup ? "New password (min 8 characters)" : "Password";
+  $("#gate-password").autocomplete = setup ? "new-password" : "current-password";
+  $("#gate-password2").style.display = setup ? "block" : "none";
+  $("#gate-totp").style.display = !setup && status.totp_enabled ? "block" : "none";
+  // Remote first-run needs the token printed in the server log.
+  $("#gate-bootstrap").style.display = setup ? "block" : "none";
+  $("#gate-submit").textContent = setup ? "Set password" : "Sign in";
+  $("#gate-form").dataset.mode = setup ? "setup" : "login";
+  $("#gate-error").textContent = "";
+}
+
+function hideGate() {
+  document.body.classList.remove("locked");
+  $("#gate").classList.remove("show");
+}
+
+$("#gate-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const setup = event.target.dataset.mode === "setup";
+  const password = $("#gate-password").value;
+  $("#gate-error").textContent = "";
+
+  try {
+    if (setup) {
+      if (password !== $("#gate-password2").value) throw new Error("passwords do not match");
+      bootstrapToken = $("#gate-bootstrap").value.trim() || null;
+      await api("/api/auth/password", { method: "POST", body: JSON.stringify({ password }) });
+      bootstrapToken = null;
+    } else {
+      const body = { password };
+      const code = $("#gate-totp").value.trim();
+      if (code) body.totp_code = code;
+      await api("/api/auth/login", { method: "POST", body: JSON.stringify(body) });
+    }
+    $("#gate-form").reset();
+    hideGate();
+    await refresh();
+  } catch (err) {
+    $("#gate-error").textContent = err instanceof AuthRequired ? "invalid credentials" : err.message;
+  }
+});
+
+$("#signout").addEventListener("click", async () => {
+  await fetch("/api/auth/logout", { method: "POST" });
+  location.reload();
+});
+
+// ---------------------------------------------------------------- rendering
 
 const TOTAL_TILES = [
   ["requests", "Requests", fmt.format],
@@ -155,17 +278,81 @@ const TOTAL_TILES = [
   ["cost_usd", "Cost", (v) => "$" + v.toFixed(4)],
 ];
 
+const SETTING_FIELDS = [
+  { key: "max_attempts", label: "Max attempts", type: "number", min: 1, max: 10 },
+  { key: "sticky_sessions_enabled", label: "Sticky sessions", type: "checkbox" },
+  { key: "sticky_ttl_seconds", label: "Sticky TTL (s)", type: "number", min: 0, max: 86400 },
+  { key: "health_probe_enabled", label: "Health probes", type: "checkbox" },
+  { key: "model_sync_enabled", label: "Model sync", type: "checkbox" },
+];
+
+function renderSettings(payload) {
+  const s = payload.settings;
+  const strategy = payload.available_strategies
+    .map((o) => `<option value="${esc(o)}" ${o === s.routing_strategy ? "selected" : ""}>${esc(o)}</option>`)
+    .join("");
+  const fields = SETTING_FIELDS.map((f) => {
+    const value = s[f.key];
+    const input = f.type === "checkbox"
+      ? `<input type="checkbox" data-setting="${f.key}" ${value ? "checked" : ""}>`
+      : `<input type="number" data-setting="${f.key}" value="${esc(value)}" min="${f.min}" max="${f.max}" style="width:100px">`;
+    return `<label class="field">${esc(f.label)} ${input}</label>`;
+  }).join("");
+
+  $("#settings-row").innerHTML =
+    `<label class="field">Strategy <select data-setting="routing_strategy">${strategy}</select></label>` +
+    fields +
+    `<button id="settings-reset">Reset to defaults</button>`;
+  $("#settings-note").textContent = "Changes apply to the next request — no restart.";
+}
+
+function renderSecurity(status) {
+  $("#security-row").innerHTML = `
+    <span class="pill ${status.configured ? "ok" : "err"}">
+      ${status.configured ? "password set" : "no password"}
+    </span>
+    <span class="pill ${status.totp_enabled ? "ok" : "warn"}">
+      ${status.totp_enabled ? "TOTP on" : "TOTP off"}
+    </span>
+    <button id="change-password">Change password</button>
+    ${status.totp_enabled
+      ? `<button id="disable-totp">Disable TOTP</button>`
+      : `<button id="enroll-totp">Enable TOTP</button>`}
+    <button id="revoke-sessions">Sign out everywhere</button>`;
+}
+
 async function refresh() {
-  const hours = $("#window").value;
-  const [health, accounts, keys, summary, requests] = await Promise.all([
+  const status = await api("/api/auth/status");
+  if (!status.authenticated) {
+    showGate(status);
+    return;
+  }
+  hideGate();
+  $("#signout").style.display = status.configured ? "" : "none";
+
+  const banner = $("#insecure-banner");
+  if (!status.configured) {
+    banner.style.display = "";
+    banner.textContent =
+      "No dashboard password is set. The management API is reachable from this machine "
+      + "without authentication — set a password below before exposing this port.";
+  } else {
+    banner.style.display = "none";
+  }
+
+  const [health, accounts, keys, summary, requests, settings, audit] = await Promise.all([
     api("/health"),
     api("/api/accounts"),
     api("/api/keys"),
-    api(`/api/usage/summary?window_hours=${hours}`),
+    api(`/api/usage/summary?window_hours=${$("#window").value}`),
     api("/api/usage/requests?limit=50"),
+    api("/api/settings"),
+    api("/api/audit?limit=25"),
   ]);
 
-  $("#meta").textContent = `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`;
+  $("#meta").textContent =
+    `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`
+    + ` · ${settings.settings.routing_strategy}`;
 
   $("#totals").innerHTML = TOTAL_TILES.map(([key, label, format]) =>
     `<div class="tile"><div class="label">${label}</div><div class="value">${format(summary.totals[key])}</div></div>`
@@ -177,7 +364,7 @@ async function refresh() {
      {label:"Requests",num:true},{label:"Cost (window)",num:true},{label:"Cost (all time)",num:true},{label:""}],
     accounts,
     (a) => {
-      const window = usageByAccount[a.id] ?? {};
+      const w = usageByAccount[a.id] ?? {};
       const status = a.available
         ? `<span class="pill ok">available</span>`
         : `<span class="pill err" title="${esc(a.disabled_reason ?? "")}">${a.enabled ? "cooling down" : "disabled"}</span>`;
@@ -188,12 +375,15 @@ async function refresh() {
         <td>${status}</td>
         <td><div class="bar" title="${pct}%"><i style="width:${pct}%"></i></div></td>
         <td class="num">${fmt.format(a.total_requests)}</td>
-        <td class="num">${usd(window.cost_usd)}</td>
+        <td class="num">${usd(w.cost_usd)}</td>
         <td class="num">${usd(a.total_cost_usd)}</td>
         <td><button data-toggle="${a.id}" data-enabled="${!a.enabled}">${a.enabled ? "Disable" : "Enable"}</button>
             <button data-delete="${a.id}">Delete</button></td>
       </tr>`;
     });
+
+  renderSettings(settings);
+  renderSecurity(status);
 
   table($("#models"),
     [{label:"Model"},{label:"Requests",num:true},{label:"Input",num:true},{label:"Output",num:true},{label:"Cost",num:true}],
@@ -207,8 +397,7 @@ async function refresh() {
     keys,
     (k) => {
       const budget = k.max_cost_usd_per_window
-        ? `$${k.max_cost_usd_per_window} / ${k.window_seconds}s`
-        : "—";
+        ? `$${k.max_cost_usd_per_window} / ${k.window_seconds}s` : "—";
       return `<tr>
         <td>${esc(k.name)}</td><td><code>…${esc(k.key_hint)}</code></td>
         <td>${k.enabled ? '<span class="pill ok">enabled</span>' : '<span class="pill err">disabled</span>'}</td>
@@ -238,59 +427,138 @@ async function refresh() {
         <td class="num">${usd(r.cost_usd)}</td>
       </tr>`;
     });
+
+  table($("#audit"),
+    [{label:"Time"},{label:"Action"},{label:"Target"},{label:"Detail"},{label:"From"},{label:"Result"}],
+    audit,
+    (e) => `<tr>
+      <td>${new Date(e.created_at).toLocaleString()}</td>
+      <td>${esc(e.action)}</td>
+      <td>${esc(e.target || "—")}</td>
+      <td>${esc(e.detail || "—")}</td>
+      <td>${esc(e.client_ip || "—")}</td>
+      <td class="${e.ok ? "ok" : "err"}">${e.ok ? "ok" : "failed"}</td>
+    </tr>`);
 }
+
+// ---------------------------------------------------------------- actions
 
 function formPayload(form) {
   const payload = {};
   for (const [key, raw] of new FormData(form)) {
     if (raw === "") continue;
-    const el = form.elements[key];
-    payload[key] = el.type === "number" ? Number(raw) : raw;
+    payload[key] = form.elements[key].type === "number" ? Number(raw) : raw;
   }
   return payload;
 }
 
 $("#account-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  try {
+  await guard(async () => {
     await api("/api/accounts", { method: "POST", body: JSON.stringify(formPayload(event.target)) });
     event.target.reset();
     await refresh();
-  } catch (err) { toast(err.message, true); }
+  });
 });
 
 $("#key-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  try {
+  await guard(async () => {
     const created = await api("/api/keys", { method: "POST", body: JSON.stringify(formPayload(event.target)) });
     event.target.reset();
-    toast(`Key created — copy it now, it is not shown again:  ${created.api_key}`);
+    toast(`Key created — copy it now, it is not shown again: <code>${esc(created.api_key)}</code>`);
     await refresh();
-  } catch (err) { toast(err.message, true); }
+  });
+});
+
+async function guard(fn) {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof AuthRequired) {
+      showGate(await api("/api/auth/status"));
+    } else {
+      toast(esc(err.message), true);
+    }
+  }
+}
+
+document.addEventListener("change", async (event) => {
+  const key = event.target.dataset.setting;
+  if (!key) return;
+  const value = event.target.type === "checkbox" ? event.target.checked : Number(event.target.value);
+  await guard(async () => {
+    await api("/api/settings", { method: "PATCH", body: JSON.stringify({ [key]: value }) });
+    await refresh();
+  });
 });
 
 document.addEventListener("click", async (event) => {
-  const { toggle, delete: del, deleteKey } = event.target.dataset;
-  try {
-    if (toggle) {
-      await api(`/api/accounts/${toggle}`, {
+  const d = event.target.dataset;
+  const id = event.target.id;
+
+  await guard(async () => {
+    if (d.toggle) {
+      await api(`/api/accounts/${d.toggle}`, {
         method: "PATCH",
-        body: JSON.stringify({ enabled: event.target.dataset.enabled === "true" }),
+        body: JSON.stringify({ enabled: d.enabled === "true" }),
       });
-    } else if (del) {
+    } else if (d.delete) {
       if (!confirm("Delete this account? Its request history is kept.")) return;
-      await api(`/api/accounts/${del}`, { method: "DELETE" });
-    } else if (deleteKey) {
+      await api(`/api/accounts/${d.delete}`, { method: "DELETE" });
+    } else if (d.deleteKey) {
       if (!confirm("Delete this API key? Clients using it will start failing.")) return;
-      await api(`/api/keys/${deleteKey}`, { method: "DELETE" });
-    } else return;
+      await api(`/api/keys/${d.deleteKey}`, { method: "DELETE" });
+    } else if (id === "settings-reset") {
+      await api("/api/settings/reset", { method: "POST" });
+    } else if (id === "change-password") {
+      const current = prompt("Current password:");
+      if (current === null) return;
+      const next = prompt("New password (min 8 characters):");
+      if (!next) return;
+      await api("/api/auth/password", {
+        method: "POST",
+        body: JSON.stringify({ password: next, current_password: current }),
+      });
+      toast("Password changed. Other sessions were signed out.");
+    } else if (id === "enroll-totp") {
+      const enrollment = await api("/api/auth/totp/enroll", { method: "POST" });
+      $("#totp-setup").innerHTML = `
+        <div class="toast">
+          Add this secret to your authenticator, then confirm a code to switch TOTP on.<br>
+          <code>${esc(enrollment.secret)}</code>
+          <div style="margin-top:10px; display:flex; gap:8px;">
+            <input id="totp-code" placeholder="6-digit code" inputmode="numeric" style="width:140px">
+            <button id="confirm-totp">Confirm</button>
+          </div>
+        </div>`;
+      return;
+    } else if (id === "confirm-totp") {
+      await api("/api/auth/totp/confirm", {
+        method: "POST",
+        body: JSON.stringify({ code: $("#totp-code").value.trim() }),
+      });
+      $("#totp-setup").innerHTML = "";
+      toast("TOTP enabled.");
+    } else if (id === "disable-totp") {
+      if (!confirm("Disable TOTP? Sign-in will need only the password.")) return;
+      await api("/api/auth/totp", { method: "DELETE" });
+    } else if (id === "revoke-sessions") {
+      if (!confirm("Sign out every dashboard session, including this one?")) return;
+      await api("/api/auth/sessions/revoke-all", { method: "POST" });
+      location.reload();
+      return;
+    } else {
+      return;
+    }
     await refresh();
-  } catch (err) { toast(err.message, true); }
+  });
 });
 
-$("#refresh").addEventListener("click", refresh);
-$("#window").addEventListener("change", refresh);
-refresh().catch((err) => toast(err.message, true));
+$("#refresh").addEventListener("click", () => guard(refresh));
+$("#window").addEventListener("change", () => guard(refresh));
+
+guard(refresh);
 setInterval(() => refresh().catch(() => {}), 15000);
 </script>
 </body>

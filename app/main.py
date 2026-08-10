@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 
@@ -13,6 +13,12 @@ from app.core.config import get_settings
 from app.db.session import dispose_db, init_db, session_scope
 from app.modules.accounts.api import router as accounts_router
 from app.modules.api_keys.api import router as api_keys_router
+from app.modules.audit import service as audit_service
+from app.modules.audit.api import router as audit_router
+from app.modules.auth import dependencies as auth_dependencies
+from app.modules.auth import service as auth_service
+from app.modules.auth.api import router as auth_router
+from app.modules.auth.dependencies import require_management_auth
 from app.modules.dashboard.api import router as dashboard_router
 from app.modules.proxy.api import router as proxy_router
 from app.modules.settings.api import router as settings_router
@@ -35,6 +41,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pruned = await prune_request_logs(session)
         if pruned:
             logger.info("pruned %d request log rows past retention", pruned)
+        await auth_service.prune_expired_sessions(session)
+        await audit_service.prune(session)
+        auth_configured = await auth_service.is_configured(session)
+
+    if settings.dashboard_auth_enabled and not auth_configured:
+        logger.warning(
+            "No dashboard password is set. The management plane is reachable from "
+            "loopback only. To set one from another host, pass this one-time token as "
+            "the %s header (it changes on every restart):\n\n    %s\n",
+            auth_dependencies.BOOTSTRAP_HEADER,
+            auth_service.bootstrap_token(),
+        )
+    elif not settings.dashboard_auth_enabled:
+        logger.warning(
+            "CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false — the management plane is "
+            "unauthenticated. Only do this behind a proxy that authenticates for it."
+        )
 
     timeout = httpx.Timeout(
         settings.upstream_timeout_seconds,
@@ -68,10 +91,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    app.include_router(accounts_router)
-    app.include_router(api_keys_router)
-    app.include_router(usage_router)
-    app.include_router(settings_router)
+    # /api/auth is intentionally unguarded — it is how you get in.
+    app.include_router(auth_router)
+
+    # Everything else on the management plane requires an authenticated operator.
+    guarded = [accounts_router, api_keys_router, usage_router, settings_router, audit_router]
+    for router in guarded:
+        app.include_router(router, dependencies=[Depends(require_management_auth)])
     if settings.dashboard_enabled:
         app.include_router(dashboard_router)
     # Registered last: its catch-all /v1/{path} must not shadow the management API.

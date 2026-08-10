@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies import SessionDep
+from app.modules.audit import service as audit
+from app.modules.auth.dependencies import client_ip
 from app.modules.proxy.load_balancer import STRATEGIES
 from app.modules.settings import service
 from app.modules.settings.service import RuntimeSettings
@@ -46,7 +48,7 @@ async def read_settings(session: SessionDep) -> SettingsEnvelope:
 
 
 @router.patch("", response_model=SettingsEnvelope)
-async def patch_settings(payload: SettingsPatch, session: SessionDep) -> SettingsEnvelope:
+async def patch_settings(payload: SettingsPatch, request: Request, session: SessionDep) -> SettingsEnvelope:
     changes = payload.changes()
     if not changes:
         raise HTTPException(400, "no settings supplied")
@@ -54,12 +56,19 @@ async def patch_settings(payload: SettingsPatch, session: SessionDep) -> Setting
         settings = await service.update(session, changes)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    await audit.record(
+        session,
+        action="settings.updated",
+        detail="; ".join(f"{k}={v}" for k, v in sorted(changes.items())),
+        client_ip=client_ip(request),
+    )
     return SettingsEnvelope(settings=settings, available_strategies=list(STRATEGIES))
 
 
 @router.post("/reset", response_model=SettingsEnvelope)
-async def reset_settings(session: SessionDep) -> SettingsEnvelope:
+async def reset_settings(request: Request, session: SessionDep) -> SettingsEnvelope:
     """Discard every override and fall back to the environment defaults."""
+    await audit.record(session, action="settings.reset", client_ip=client_ip(request))
     return SettingsEnvelope(
         settings=await service.reset(session),
         available_strategies=list(STRATEGIES),

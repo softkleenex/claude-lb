@@ -55,11 +55,20 @@ def decrypt(ciphertext: str) -> str:
         ) from exc
 
 
-def mask_secret(value: str, *, keep: int = 6) -> str:
-    """Render a credential for display: ``sk-ant-…Ab12``."""
-    if len(value) <= keep + 4:
-        return "…" + value[-keep:]
-    return f"{value[:10]}…{value[-keep:]}"
+def mask_secret(value: str, *, keep: int = 6, prefix: int = 10) -> str:
+    """Render a credential for display: ``sk-ant-api…Ab12Cd``.
+
+    Never reveals more than half the string, so a short or unexpected credential
+    cannot be reconstructed from the hint stored alongside it.
+    """
+    if not value:
+        return ""
+    budget = max(0, len(value) // 2)
+    keep = min(keep, budget)
+    prefix = min(prefix, budget - keep)
+    if prefix <= 0:
+        return "…" + value[-keep:] if keep else "…"
+    return f"{value[:prefix]}…{value[-keep:]}"
 
 
 def generate_local_api_key() -> str:

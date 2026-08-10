@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     """When false, proxy routes accept unauthenticated requests (local dev only)."""
 
     dashboard_enabled: bool = True
+    dashboard_auth_enabled: bool = True
+    """Set false only when a trusted reverse proxy already authenticates the operator."""
 
     secret_key: str | None = None
     """Fernet key for encrypting upstream credentials. Generated on first run if unset."""

@@ -151,3 +151,48 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value_json: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class DashboardCredential(Base):
+    """Singleton row holding the dashboard operator's password and TOTP secret."""
+
+    __tablename__ = "dashboard_credentials"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="singleton")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    password_salt: Mapped[str] = mapped_column(String(64))
+
+    totp_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    """Set only after a code is confirmed, so a half-finished setup can't lock you out."""
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class DashboardSession(Base):
+    """A logged-in dashboard browser session. Stored so it can be revoked."""
+
+    __tablename__ = "dashboard_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    client: Mapped[str] = mapped_column(String(255), default="")
+
+
+class AuditEvent(Base):
+    """Append-only record of management-plane changes."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str] = mapped_column(String(128), default="")
+    detail: Mapped[str] = mapped_column(String(512), default="")
+    actor: Mapped[str] = mapped_column(String(64), default="dashboard")
+    client_ip: Mapped[str] = mapped_column(String(64), default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
