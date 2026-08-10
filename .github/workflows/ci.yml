@@ -104,18 +104,10 @@ jobs:
           after=$(curl -s -o /dev/null -w '%{http_code}' localhost:2456/api/accounts)
           if [ "$after" != "401" ]; then
             echo "::error::management plane still open after setting a password (got $after)"
-            echo "--- auth status ---";  curl -s localhost:2456/api/auth/status; echo
-            echo "--- via 127.0.0.1 ---"
-            curl -s -o /dev/null -w 'accounts=%{http_code}\n' http://127.0.0.1:2456/api/accounts
-            curl -s http://127.0.0.1:2456/api/auth/status; echo
+            echo "--- auth status (localhost) ---"; curl -s localhost:2456/api/auth/status; echo
+            echo "--- auth status (127.0.0.1) ---"; curl -s http://127.0.0.1:2456/api/auth/status; echo
             echo "--- audit ---"; curl -s 'localhost:2456/api/audit?limit=5'; echo
-            echo "--- dashboard_credentials rows ---"
-            python - <<'PYEOF'
-import sqlite3
-db = sqlite3.connect("/tmp/claude-lb-smoke/claude-lb.db")
-print(db.execute("select id, length(password_hash), totp_enabled from dashboard_credentials").fetchall())
-print("sessions:", db.execute("select count(*) from dashboard_sessions").fetchall())
-PYEOF
+            python -c "import sqlite3; d=sqlite3.connect('/tmp/claude-lb-smoke/claude-lb.db'); print('creds:', d.execute('select id, length(password_hash) from dashboard_credentials').fetchall()); print('sessions:', d.execute('select count(*) from dashboard_sessions').fetchone())"
             exit 1
           fi
           # ...but proxy auth and health probes keep working.
