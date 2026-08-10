@@ -326,28 +326,87 @@ class TestScheduler:
             await scheduler.stop()
 
 
-class TestAccountsSupportingHelper:
-    async def test_returns_none_when_the_catalog_is_empty(self):
+class TestUnsupportedAccounts:
+    async def test_an_empty_catalog_rules_nothing_out(self):
         async with session_scope() as session:
-            assert await service.accounts_supporting(session, "claude-opus-5") is None
+            assert await service.unsupported_accounts(session, "claude-opus-5") == set()
 
-    async def test_returns_none_for_a_model_no_account_lists(self):
-        account_id = await add_account("primary")
+    async def test_an_account_that_never_synced_stays_in_rotation(self):
+        """The bug this guards: once one account syncs, unsynced peers were silently
+        excluded from every request, because the catalog looked 'answerable'."""
+        synced = await add_account("synced")
+        never = await add_account("never-synced")
         async with session_scope() as session:
-            session.add(ModelCatalogEntry(account_id=account_id, model_id="claude-opus-5"))
-        async with session_scope() as session:
-            assert await service.accounts_supporting(session, "claude-unknown") is None
+            session.add(ModelCatalogEntry(account_id=synced, model_id="claude-opus-5"))
 
-    async def test_returns_the_supporting_accounts(self):
-        a = await add_account("a")
-        b = await add_account("b")
         async with session_scope() as session:
-            session.add(ModelCatalogEntry(account_id=a, model_id="claude-opus-5"))
-            session.add(ModelCatalogEntry(account_id=b, model_id="claude-haiku-4-5"))
+            excluded = await service.unsupported_accounts(session, "claude-opus-5")
+        assert never not in excluded
+        assert excluded == set()
+
+    async def test_a_synced_account_missing_the_model_is_excluded(self):
+        haiku_only = await add_account("haiku-only")
+        opus_only = await add_account("opus-only")
         async with session_scope() as session:
-            assert await service.accounts_supporting(session, "claude-opus-5") == {a}
+            session.add(ModelCatalogEntry(account_id=haiku_only, model_id="claude-haiku-4-5"))
+            session.add(ModelCatalogEntry(account_id=opus_only, model_id="claude-opus-5"))
+
+        async with session_scope() as session:
+            excluded = await service.unsupported_accounts(session, "claude-opus-5")
+        assert excluded == {haiku_only}
+
+    async def test_a_model_nobody_lists_excludes_every_synced_account(self):
+        synced = await add_account("synced")
+        async with session_scope() as session:
+            session.add(ModelCatalogEntry(account_id=synced, model_id="claude-opus-5"))
+        async with session_scope() as session:
+            excluded = await service.unsupported_accounts(session, "claude-unknown")
+        # The proxy turns this into a fail-open fallback rather than a 503.
+        assert excluded == {synced}
 
     @pytest.mark.parametrize("model", ["", None])
     async def test_no_model_means_no_constraint(self, model):
         async with session_scope() as session:
-            assert await service.accounts_supporting(session, model or "") is None
+            assert await service.unsupported_accounts(session, model or "") == set()
+
+
+class TestProbeUsesTheAccountsAuthScheme:
+    async def test_a_bearer_account_is_probed_with_authorization(self, proxy_calls):
+        """Hardcoding x-api-key here 401s every OAuth account on every probe."""
+        from tests.test_credentials import add_oauth_account
+
+        await add_oauth_account("bearer-acct", access_token="tok-live", expires_in=3600, enabled=False)
+
+        async for client in make_client(models_handler(proxy_calls)):
+            results = (await client.post("/api/health/probe")).json()
+
+        assert results[0]["ok"] is True
+        probe = proxy_calls[0]
+        assert probe.headers["authorization"] == "Bearer tok-live"
+        assert "x-api-key" not in probe.headers
+
+    async def test_extra_headers_are_sent_on_probes_too(self, proxy_calls):
+        from tests.test_credentials import add_oauth_account
+
+        await add_oauth_account(
+            "bearer-acct",
+            access_token="tok-live",
+            expires_in=3600,
+            enabled=False,
+            extra_headers={"anthropic-beta": "some-flag"},
+        )
+
+        async for client in make_client(models_handler(proxy_calls)):
+            await client.post("/api/health/probe")
+
+        assert proxy_calls[0].headers["anthropic-beta"] == "some-flag"
+
+    async def test_a_bearer_account_can_sync_its_catalog(self, proxy_calls):
+        from tests.test_credentials import add_oauth_account
+
+        await add_oauth_account("bearer-acct", access_token="tok-live", expires_in=3600)
+
+        async for client in make_client(models_handler(proxy_calls)):
+            counts = (await client.post("/api/health/sync-models")).json()
+
+        assert counts == {"bearer-acct": 2}

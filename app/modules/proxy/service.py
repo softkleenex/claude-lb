@@ -13,10 +13,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.crypto import decrypt
 from app.core.pricing import estimate_cost_usd
 from app.db.models import Account, ApiKey, RequestLog
 from app.db.session import session_scope
+from app.modules.accounts import credentials
 from app.modules.health import service as health_service
 from app.modules.proxy import load_balancer as lb
 from app.modules.proxy import sticky
@@ -83,23 +83,28 @@ class ProxyService:
     async def _filter_by_model(
         session: AsyncSession, accounts: list[Account], model: str | None
     ) -> list[Account]:
-        """Drop accounts whose org cannot serve `model`, per the synced catalog.
+        """Drop accounts whose org is *known* not to serve `model`.
 
-        Falls back to the full list whenever the catalog cannot answer — an unsynced
-        or partially-synced catalog must never blackhole traffic.
+        Fail-open: an account that has never synced stays in the pool, and if the
+        catalog would rule out every account the request is attempted anyway.
         """
-        supported = await health_service.accounts_supporting(session, model or "")
-        if supported is None:
+        excluded = await health_service.unsupported_accounts(session, model or "")
+        if not excluded:
             return accounts
-        filtered = [a for a in accounts if a.id in supported]
+        filtered = [a for a in accounts if a.id not in excluded]
+        # If the catalog rules out everyone, trust the request over the catalog.
         return filtered or accounts
 
     # ---- request shaping -------------------------------------------------
 
     @staticmethod
-    def _build_upstream_headers(client_headers: dict[str, str], credential: str) -> dict[str, str]:
+    def _build_upstream_headers(client_headers: dict[str, str]) -> dict[str, str]:
+        """Relay the client's headers minus the ones we must not forward.
+
+        Auth is applied afterwards by `ResolvedCredential.apply`, which knows whether
+        this account wants `x-api-key` or a bearer token.
+        """
         headers = {k: v for k, v in client_headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS}
-        headers["x-api-key"] = credential
         headers.setdefault("anthropic-version", "2023-06-01")
         headers.setdefault("content-type", "application/json")
         return headers
@@ -153,6 +158,7 @@ class ProxyService:
             else None
         )
         tried: list[str] = []
+        reauthed: dict[str, bool] = {}
         last_error: str = "no upstream attempt was made"
         last_status = 503
         last_body: bytes | None = None
@@ -181,12 +187,24 @@ class ProxyService:
                         break
                     raise UpstreamExhausted(str(exc), status_code=503) from exc
                 account_id = account.id
-                credential = decrypt(account.encrypted_credential)
+                account_name = account.name
+                can_reauth = credentials.can_retry_after_auth_failure(account)
                 base_url = (account.base_url or env.upstream_base_url).rstrip("/")
+                session.expunge(account)
 
             tried.append(account_id)
             url = f"{base_url}{path}" + (f"?{query}" if query else "")
-            upstream_headers = self._build_upstream_headers(headers, credential)
+
+            try:
+                credential = await credentials.resolve(self._client, account)
+            except credentials.CredentialError as exc:
+                last_error = str(exc)
+                last_status = 502
+                await self._record_attempt_failure(account_id, status_code=None, reason=last_error)
+                logger.warning("could not resolve credential for account=%s: %s", account_name, exc)
+                continue
+
+            upstream_headers = credential.apply(self._build_upstream_headers(headers))
 
             request = self._client.build_request(method, url, headers=upstream_headers, content=body or None)
             try:
@@ -225,10 +243,29 @@ class ProxyService:
                 last_status = response.status_code
                 last_body = error_body
                 last_error = f"upstream rejected credentials ({response.status_code})"
+
+                # An OAuth access token can be rejected simply because it expired
+                # earlier than advertised. Force one refresh and replay before
+                # concluding the account is dead.
+                if can_reauth and not reauthed.get(account_id):
+                    reauthed[account_id] = True
+                    tried.remove(account_id)
+                    try:
+                        await credentials.refresh(
+                            self._client, account_id, force=True, stale_token=credential.token
+                        )
+                        logger.info(
+                            "re-authenticated account=%s after %s", account_name, response.status_code
+                        )
+                        continue
+                    except credentials.CredentialError as exc:
+                        last_error = f"re-authentication failed: {exc}"
+                        tried.append(account_id)
+
                 await self._record_attempt_failure(
                     account_id, status_code=response.status_code, reason=last_error
                 )
-                logger.warning("disabling account=%s: %s", account_id, last_error)
+                logger.warning("disabling account=%s: %s", account_name, last_error)
                 continue
 
             # Success, or a non-retryable client error (4xx) that belongs to the caller.

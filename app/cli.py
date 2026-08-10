@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import typer
@@ -12,6 +14,7 @@ from app.core.config import get_settings
 from app.core.crypto import encrypt, mask_secret
 from app.db.models import Account
 from app.db.session import dispose_db, init_db, session_scope
+from app.modules.accounts import credentials
 from app.modules.api_keys.service import create_api_key
 from app.modules.proxy.load_balancer import STRATEGIES, headroom, is_available
 
@@ -106,6 +109,84 @@ def account_add(
     _run(_add())
 
 
+@account_app.command("add-oauth")
+def account_add_oauth(
+    name: Annotated[str, typer.Argument(help="Label for this account.")],
+    access_token: Annotated[str, typer.Option(prompt=True, hide_input=True, help="Current access token.")],
+    token_endpoint: Annotated[str | None, typer.Option(help="Where to POST the refresh_token grant.")] = None,
+    refresh_token: Annotated[str | None, typer.Option(help="Refresh token, if you have one.")] = None,
+    client_id: Annotated[str | None, typer.Option(help="OAuth client id.")] = None,
+    client_secret: Annotated[str | None, typer.Option(help="OAuth client secret, if required.")] = None,
+    scope: Annotated[str | None, typer.Option(help="Scope to request on refresh.")] = None,
+    expires_in: Annotated[int | None, typer.Option(help="Lifetime of the access token, in seconds.")] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option(help="Extra header as key=value. Repeatable."),
+    ] = None,
+    auth_scheme: Annotated[str, typer.Option(help="bearer or x-api-key.")] = "bearer",
+    base_url: Annotated[str | None, typer.Option(help="Override the upstream base URL.")] = None,
+    weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
+    priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
+) -> None:
+    """Add an account that authenticates with a bearer token you supply.
+
+    claude-lb hardcodes no OAuth client constants. You provide the token endpoint,
+    client id, and refresh token; it stores them encrypted and runs the standard
+    refresh_token grant before the access token expires.
+    """
+    if refresh_token and not token_endpoint:
+        console.print("[red]--token-endpoint is required when you supply a refresh token.[/red]")
+        raise typer.Exit(1)
+    if auth_scheme not in credentials.AUTH_SCHEMES:
+        console.print(f"[red]--auth-scheme must be one of {', '.join(credentials.AUTH_SCHEMES)}.[/red]")
+        raise typer.Exit(1)
+
+    extra: dict[str, str] = {}
+    for item in header or []:
+        if "=" not in item:
+            console.print(f"[red]--header must be key=value, got {item!r}.[/red]")
+            raise typer.Exit(1)
+        key, value = item.split("=", 1)
+        extra[key.strip()] = value.strip()
+
+    async def _add() -> None:
+        async with session_scope() as session:
+            existing = await session.execute(select(Account).where(Account.name == name))
+            if existing.scalar_one_or_none() is not None:
+                console.print(f"[red]An account named {name!r} already exists.[/red]")
+                raise typer.Exit(1)
+            session.add(
+                Account(
+                    name=name,
+                    provider=credentials.PROVIDER_OAUTH,
+                    encrypted_credential=encrypt(access_token),
+                    credential_hint=mask_secret(access_token),
+                    auth_scheme=auth_scheme,
+                    extra_headers_json=json.dumps(extra),
+                    base_url=base_url,
+                    weight=weight,
+                    priority=priority,
+                    oauth_refresh_token_encrypted=encrypt(refresh_token) if refresh_token else None,
+                    oauth_token_endpoint=token_endpoint,
+                    oauth_client_id=client_id,
+                    oauth_client_secret_encrypted=encrypt(client_secret) if client_secret else None,
+                    oauth_scope=scope,
+                    credential_lifetime_seconds=expires_in,
+                    credential_expires_at=(
+                        datetime.now(UTC) + timedelta(seconds=expires_in) if expires_in else None
+                    ),
+                )
+            )
+        console.print(f"[green]Added OAuth account[/green] {name} ({mask_secret(access_token)})")
+        if not refresh_token:
+            console.print(
+                "[yellow]No refresh token supplied — this account stops working when the "
+                "access token expires.[/yellow]"
+            )
+
+    _run(_add())
+
+
 @account_app.command("list")
 def account_list() -> None:
     """List upstream accounts."""
@@ -120,7 +201,7 @@ def account_list() -> None:
             return
 
         table = Table(title="Accounts")
-        for column in ("Name", "Key", "Status", "Headroom", "Requests", "Cost"):
+        for column in ("Name", "Provider", "Key", "Status", "Headroom", "Requests", "Cost"):
             table.add_column(column, justify="right" if column in ("Requests", "Cost") else "left")
         for account in accounts:
             if is_available(account):
@@ -131,6 +212,7 @@ def account_list() -> None:
                 status = "[red]disabled[/red]"
             table.add_row(
                 account.name,
+                "oauth" if account.provider == credentials.PROVIDER_OAUTH else "api key",
                 account.credential_hint,
                 status,
                 f"{headroom(account) * 100:.0f}%",

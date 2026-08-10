@@ -6,18 +6,20 @@ all behind one Anthropic-compatible endpoint.
 
 Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anthropic API.
 
-> **Scope note.** claude-lb pools **API keys** (`sk-ant-…`) issued from the Anthropic
-> Console. It deliberately does **not** pool Claude Pro/Max *subscription* accounts:
-> multiplexing consumer subscriptions to get past per-account limits runs against
-> Anthropic's consumer terms, and it would require reverse-engineering an undocumented
-> OAuth client. The `provider` column on `accounts` leaves room for other credential
-> types, but nothing in this repo implements subscription pooling.
+> **Credentials are yours to supply.** claude-lb ships no OAuth client constants for
+> any provider — no client ids, no authorize/token endpoints, no impersonated
+> first-party identity. An `anthropic_api_key` account takes a Console key; an `oauth`
+> account takes an access token plus, optionally, the refresh material *you* provide.
+> Whatever you point it at, staying inside that provider's terms is on you: pooling
+> consumer subscriptions to exceed per-account limits is against Anthropic's consumer
+> terms and is a documented way to get accounts suspended.
 
 ## Features
 
 | | |
 |---|---|
 | **Key pooling** | Route across many Anthropic keys — separate workspaces, orgs, or billing buckets |
+| **Bring-your-own credentials** | `x-api-key` or bearer, with RFC 6749 refresh, token rotation, and 401 self-healing |
 | **Rate-limit aware** | Reads `anthropic-ratelimit-*` response headers and steers traffic toward headroom |
 | **Prompt-cache affinity** | Pins a conversation to one account so its cache stays warm (0.1x reads, not 1.25x writes) |
 | **Automatic failover** | 429/5xx/transport errors retry on the next account; 401/403 disables the key |
@@ -118,6 +120,36 @@ Change live in the dashboard, or set the default with `CLAUDE_LB_ROUTING_STRATEG
 Headroom comes from the `anthropic-ratelimit-*` headers on the previous response. An
 account never called returns full headroom, so a fresh pool spreads out rather than
 piling onto whichever key sorts first.
+
+### Credential types
+
+`claude-lb account add` takes a Console API key and presents it as `x-api-key`. For any
+upstream that authenticates with a bearer token, use `add-oauth` and supply the pieces
+yourself:
+
+```bash
+claude-lb account add-oauth my-account \
+  --access-token   "$ACCESS_TOKEN" \
+  --refresh-token  "$REFRESH_TOKEN" \
+  --token-endpoint "https://issuer.example.com/oauth/token" \
+  --client-id      "$CLIENT_ID" \
+  --expires-in     3600 \
+  --base-url       "https://gateway.example.com" \
+  --header         "anthropic-beta=some-flag"
+```
+
+claude-lb then handles the operational half:
+
+| | |
+|---|---|
+| **Early refresh** | Runs the `refresh_token` grant before expiry — capped at half the token's own lifetime, so a short-lived token is not re-granted on every request |
+| **Rotation** | Persists a rotated `refresh_token` from the grant response; losing it would brick the account |
+| **Single-flight** | One grant per account under concurrency, not one per in-flight request |
+| **401 self-healing** | A token rejected before its advertised expiry gets exactly one forced refresh and replay, then the account is written off |
+| **Breaker** | Three consecutive refresh failures disable the account with the reason recorded |
+
+Tokens, refresh tokens, and client secrets are all encrypted at rest, and API-key and
+bearer accounts route side by side in one pool.
 
 ### Prompt-cache affinity
 
@@ -224,7 +256,8 @@ Contains `claude-lb.db` (SQLite) and `secret.key`. Back up both.
 ```
 claude-lb serve                    Start the proxy and dashboard
 claude-lb config                   Show the resolved configuration
-claude-lb account add <name>       Add an upstream Anthropic key
+claude-lb account add <name>       Add an upstream Anthropic API key
+claude-lb account add-oauth <name> Add a bearer/OAuth account you supply credentials for
 claude-lb account list             Show accounts, health, and spend
 claude-lb account remove <name>    Remove an account (history is kept)
 claude-lb key create <name>        Issue a client key

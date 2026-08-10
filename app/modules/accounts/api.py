@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
 from app.core.crypto import encrypt, mask_secret
@@ -17,12 +19,51 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 
 class AccountCreate(BaseModel):
+    """Add an upstream account.
+
+    Two shapes. A Console API key needs only `api_key`. An OAuth-style upstream sets
+    `provider="oauth"` and supplies its own access token plus, optionally, the refresh
+    material — claude-lb hardcodes no client constants for any provider.
+    """
+
     name: str = Field(min_length=1, max_length=128)
-    api_key: str = Field(min_length=8, description="Anthropic API key (sk-ant-...)")
+    api_key: str = Field(min_length=8, description="API key or access token to present upstream.")
+    provider: Literal["anthropic_api_key", "oauth"] = "anthropic_api_key"
+    auth_scheme: Literal["x-api-key", "bearer"] | None = Field(
+        default=None, description="Defaults to x-api-key for API keys, bearer for OAuth."
+    )
+    extra_headers: dict[str, str] = Field(
+        default_factory=dict, description="Extra headers this upstream requires."
+    )
     base_url: str | None = None
+
+    oauth_refresh_token: str | None = None
+    oauth_token_endpoint: str | None = Field(
+        default=None, description="Where to POST the refresh_token grant."
+    )
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+    oauth_scope: str | None = None
+    expires_in_seconds: int | None = Field(
+        default=None, ge=1, description="Lifetime of the supplied access token."
+    )
+
     weight: float = 1.0
     priority: int = 0
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def _check_oauth_fields(self) -> AccountCreate:
+        if self.provider == "oauth" and self.oauth_refresh_token and not self.oauth_token_endpoint:
+            raise ValueError("oauth_token_endpoint is required when a refresh token is supplied")
+        if self.provider != "oauth" and self.oauth_refresh_token:
+            raise ValueError("oauth_refresh_token requires provider='oauth'")
+        return self
+
+    def resolved_auth_scheme(self) -> str:
+        if self.auth_scheme:
+            return self.auth_scheme
+        return "bearer" if self.provider == "oauth" else "x-api-key"
 
 
 class AccountUpdate(BaseModel):
@@ -31,6 +72,11 @@ class AccountUpdate(BaseModel):
     weight: float | None = None
     priority: int | None = None
     enabled: bool | None = None
+    auth_scheme: Literal["x-api-key", "bearer"] | None = None
+    extra_headers: dict[str, str] | None = None
+    oauth_refresh_token: str | None = None
+    oauth_token_endpoint: str | None = None
+    expires_in_seconds: int | None = Field(default=None, ge=1)
 
 
 class AccountOut(BaseModel):
@@ -60,6 +106,10 @@ class AccountOut(BaseModel):
     last_probe_ok: bool | None
     last_probe_detail: str
     models_synced_at: datetime | None
+    auth_scheme: str
+    credential_expires_at: datetime | None
+    last_refresh_at: datetime | None
+    refresh_failures: int
     created_at: datetime
 
     @classmethod
@@ -89,12 +139,30 @@ async def create_account(payload: AccountCreate, request: Request, session: Sess
 
     account = Account(
         name=payload.name,
+        provider=payload.provider,
         encrypted_credential=encrypt(payload.api_key),
         credential_hint=mask_secret(payload.api_key),
+        auth_scheme=payload.resolved_auth_scheme(),
+        extra_headers_json=json.dumps(payload.extra_headers),
         base_url=payload.base_url,
         weight=payload.weight,
         priority=payload.priority,
         enabled=payload.enabled,
+        oauth_refresh_token_encrypted=(
+            encrypt(payload.oauth_refresh_token) if payload.oauth_refresh_token else None
+        ),
+        oauth_token_endpoint=payload.oauth_token_endpoint,
+        oauth_client_id=payload.oauth_client_id,
+        oauth_client_secret_encrypted=(
+            encrypt(payload.oauth_client_secret) if payload.oauth_client_secret else None
+        ),
+        oauth_scope=payload.oauth_scope,
+        credential_lifetime_seconds=payload.expires_in_seconds,
+        credential_expires_at=(
+            datetime.now(UTC) + timedelta(seconds=payload.expires_in_seconds)
+            if payload.expires_in_seconds
+            else None
+        ),
     )
     session.add(account)
     await session.flush()
@@ -120,7 +188,19 @@ async def update_account(
     if payload.api_key is not None:
         account.encrypted_credential = encrypt(payload.api_key)
         account.credential_hint = mask_secret(payload.api_key)
-    for field in ("base_url", "weight", "priority", "enabled"):
+        # A replaced token invalidates the recorded expiry unless a new one is given.
+        account.credential_lifetime_seconds = payload.expires_in_seconds
+        account.credential_expires_at = (
+            datetime.now(UTC) + timedelta(seconds=payload.expires_in_seconds)
+            if payload.expires_in_seconds
+            else None
+        )
+    if payload.oauth_refresh_token is not None:
+        account.oauth_refresh_token_encrypted = encrypt(payload.oauth_refresh_token)
+        account.refresh_failures = 0
+    if payload.extra_headers is not None:
+        account.extra_headers_json = json.dumps(payload.extra_headers)
+    for field in ("base_url", "weight", "priority", "enabled", "auth_scheme", "oauth_token_endpoint"):
         value = getattr(payload, field)
         if value is not None:
             setattr(account, field, value)

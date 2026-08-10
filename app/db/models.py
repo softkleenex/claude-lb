@@ -42,6 +42,26 @@ class Account(Base):
     credential_hint: Mapped[str] = mapped_column(String(64), default="")
 
     base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # --- how the credential is presented upstream ---
+    auth_scheme: Mapped[str] = mapped_column(String(16), default="x-api-key")
+    """``x-api-key`` for Console keys, ``bearer`` for OAuth access tokens."""
+    extra_headers_json: Mapped[str] = mapped_column(Text, default="{}")
+    """Additional request headers this account needs (e.g. an anthropic-beta flag)."""
+
+    # --- OAuth refresh, when provider == "oauth" ---
+    oauth_refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_token_endpoint: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    oauth_client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    oauth_client_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_scope: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    credential_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When the stored access token stops working. Null means it does not expire."""
+    credential_lifetime_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """How long the token was minted for, used to scale the early-refresh window."""
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refresh_failures: Mapped[int] = mapped_column(Integer, default=0)
+
     weight: Mapped[float] = mapped_column(Float, default=1.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
