@@ -83,6 +83,29 @@ jobs:
           grep -q '"authentication_error"' /tmp/body.json
           test "$(python -c 'import json;print("detail" in json.load(open("/tmp/body.json")))')" = "False"
 
+          # Management plane is loopback-open until a password is set.
+          curl -sf localhost:2456/api/settings -o /dev/null
+          curl -sf localhost:2456/api/audit -o /dev/null
+          curl -sf 'localhost:2456/api/usage/trend?days=7' -o /dev/null
+          curl -sf localhost:2456/api/health/models -o /dev/null
+
+          # Prometheus scrape must render without a session.
+          curl -sf localhost:2456/metrics | grep -q '^# TYPE claude_lb_accounts_total gauge$'
+
+          # Runtime settings apply without a restart.
+          curl -sf -X PATCH localhost:2456/api/settings \
+            -H 'content-type: application/json' \
+            -d '{"routing_strategy":"round_robin"}' | grep -q round_robin
+
+          # Setting a password must close the loopback hole.
+          curl -sf -X POST localhost:2456/api/auth/password \
+            -H 'content-type: application/json' \
+            -d '{"password":"ci-smoke-password"}' -o /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:2456/api/accounts)" = "401"
+          # ...but proxy auth and health probes keep working.
+          curl -sf localhost:2456/health -o /dev/null
+          curl -sf localhost:2456/metrics -o /dev/null
+
   docker:
     runs-on: ubuntu-latest
     steps:

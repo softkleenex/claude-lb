@@ -19,11 +19,19 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 |---|---|
 | **Key pooling** | Route across many Anthropic keys — separate workspaces, orgs, or billing buckets |
 | **Rate-limit aware** | Reads `anthropic-ratelimit-*` response headers and steers traffic toward headroom |
+| **Prompt-cache affinity** | Pins a conversation to one account so its cache stays warm (0.1x reads, not 1.25x writes) |
 | **Automatic failover** | 429/5xx/transport errors retry on the next account; 401/403 disables the key |
+| **Self-healing** | Background probes return recovered accounts to rotation without operator action |
+| **Model-aware routing** | Skips accounts whose org cannot serve the requested model |
+| **Live configuration** | Change strategy, stickiness, and probe intervals from the dashboard — no restart |
+| **Dashboard auth** | Password + optional TOTP, with a loopback/bootstrap-token first run |
 | **Scoped client keys** | Issue `clb_…` keys with per-window request, token, and USD budgets |
 | **Usage + cost tracking** | Per request, account, model, and key — including cache-read/write pricing |
+| **Trends that outlive logs** | Daily rollups keep a 28-day chart even with short log retention |
+| **Prometheus metrics** | `/metrics` exposes per-account health, headroom, tokens, and spend |
+| **Audit log** | Append-only record of every management change and sign-in |
 | **Streaming passthrough** | SSE bytes are relayed unmodified; usage is sniffed out of the stream |
-| **Dashboard** | Single-page, no build step, light/dark |
+| **Dashboard** | Single page, no build step, light/dark |
 
 ## Quick start
 
@@ -35,7 +43,12 @@ claude-lb key create my-laptop     # prints a clb_… key once
 claude-lb serve
 ```
 
-Open <http://127.0.0.1:2456> for the dashboard.
+Open <http://127.0.0.1:2456> and set a dashboard password when prompted.
+
+Reaching the dashboard from another machine on the first run? There is no password
+yet, so the management plane is loopback-only — paste the one-time bootstrap token
+printed in the server log into the setup form. It rotates on every restart and stops
+working the moment a password is set.
 
 ### Docker
 
@@ -92,7 +105,7 @@ Every response carries `x-claude-lb-account`, naming the upstream account that s
 
 ## Routing strategies
 
-Set with `CLAUDE_LB_ROUTING_STRATEGY`.
+Change live in the dashboard, or set the default with `CLAUDE_LB_ROUTING_STRATEGY`.
 
 | Strategy | Behavior | Use when |
 |---|---|---|
@@ -106,6 +119,23 @@ Headroom comes from the `anthropic-ratelimit-*` headers on the previous response
 account never called returns full headroom, so a fresh pool spreads out rather than
 piling onto whichever key sorts first.
 
+### Prompt-cache affinity
+
+Anthropic prompt caches are scoped to the credential that created them, so spreading
+one conversation across the pool throws the cache away on every turn — each account
+pays the ~1.25x cache-write premium instead of the 0.1x read. claude-lb keys each
+request on its *cacheable prefix* (`system` + `tools` + the first user turn), which is
+exactly the part Anthropic hashes and exactly the part that stays byte-identical as a
+conversation grows, and pins that key to one account.
+
+No client-side session id is needed: turn 20 of a conversation hashes like turn 1.
+Cold start and extra workers fall back to rendezvous hashing, so the mapping is stable
+without shared state and only ~1/N conversations move when the pool changes.
+
+Affinity is a soft hint. It outranks the routing strategy, but yields to a pinned API
+key, to `single_account`, and to any failure. Turn it off with
+`sticky_sessions_enabled` if you would rather have perfectly even load.
+
 ### Failure handling
 
 | Upstream result | Action |
@@ -116,9 +146,30 @@ piling onto whichever key sorts first.
 | `401` / `403` | Disable the account and record the reason — retrying a revoked key just burns requests |
 | Other `4xx` | Relayed to the caller verbatim, no retry (it's the request's fault, not the key's) |
 
-`CLAUDE_LB_MAX_ATTEMPTS` (default `3`) caps how many accounts one client request may burn.
+`max_attempts` (default `3`) caps how many accounts one client request may burn.
+
+A background probe re-checks disabled and past-cooldown accounts against
+`GET /v1/models` — authenticated, no token cost — and returns them to rotation on
+their own when the credential starts working again. The same call doubles as the
+account's model catalog, which routing uses to skip accounts whose org cannot serve
+the requested model. An unsynced catalog never blackholes traffic: it falls back to
+the whole pool.
 
 ## Configuration
+
+Most routing knobs are **runtime settings**: change them in the dashboard (or via
+`PATCH /api/settings`) and they apply to the next request, no restart. Environment
+variables set the defaults.
+
+| Runtime setting | Default | |
+|---|---|---|
+| `routing_strategy` | `capacity_weighted` | See the table above |
+| `max_attempts` | `3` | Accounts tried per client request |
+| `sticky_sessions_enabled` | `true` | Prompt-cache affinity |
+| `sticky_ttl_seconds` | `900` | How long a conversation stays pinned |
+| `health_probe_enabled` / `_interval_seconds` | `true` / `120` | Auto-recovery probe |
+| `model_sync_enabled` / `_interval_seconds` | `true` / `3600` | Model catalog refresh |
+| `request_log_retention_days` | `30` | Rollups are kept regardless |
 
 Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are read too.
 
@@ -131,6 +182,7 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
 | `CLAUDE_LB_ROUTING_STRATEGY` | `capacity_weighted` | See above |
 | `CLAUDE_LB_MAX_ATTEMPTS` | `3` | Accounts tried per client request |
 | `CLAUDE_LB_REQUIRE_API_KEY` | `true` | Set `false` only for a loopback-only dev instance |
+| `CLAUDE_LB_DASHBOARD_AUTH_ENABLED` | `true` | Set `false` only behind a proxy that authenticates for it |
 | `CLAUDE_LB_UPSTREAM_BASE_URL` | `https://api.anthropic.com` | Per-account override also available |
 | `CLAUDE_LB_SECRET_KEY` | generated | Fernet key for credentials at rest; see below |
 | `CLAUDE_LB_REQUEST_LOG_RETENTION_DAYS` | `30` | Pruned at startup |
@@ -144,10 +196,17 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
   Back up the data directory *and* that file together — moving the database without the
   secret makes every stored credential unrecoverable.
 - **Client keys are stored hashed** (SHA-256). The plaintext is shown once at creation.
-- **The management API and dashboard are unauthenticated.** They are reachable by anyone
-  who can reach the port, and they can add, disable, and delete accounts. Keep the default
-  `127.0.0.1` bind, or put the instance behind a reverse proxy that handles auth before
-  exposing it. Dashboard auth is not implemented in v0.1.
+- **The management plane requires an operator session.** Password (scrypt) plus
+  optional TOTP; sessions are stored server-side so they can be revoked, and rotating
+  the password ends every existing one. A fresh install has no password, so the
+  management plane is reachable from loopback only until you set one — or from
+  elsewhere with the one-time bootstrap token printed at startup.
+- **Proxy routes are separate.** API clients authenticate with `clb_` keys and are
+  unaffected by dashboard sessions. `/health` and `/metrics` stay open so probes and
+  scrapers work without a cookie; `/metrics` exposes account *names* and aggregate
+  counters, never credentials.
+- **The audit log records the fact of a change, never the secret** — names, ids, and
+  masked hints only.
 - Unknown `/v1/...` paths return 404 rather than being blindly relayed, so a typo in a
   client base URL fails loudly instead of leaking a request upstream.
 
@@ -182,7 +241,18 @@ claude-lb key list                 List issued keys
 | `PATCH` / `DELETE` | `/api/keys/{id}` | Enable-disable / remove |
 | `GET` | `/api/usage/summary?window_hours=24` | Totals, by account, by model |
 | `GET` | `/api/usage/requests?limit=100` | Recent request log |
-| `GET` | `/health` | Liveness |
+| `GET` | `/api/usage/trend?days=28` | Daily rollups, zero-filled |
+| `POST` | `/api/usage/rollups/backfill` | Rebuild rollups from surviving logs |
+| `GET` / `PATCH` | `/api/settings` | Read / change runtime configuration |
+| `POST` | `/api/settings/reset` | Discard overrides |
+| `POST` | `/api/health/probe` | Probe unhealthy accounts now |
+| `POST` | `/api/health/sync-models` | Refresh the model catalog now |
+| `GET` | `/api/health/models` | Merged model catalog |
+| `GET` | `/api/audit` | Management audit log |
+| `POST` | `/api/auth/login` · `/logout` · `/password` | Session management |
+| `POST` | `/api/auth/totp/enroll` · `/confirm` | TOTP setup |
+| `GET` | `/health` | Liveness (open) |
+| `GET` | `/metrics` | Prometheus scrape (open) |
 
 OpenAPI docs at `/docs`.
 

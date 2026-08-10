@@ -9,6 +9,7 @@ from sqlalchemy import case, delete, func, select
 from app.core.config import get_settings
 from app.db.models import Account, RequestLog
 from app.dependencies import SessionDep
+from app.modules.usage import rollup
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 
@@ -138,3 +139,35 @@ async def prune_request_logs(session: SessionDep) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=days)
     result = await session.execute(delete(RequestLog).where(RequestLog.created_at < cutoff))
     return result.rowcount or 0
+
+
+class TrendPoint(BaseModel):
+    day: str
+    requests: int
+    errors: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cost_usd: float
+
+
+@router.get("/trend", response_model=list[TrendPoint])
+async def usage_trend(
+    session: SessionDep,
+    days: int = Query(default=28, ge=1, le=365),
+) -> list[TrendPoint]:
+    """Daily totals, oldest first, with quiet days zero-filled.
+
+    Backed by rollups rather than request logs, so the window is not truncated by
+    log retention.
+    """
+    return [TrendPoint(**point) for point in await rollup.trend(session, days=days)]
+
+
+@router.post("/rollups/backfill", response_model=dict[str, int])
+async def backfill_rollups(
+    session: SessionDep,
+    days: int = Query(default=28, ge=1, le=365),
+) -> dict[str, int]:
+    """Rebuild rollups from surviving request logs (for upgrading an old instance)."""
+    return {"rows": await rollup.backfill(session, days=days)}

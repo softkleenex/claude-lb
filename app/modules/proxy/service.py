@@ -17,10 +17,12 @@ from app.core.crypto import decrypt
 from app.core.pricing import estimate_cost_usd
 from app.db.models import Account, ApiKey, RequestLog
 from app.db.session import session_scope
+from app.modules.health import service as health_service
 from app.modules.proxy import load_balancer as lb
 from app.modules.proxy import sticky
 from app.modules.proxy.usage_parser import StreamUsageCollector, Usage, parse_json_usage
 from app.modules.settings import service as settings_service
+from app.modules.usage import rollup
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,21 @@ class ProxyService:
     async def _load_accounts(self, session: AsyncSession) -> list[Account]:
         result = await session.execute(select(Account).order_by(Account.name))
         return list(result.scalars())
+
+    @staticmethod
+    async def _filter_by_model(
+        session: AsyncSession, accounts: list[Account], model: str | None
+    ) -> list[Account]:
+        """Drop accounts whose org cannot serve `model`, per the synced catalog.
+
+        Falls back to the full list whenever the catalog cannot answer — an unsynced
+        or partially-synced catalog must never blackhole traffic.
+        """
+        supported = await health_service.accounts_supporting(session, model or "")
+        if supported is None:
+            return accounts
+        filtered = [a for a in accounts if a.id in supported]
+        return filtered or accounts
 
     # ---- request shaping -------------------------------------------------
 
@@ -143,6 +160,7 @@ class ProxyService:
         for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
                 accounts = await self._load_accounts(session)
+                accounts = await self._filter_by_model(session, accounts, model)
                 preferred = (
                     sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
                     # Only honour affinity on the first attempt; after a failure the whole
@@ -338,6 +356,15 @@ async def record_request(
             if key is not None:
                 key.total_requests += 1
                 key.total_cost_usd += cost
+
+        await rollup.apply(
+            session,
+            account_id=account_id,
+            model=usage.model or model,
+            usage=usage,
+            cost_usd=cost,
+            is_error=status_code >= 400,
+        )
 
 
 def wrap_stream_for_accounting(

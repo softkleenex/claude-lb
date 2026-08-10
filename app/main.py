@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 
@@ -20,8 +20,11 @@ from app.modules.auth import service as auth_service
 from app.modules.auth.api import router as auth_router
 from app.modules.auth.dependencies import require_management_auth
 from app.modules.dashboard.api import router as dashboard_router
+from app.modules.health.api import router as health_router
+from app.modules.health.service import Scheduler
 from app.modules.proxy.api import router as proxy_router
 from app.modules.settings.api import router as settings_router
+from app.modules.usage import metrics as usage_metrics
 from app.modules.usage.api import prune_request_logs
 from app.modules.usage.api import router as usage_router
 
@@ -75,9 +78,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.routing_strategy,
         settings.data_dir,
     )
+    scheduler = Scheduler(app.state.http_client)
+    scheduler.start()
+    app.state.scheduler = scheduler
+
     try:
         yield
     finally:
+        await scheduler.stop()
         await app.state.http_client.aclose()
         await dispose_db()
 
@@ -95,7 +103,14 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
 
     # Everything else on the management plane requires an authenticated operator.
-    guarded = [accounts_router, api_keys_router, usage_router, settings_router, audit_router]
+    guarded = [
+        accounts_router,
+        api_keys_router,
+        usage_router,
+        settings_router,
+        audit_router,
+        health_router,
+    ]
     for router in guarded:
         app.include_router(router, dependencies=[Depends(require_management_auth)])
     if settings.dashboard_enabled:
@@ -123,6 +138,18 @@ def create_app() -> FastAPI:
                 "error": {"type": _error_type_for(exc.status_code), "message": str(detail)},
             }
         return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
+    @app.get("/metrics", tags=["meta"], include_in_schema=False)
+    async def metrics() -> Response:
+        """Prometheus scrape endpoint.
+
+        Left unauthenticated so a scraper needs no session, matching /health. It
+        exposes account names and aggregate counters, never credentials — but if that
+        is still too much for your network, keep the port on loopback.
+        """
+        async with session_scope() as session:
+            body = await usage_metrics.render(session)
+        return Response(content=body, media_type=usage_metrics.CONTENT_TYPE)
 
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:

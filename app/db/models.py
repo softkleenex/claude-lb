@@ -61,6 +61,12 @@ class Account(Base):
     rl_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Cumulative counters
+    # Background health probe
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_probe_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_probe_detail: Mapped[str] = mapped_column(String(255), default="")
+    models_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     total_requests: Mapped[int] = mapped_column(Integer, default=0)
     total_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -196,3 +202,57 @@ class AuditEvent(Base):
     actor: Mapped[str] = mapped_column(String(64), default="dashboard")
     client_ip: Mapped[str] = mapped_column(String(64), default="")
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ModelCatalogEntry(Base):
+    """A model an account's organization can actually reach.
+
+    Populated by the background sync from upstream ``GET /v1/models``. Used to skip
+    accounts whose org has no access to the requested model instead of discovering
+    that with a 404 mid-request.
+    """
+
+    __tablename__ = "model_catalog"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    account_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    model_id: Mapped[str] = mapped_column(String(128), index=True)
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+Index("ix_model_catalog_account_model", ModelCatalogEntry.account_id, ModelCatalogEntry.model_id, unique=True)
+
+
+class UsageDaily(Base):
+    """Per-account, per-model daily totals.
+
+    Request logs are pruned after `request_log_retention_days`, which would take the
+    long-range trend with them. These rollups are small and kept indefinitely, so a
+    28-day chart survives a 7-day log retention.
+    """
+
+    __tablename__ = "usage_daily"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    """ISO date (YYYY-MM-DD) in UTC. Stored as text so the grouping key is unambiguous."""
+    account_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+Index("ix_usage_daily_key", UsageDaily.day, UsageDaily.account_id, UsageDaily.model, unique=True)

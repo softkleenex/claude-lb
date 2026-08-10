@@ -56,6 +56,10 @@ class AccountOut(BaseModel):
     total_output_tokens: int
     total_cost_usd: float
     last_used_at: datetime | None
+    last_probe_at: datetime | None
+    last_probe_ok: bool | None
+    last_probe_detail: str
+    models_synced_at: datetime | None
     created_at: datetime
 
     @classmethod

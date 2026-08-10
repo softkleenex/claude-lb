@@ -202,3 +202,34 @@ class TestDashboardAuthWiring:
             row = (await client.get("/api/audit?limit=1")).json()[0]
         for field in ("created_at", "action", "target", "detail", "client_ip", "ok"):
             assert field in row, f"dashboard reads e.{field}"
+
+
+class TestChartAndCatalogWiring:
+    def test_chart_columns_do_not_reuse_the_headroom_bar_class(self):
+        """`.bar` is a 6px-tall div; SVG rects honour CSS height, so sharing the
+        class would flatten every chart column."""
+        assert 'class="col"' in INDEX
+        assert 'rect class="bar"' not in INDEX
+
+    def test_chart_is_inline_svg_with_no_external_dependency(self):
+        assert "<svg" in INDEX
+        assert "cdn." not in INDEX and "https://unpkg" not in INDEX
+
+    def test_chart_has_an_accessible_label(self):
+        assert 'role="img"' in INDEX and "aria-label" in INDEX
+
+    async def test_trend_fields_read_by_the_chart_exist(self):
+        async for client in make_client(ok_json([])):
+            points = (await client.get("/api/usage/trend?days=3")).json()
+        assert len(points) == 3
+        for field in ("day", "cost_usd", "requests"):
+            assert field in points[0], f"chart reads point.{field}"
+
+    async def test_catalog_fields_read_by_the_dashboard_exist(self):
+        await add_account("primary")
+        async for client in make_client(ok_json([])):
+            # Empty catalog is fine; the shape check is on the account payload the
+            # "last synced" note reads.
+            assert (await client.get("/api/health/models")).status_code == 200
+            account = (await client.get("/api/accounts")).json()[0]
+        assert "models_synced_at" in account, "dashboard reads a.models_synced_at"

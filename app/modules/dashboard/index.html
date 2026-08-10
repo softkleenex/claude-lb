@@ -56,6 +56,10 @@
   form.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
   code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
   .empty { color: var(--muted); padding: 10px 0; }
+  .chart { width: 100%; height: 160px; display: block; overflow: visible; }
+  .chart .col { fill: var(--accent); opacity: 0.85; }
+  .chart .col:hover { opacity: 1; }
+  .chart .axis { stroke: var(--border); stroke-width: 1; }
   .toast { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); color: var(--accent); }
   .toast code { word-break: break-all; }
   .banner {
@@ -139,6 +143,11 @@
   </section>
 
   <section>
+    <h2>Cost trend</h2>
+    <div id="trend"></div>
+  </section>
+
+  <section>
     <h2>Usage by model</h2>
     <div class="scroll"><table id="models"></table></div>
   </section>
@@ -157,6 +166,16 @@
   <section>
     <h2>Recent requests</h2>
     <div class="scroll"><table id="requests"></table></div>
+  </section>
+
+  <section>
+    <h2>Model catalog</h2>
+    <div class="row">
+      <button id="sync-models">Sync from upstream</button>
+      <button id="probe-now">Probe unhealthy accounts</button>
+      <span class="sub" id="catalog-note"></span>
+    </div>
+    <div class="scroll"><table id="catalog"></table></div>
   </section>
 
   <section>
@@ -306,6 +325,38 @@ function renderSettings(payload) {
   $("#settings-note").textContent = "Changes apply to the next request — no restart.";
 }
 
+function renderTrend(points) {
+  const el = $("#trend");
+  const max = Math.max(...points.map((p) => p.cost_usd), 0);
+  if (max <= 0) {
+    el.innerHTML = `<div class="empty">no usage recorded in this window yet</div>`;
+    return;
+  }
+
+  // Inline SVG: no chart library, no build step, and it inherits the theme tokens.
+  const W = 1000, H = 140, GAP = 2;
+  const width = W / points.length;
+  const bars = points.map((p, i) => {
+    const h = Math.max(1, (p.cost_usd / max) * (H - 20));
+    const x = i * width;
+    const title = `${p.day}: ${usd(p.cost_usd)} · ${fmt.format(p.requests)} req`;
+    return `<rect class="col" x="${x + GAP / 2}" y="${H - h}" width="${Math.max(1, width - GAP)}" height="${h}">`
+      + `<title>${esc(title)}</title></rect>`;
+  }).join("");
+
+  el.innerHTML = `
+    <svg class="chart" viewBox="0 0 ${W} ${H + 16}" preserveAspectRatio="none" role="img"
+         aria-label="Daily cost over the last ${points.length} days">
+      ${bars}
+      <line class="axis" x1="0" y1="${H}" x2="${W}" y2="${H}"/>
+    </svg>
+    <div class="sub" style="display:flex; justify-content:space-between; margin-top:4px;">
+      <span>${esc(points[0].day)}</span>
+      <span>peak ${usd(max)}/day · ${usd(points.reduce((a, p) => a + p.cost_usd, 0))} total</span>
+      <span>${esc(points[points.length - 1].day)}</span>
+    </div>`;
+}
+
 function renderSecurity(status) {
   $("#security-row").innerHTML = `
     <span class="pill ${status.configured ? "ok" : "err"}">
@@ -340,15 +391,18 @@ async function refresh() {
     banner.style.display = "none";
   }
 
-  const [health, accounts, keys, summary, requests, settings, audit] = await Promise.all([
-    api("/health"),
-    api("/api/accounts"),
-    api("/api/keys"),
-    api(`/api/usage/summary?window_hours=${$("#window").value}`),
-    api("/api/usage/requests?limit=50"),
-    api("/api/settings"),
-    api("/api/audit?limit=25"),
-  ]);
+  const [health, accounts, keys, summary, requests, settings, audit, trend, catalog] =
+    await Promise.all([
+      api("/health"),
+      api("/api/accounts"),
+      api("/api/keys"),
+      api(`/api/usage/summary?window_hours=${$("#window").value}`),
+      api("/api/usage/requests?limit=50"),
+      api("/api/settings"),
+      api("/api/audit?limit=25"),
+      api("/api/usage/trend?days=28"),
+      api("/api/health/models"),
+    ]);
 
   $("#meta").textContent =
     `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`
@@ -384,6 +438,22 @@ async function refresh() {
 
   renderSettings(settings);
   renderSecurity(status);
+  renderTrend(trend);
+
+  const synced = accounts.map((a) => a.models_synced_at).filter(Boolean).sort().pop();
+  $("#catalog-note").textContent = synced
+    ? `last synced ${new Date(synced).toLocaleString()}`
+    : "never synced";
+  table($("#catalog"),
+    [{label:"Model"},{label:"Name"},{label:"Accounts",num:true},{label:"Context",num:true},{label:"Max output",num:true}],
+    catalog,
+    (m) => `<tr>
+      <td><code>${esc(m.model_id)}</code></td>
+      <td>${esc(m.display_name || "—")}</td>
+      <td class="num">${fmt.format(m.accounts)}</td>
+      <td class="num">${m.max_input_tokens ? fmt.format(m.max_input_tokens) : "—"}</td>
+      <td class="num">${m.max_output_tokens ? fmt.format(m.max_output_tokens) : "—"}</td>
+    </tr>`);
 
   table($("#models"),
     [{label:"Model"},{label:"Requests",num:true},{label:"Input",num:true},{label:"Output",num:true},{label:"Cost",num:true}],
@@ -509,6 +579,14 @@ document.addEventListener("click", async (event) => {
     } else if (d.deleteKey) {
       if (!confirm("Delete this API key? Clients using it will start failing.")) return;
       await api(`/api/keys/${d.deleteKey}`, { method: "DELETE" });
+    } else if (id === "sync-models") {
+      const counts = await api("/api/health/sync-models", { method: "POST" });
+      toast(`Synced ${Object.keys(counts).length} account(s).`);
+    } else if (id === "probe-now") {
+      const results = await api("/api/health/probe", { method: "POST" });
+      toast(results.length
+        ? `Probed ${results.length} account(s); ${results.filter((r) => r.ok).length} recovered.`
+        : "No unhealthy accounts to probe.");
     } else if (id === "settings-reset") {
       await api("/api/settings/reset", { method: "POST" });
     } else if (id === "change-password") {
