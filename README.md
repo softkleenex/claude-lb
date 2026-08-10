@@ -123,9 +123,27 @@ piling onto whichever key sorts first.
 
 ### Credential types
 
-`claude-lb account add` takes a Console API key and presents it as `x-api-key`. For any
-upstream that authenticates with a bearer token, use `add-oauth` and supply the pieces
-yourself:
+`claude-lb account add` takes a Console API key and presents it as `x-api-key`.
+
+For an upstream that authenticates with a bearer token, sign in through a browser —
+Authorization Code + PKCE, with the endpoints supplied by you:
+
+```bash
+claude-lb account login my-account \
+  --authorize-url  "https://issuer.example.com/oauth/authorize" \
+  --token-endpoint "https://issuer.example.com/oauth/token" \
+  --client-id      "$CLIENT_ID" \
+  --scope          "user:inference" \
+  --base-url       "https://gateway.example.com"
+```
+
+claude-lb prints the authorize URL, opens it, and listens on an ephemeral loopback port
+for the redirect (RFC 8252). PKCE uses S256, and the `state` parameter is checked
+constant-time, so a forged redirect cannot graft its code onto your flow. On a headless
+box add `--manual --redirect-uri <the URI registered for your client>`: it prints the
+URL and waits for you to paste back the address you were redirected to.
+
+If you already hold the tokens, skip the browser and pass them directly:
 
 ```bash
 claude-lb account add-oauth my-account \
@@ -259,7 +277,8 @@ Contains `claude-lb.db` (SQLite) and `secret.key`. Back up both.
 claude-lb serve                    Start the proxy and dashboard
 claude-lb config                   Show the resolved configuration
 claude-lb account add <name>       Add an upstream Anthropic API key
-claude-lb account add-oauth <name> Add a bearer/OAuth account you supply credentials for
+claude-lb account login <name>     Add an account by signing in through a browser (PKCE)
+claude-lb account add-oauth <name> Add a bearer/OAuth account from tokens you already hold
 claude-lb account list             Show accounts, health, and spend
 claude-lb account remove <name>    Remove an account (history is kept)
 claude-lb key create <name>        Issue a client key
