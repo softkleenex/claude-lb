@@ -23,17 +23,19 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: pyproject.toml
 
       - name: Install
-        run: uv pip install --system -e ".[postgres]" pytest pytest-asyncio ruff
+        run: uv pip install -e ".[postgres]" pytest pytest-asyncio ruff
 
       - name: Lint
         run: |
-          ruff check .
-          ruff format --check .
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Test
-        run: pytest -q
+        run: uv run pytest -q
 
   smoke:
     # Boots the real server and drives it over HTTP, so a packaging or lifespan
@@ -45,9 +47,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: "3.12"
+          cache-dependency-glob: pyproject.toml
 
       - name: Install
-        run: uv pip install --system .
+        run: uv pip install .
 
       - name: Boot and exercise the server
         env:
@@ -55,6 +59,7 @@ jobs:
           CLAUDE_LB_REQUIRE_API_KEY: "true"
         run: |
           set -euo pipefail
+          source .venv/bin/activate
           claude-lb config
           claude-lb account add ci --api-key sk-ant-smoke-test-key
           claude-lb account list
