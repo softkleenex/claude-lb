@@ -233,3 +233,13 @@ class TestChartAndCatalogWiring:
             assert (await client.get("/api/health/models")).status_code == 200
             account = (await client.get("/api/accounts")).json()[0]
         assert "models_synced_at" in account, "dashboard reads a.models_synced_at"
+
+
+class TestHeadroomBarHonesty:
+    def test_an_unavailable_account_gets_a_muted_headroom_bar(self):
+        """A disabled account painted in the accent colour reads as healthy."""
+        assert ".bar.inactive" in INDEX
+        assert 'a.available ? "" : " inactive"' in INDEX
+
+    def test_the_headroom_bar_explains_itself_on_hover(self):
+        assert "out of rotation — headroom is not being tracked" in INDEX

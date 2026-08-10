@@ -42,6 +42,9 @@
   .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
   .bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 60px; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
+  /* Headroom is meaningless while an account is out of rotation — don't paint it
+     in the accent colour, which reads as healthy at a glance. */
+  .bar.inactive > i { background: var(--border); filter: brightness(0.92); }
   button {
     font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--panel); color: var(--text); cursor: pointer;
@@ -52,7 +55,14 @@
     font: inherit; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text);
   }
-  label.field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  label.field {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; background: var(--bg);
+  }
+  label.field input, label.field select { border: none; background: transparent; padding: 2px 0; color: var(--text); }
+  label.field input[type=checkbox] { margin: 0; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .controls .spacer { flex: 1; }
   form.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
   code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
   .empty { color: var(--muted); padding: 10px 0; }
@@ -138,7 +148,7 @@
 
   <section>
     <h2>Routing</h2>
-    <div class="row" id="settings-row"></div>
+    <div class="controls" id="settings-row"></div>
     <div class="sub" id="settings-note"></div>
   </section>
 
@@ -180,7 +190,7 @@
 
   <section>
     <h2>Security</h2>
-    <div class="row" id="security-row"></div>
+    <div class="controls" id="security-row"></div>
     <div id="totp-setup"></div>
   </section>
 
@@ -321,7 +331,7 @@ function renderSettings(payload) {
   $("#settings-row").innerHTML =
     `<label class="field">Strategy <select data-setting="routing_strategy">${strategy}</select></label>` +
     fields +
-    `<button id="settings-reset">Reset to defaults</button>`;
+    `<span class="spacer"></span><button id="settings-reset">Reset to defaults</button>`;
   $("#settings-note").textContent = "Changes apply to the next request — no restart.";
 }
 
@@ -423,11 +433,14 @@ async function refresh() {
         ? `<span class="pill ok">available</span>`
         : `<span class="pill err" title="${esc(a.disabled_reason ?? "")}">${a.enabled ? "cooling down" : "disabled"}</span>`;
       const pct = Math.round(a.headroom * 100);
+      const headroomTitle = a.available
+        ? `${pct}% of the rate-limit budget believed to remain`
+        : "out of rotation — headroom is not being tracked";
       return `<tr>
         <td>${esc(a.name)}</td>
         <td><code>${esc(a.credential_hint)}</code></td>
         <td>${status}</td>
-        <td><div class="bar" title="${pct}%"><i style="width:${pct}%"></i></div></td>
+        <td><div class="bar${a.available ? "" : " inactive"}" title="${esc(headroomTitle)}"><i style="width:${a.available ? pct : 100}%"></i></div></td>
         <td class="num">${fmt.format(a.total_requests)}</td>
         <td class="num">${usd(w.cost_usd)}</td>
         <td class="num">${usd(a.total_cost_usd)}</td>
