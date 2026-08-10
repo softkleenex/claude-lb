@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.db.models import Base
+from app.db.schema import reconcile
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
@@ -37,6 +38,9 @@ async def init_db() -> None:
         if engine.url.get_backend_name() == "sqlite":
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.run_sync(Base.metadata.create_all)
+        # create_all skips tables that already exist, so an instance upgraded from an
+        # earlier release still needs the columns added since.
+        await reconcile(conn)
 
 
 async def dispose_db() -> None:

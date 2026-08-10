@@ -397,6 +397,7 @@ async def record_request(
         await rollup.apply(
             session,
             account_id=account_id,
+            api_key_id=api_key_id,
             model=usage.model or model,
             usage=usage,
             cost_usd=cost,

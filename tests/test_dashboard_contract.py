@@ -243,3 +243,36 @@ class TestHeadroomBarHonesty:
 
     def test_the_headroom_bar_explains_itself_on_hover(self):
         assert "out of rotation — headroom is not being tracked" in INDEX
+
+
+class TestReportSectionWiring:
+    def test_the_dashboard_calls_the_report_endpoint(self):
+        assert "/api/usage/report?" in INDEX
+
+    def test_the_csv_link_carries_the_same_query_as_the_table(self):
+        """A download that does not match what is on screen is worse than none."""
+        assert "/api/usage/report.csv?${query}" in INDEX
+        assert "reportQuery()" in INDEX
+
+    async def test_report_fields_read_by_the_table_exist(self):
+        async for client in make_client(ok_json([])):
+            payload = (await client.get("/api/usage/report?group_by=day")).json()
+        for field in ("group_by", "start", "end", "total_requests", "total_cost_usd", "rows"):
+            assert field in payload, f"dashboard reads report.{field}"
+
+    async def test_every_grouping_offered_in_the_dropdown_is_accepted(self):
+        import re as _re
+
+        start = INDEX.index('id="report-group"')
+        # The settings strategy <select> comes first in the document, so the closing
+        # tag has to be searched for *after* the report dropdown starts.
+        block = INDEX[start : INDEX.index("</select>", start)]
+        offered = _re.findall(r'<option value="([^"]+)"', block)
+        assert offered, "no groupings found in the dropdown"
+
+        async for client in make_client(ok_json([])):
+            statuses = {
+                value: (await client.get(f"/api/usage/report?group_by={value}")).status_code
+                for value in offered
+            }
+        assert all(code == 200 for code in statuses.values()), statuses

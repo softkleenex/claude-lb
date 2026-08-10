@@ -25,6 +25,7 @@ async def apply(
     session: AsyncSession,
     *,
     account_id: str | None,
+    api_key_id: str | None,
     model: str | None,
     usage: Usage,
     cost_usd: float,
@@ -37,6 +38,7 @@ async def apply(
         select(UsageDaily).where(
             UsageDaily.day == key,
             UsageDaily.account_id == account_id,
+            UsageDaily.api_key_id == api_key_id,
             UsageDaily.model == model,
         )
     )
@@ -47,6 +49,7 @@ async def apply(
         row = UsageDaily(
             day=key,
             account_id=account_id,
+            api_key_id=api_key_id,
             model=model,
             requests=0,
             errors=0,
@@ -137,6 +140,7 @@ async def backfill(session: AsyncSession, *, days: int = 28) -> int:
         select(
             day_expr,
             RequestLog.account_id,
+            RequestLog.api_key_id,
             RequestLog.model,
             func.count(RequestLog.id),
             func.sum(func.coalesce(RequestLog.input_tokens, 0)),
@@ -146,7 +150,7 @@ async def backfill(session: AsyncSession, *, days: int = 28) -> int:
             func.sum(func.coalesce(RequestLog.cost_usd, 0.0)),
         )
         .where(RequestLog.created_at >= cutoff)
-        .group_by(day_expr, RequestLog.account_id, RequestLog.model)
+        .group_by(day_expr, RequestLog.account_id, RequestLog.api_key_id, RequestLog.model)
     )
     rows = list(result)
     if not rows:
@@ -155,11 +159,12 @@ async def backfill(session: AsyncSession, *, days: int = 28) -> int:
     covered_days = {row[0] for row in rows}
     await session.execute(delete(UsageDaily).where(UsageDaily.day.in_(covered_days)))
 
-    for day, account_id, model, requests, inp, out, cache_write, cache_read, cost in rows:
+    for day, account_id, api_key_id, model, requests, inp, out, cache_write, cache_read, cost in rows:
         session.add(
             UsageDaily(
                 day=day,
                 account_id=account_id,
+                api_key_id=api_key_id,
                 model=model,
                 requests=requests,
                 input_tokens=inp or 0,

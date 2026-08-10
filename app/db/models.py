@@ -262,6 +262,8 @@ class UsageDaily(Base):
     day: Mapped[str] = mapped_column(String(10), index=True)
     """ISO date (YYYY-MM-DD) in UTC. Stored as text so the grouping key is unambiguous."""
     account_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    api_key_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    """Which client key drove the spend — the dimension chargeback actually needs."""
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     requests: Mapped[int] = mapped_column(Integer, default=0)
@@ -275,4 +277,11 @@ class UsageDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
-Index("ix_usage_daily_key", UsageDaily.day, UsageDaily.account_id, UsageDaily.model, unique=True)
+Index(
+    "ix_usage_daily_key",
+    UsageDaily.day,
+    UsageDaily.account_id,
+    UsageDaily.api_key_id,
+    UsageDaily.model,
+    unique=True,
+)

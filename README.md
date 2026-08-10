@@ -32,6 +32,7 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 | **Trends that outlive logs** | Daily rollups keep a 28-day chart even with short log retention |
 | **Prometheus metrics** | `/metrics` exposes per-account health, headroom, tokens, and spend |
 | **Audit log** | Append-only record of every management change and sign-in |
+| **Cost reports** | Date-range breakdown by day, account, key, or model, with CSV export |
 | **Streaming passthrough** | SSE bytes are relayed unmodified; usage is sniffed out of the stream |
 | **Dashboard** | Single page, no build step, light/dark |
 
@@ -262,6 +263,16 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
 - Unknown `/v1/...` paths return 404 rather than being blindly relayed, so a typo in a
   client base URL fails loudly instead of leaking a request upstream.
 
+## Upgrading
+
+Schema changes are applied on startup: columns the models declare but the database
+lacks are added in place, idempotently. Existing rows keep their data and take the
+column default.
+
+This covers additive changes, which is all claude-lb has needed. Renames, drops, and
+type changes are out of scope and will fail loudly rather than guess — back up the data
+directory before a major upgrade.
+
 ## Data
 
 | Environment | Path |
@@ -296,6 +307,8 @@ claude-lb key list                 List issued keys
 | `GET` | `/api/usage/summary?window_hours=24` | Totals, by account, by model |
 | `GET` | `/api/usage/requests?limit=100` | Recent request log |
 | `GET` | `/api/usage/trend?days=28` | Daily rollups, zero-filled |
+| `GET` | `/api/usage/report?group_by=api_key` | Cost over a date range, for chargeback |
+| `GET` | `/api/usage/report.csv?group_by=account` | The same report as a CSV download |
 | `POST` | `/api/usage/rollups/backfill` | Rebuild rollups from surviving logs |
 | `GET` / `PATCH` | `/api/settings` | Read / change runtime configuration |
 | `POST` | `/api/settings/reset` | Discard overrides |

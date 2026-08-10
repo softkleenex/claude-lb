@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import case, delete, func, select
 
 from app.core.config import get_settings
 from app.db.models import Account, RequestLog
 from app.dependencies import SessionDep
-from app.modules.usage import rollup
+from app.modules.usage import reports, rollup
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 
@@ -171,3 +171,68 @@ async def backfill_rollups(
 ) -> dict[str, int]:
     """Rebuild rollups from surviving request logs (for upgrading an old instance)."""
     return {"rows": await rollup.backfill(session, days=days)}
+
+
+class ReportRowOut(BaseModel):
+    key: str | None
+    label: str
+    requests: int
+    errors: int
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+    cost_usd: float
+
+
+class ReportOut(BaseModel):
+    group_by: str
+    start: str
+    end: str
+    total_requests: int
+    total_cost_usd: float
+    rows: list[ReportRowOut]
+
+
+@router.get("/report", response_model=ReportOut)
+async def cost_report(
+    session: SessionDep,
+    group_by: str = Query(default="day", description="day | account | api_key | model"),
+    start: str | None = Query(default=None, description="Inclusive ISO date. Defaults to 30 days ago."),
+    end: str | None = Query(default=None, description="Inclusive ISO date. Defaults to today."),
+) -> ReportOut:
+    """Cost broken down over a date range, for chargeback.
+
+    Backed by rollups, so the range is not limited by request-log retention.
+    """
+    try:
+        report = await reports.build(session, group_by=group_by, start=start, end=end)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return ReportOut(
+        group_by=report.group_by,
+        start=report.start,
+        end=report.end,
+        total_requests=report.total_requests,
+        total_cost_usd=report.total_cost_usd,
+        rows=[ReportRowOut(**row.as_dict()) for row in report.rows],
+    )
+
+
+@router.get("/report.csv", response_class=Response)
+async def cost_report_csv(
+    session: SessionDep,
+    group_by: str = Query(default="day"),
+    start: str | None = None,
+    end: str | None = None,
+) -> Response:
+    """The same report as a CSV download, with a TOTAL row."""
+    try:
+        report = await reports.build(session, group_by=group_by, start=start, end=end)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return Response(
+        content=reports.to_csv(report),
+        media_type="text/csv; charset=utf-8",
+        headers={"content-disposition": f'attachment; filename="{reports.filename(report)}"'},
+    )

@@ -163,6 +163,28 @@
   </section>
 
   <section>
+    <h2>Cost report</h2>
+    <div class="controls">
+      <label class="field">Group by
+        <select id="report-group">
+          <option value="day">day</option>
+          <option value="account">account</option>
+          <option value="api_key">API key</option>
+          <option value="model">model</option>
+        </select>
+      </label>
+      <label class="field">From <input id="report-start" type="date"></label>
+      <label class="field">To <input id="report-end" type="date"></label>
+      <button id="report-run">Run</button>
+      <span class="spacer"></span>
+      <a id="report-csv" download>
+        <button type="button">Download CSV</button>
+      </a>
+    </div>
+    <div class="scroll"><table id="report"></table></div>
+  </section>
+
+  <section>
     <h2>API keys</h2>
     <form class="row" id="key-form">
       <input name="name" placeholder="name" required>
@@ -367,6 +389,47 @@ function renderTrend(points) {
     </div>`;
 }
 
+function reportQuery() {
+  const params = new URLSearchParams({ group_by: $("#report-group").value });
+  if ($("#report-start").value) params.set("start", $("#report-start").value);
+  if ($("#report-end").value) params.set("end", $("#report-end").value);
+  return params.toString();
+}
+
+async function loadReport() {
+  const query = reportQuery();
+  // Same query on the download link, so the CSV matches what is on screen.
+  $("#report-csv").href = `/api/usage/report.csv?${query}`;
+
+  const report = await api(`/api/usage/report?${query}`);
+  const groupLabel = { day: "Day", account: "Account", api_key: "API key", model: "Model" }[report.group_by];
+
+  table($("#report"),
+    [{label: groupLabel}, {label:"Requests",num:true}, {label:"Errors",num:true},
+     {label:"Input",num:true}, {label:"Output",num:true}, {label:"Cache reads",num:true},
+     {label:"Cost",num:true}],
+    report.rows,
+    (r) => `<tr>
+      <td>${esc(r.label)}</td>
+      <td class="num">${fmt.format(r.requests)}</td>
+      <td class="num ${r.errors ? "warn" : ""}">${fmt.format(r.errors)}</td>
+      <td class="num">${fmt.format(r.input_tokens)}</td>
+      <td class="num">${fmt.format(r.output_tokens)}</td>
+      <td class="num">${fmt.format(r.cache_read_input_tokens)}</td>
+      <td class="num">${usd(r.cost_usd)}</td>
+    </tr>`);
+
+  if (report.rows.length) {
+    $("#report").insertAdjacentHTML("beforeend",
+      `<tfoot><tr>
+        <td><strong>${esc(report.start)} → ${esc(report.end)}</strong></td>
+        <td class="num"><strong>${fmt.format(report.total_requests)}</strong></td>
+        <td colspan="4"></td>
+        <td class="num"><strong>${usd(report.total_cost_usd)}</strong></td>
+      </tr></tfoot>`);
+  }
+}
+
 function renderSecurity(status) {
   $("#security-row").innerHTML = `
     <span class="pill ${status.configured ? "ok" : "err"}">
@@ -452,6 +515,7 @@ async function refresh() {
   renderSettings(settings);
   renderSecurity(status);
   renderTrend(trend);
+  await loadReport();
 
   const synced = accounts.map((a) => a.models_synced_at).filter(Boolean).sort().pop();
   $("#catalog-note").textContent = synced
@@ -646,6 +710,8 @@ document.addEventListener("click", async (event) => {
   });
 });
 
+$("#report-run").addEventListener("click", () => guard(loadReport));
+$("#report-group").addEventListener("change", () => guard(loadReport));
 $("#refresh").addEventListener("click", () => guard(refresh));
 $("#window").addEventListener("change", () => guard(refresh));
 
