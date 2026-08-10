@@ -14,6 +14,8 @@ from app.core.crypto import encrypt, mask_secret
 from app.db.models import Account, RequestLog
 from app.db.session import session_scope
 from app.main import create_app
+from app.modules.settings import service as settings_service
+from app.modules.settings.service import RuntimeSettings
 
 MESSAGE_BODY = {"model": "claude-opus-5", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
 
@@ -87,12 +89,26 @@ async def make_client(handler) -> AsyncIterator[httpx.AsyncClient]:
 
 @pytest.fixture
 def ordered_routing(monkeypatch):
-    """Pin routing to `fill_first` so `priority` fixes the try order.
+    """Make the try order a pure function of `priority`.
 
-    The default `capacity_weighted` strategy is deliberately random, which makes any
-    assertion about *which* account is tried first non-deterministic.
+    Two things otherwise decide which account goes first, and neither is deterministic
+    from the test's point of view: the default `capacity_weighted` strategy is random,
+    and session affinity outranks the strategy on the first attempt.
     """
-    monkeypatch.setattr(get_settings(), "routing_strategy", "fill_first")
+    env = get_settings()
+    monkeypatch.setattr(env, "routing_strategy", "fill_first")
+    monkeypatch.setattr(
+        settings_service,
+        "_defaults_from_env",
+        lambda: RuntimeSettings(
+            routing_strategy="fill_first",
+            max_attempts=env.max_attempts,
+            sticky_sessions_enabled=False,
+        ),
+    )
+    settings_service.invalidate()
+    yield
+    settings_service.invalidate()
 
 
 class TestHappyPath:

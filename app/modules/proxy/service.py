@@ -18,7 +18,9 @@ from app.core.pricing import estimate_cost_usd
 from app.db.models import Account, ApiKey, RequestLog
 from app.db.session import session_scope
 from app.modules.proxy import load_balancer as lb
+from app.modules.proxy import sticky
 from app.modules.proxy.usage_parser import StreamUsageCollector, Usage, parse_json_usage
+from app.modules.settings import service as settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -123,22 +125,38 @@ class ProxyService:
         body: bytes,
         api_key: ApiKey | None,
     ) -> ProxyOutcome:
-        settings = get_settings()
+        env = get_settings()
+        async with session_scope() as session:
+            runtime = await settings_service.load(session)
+
         model, wants_stream = self._peek_request(body)
+        sticky_key = (
+            sticky.session_key(body, api_key_id=api_key.id if api_key else None)
+            if runtime.sticky_sessions_enabled
+            else None
+        )
         tried: list[str] = []
         last_error: str = "no upstream attempt was made"
         last_status = 503
         last_body: bytes | None = None
 
-        for attempt in range(1, settings.max_attempts + 1):
+        for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
                 accounts = await self._load_accounts(session)
+                preferred = (
+                    sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
+                    # Only honour affinity on the first attempt; after a failure the whole
+                    # point is to land somewhere else.
+                    if sticky_key and attempt == 1
+                    else None
+                )
                 try:
                     account = lb.select_account(
                         accounts,
-                        strategy=settings.routing_strategy,
+                        strategy=runtime.routing_strategy,
                         exclude_ids=tried,
                         pinned_account_id=api_key.pinned_account_id if api_key else None,
+                        preferred_account_id=preferred,
                     )
                 except lb.NoAccountAvailable as exc:
                     if tried:
@@ -146,7 +164,7 @@ class ProxyService:
                     raise UpstreamExhausted(str(exc), status_code=503) from exc
                 account_id = account.id
                 credential = decrypt(account.encrypted_credential)
-                base_url = (account.base_url or settings.upstream_base_url).rstrip("/")
+                base_url = (account.base_url or env.upstream_base_url).rstrip("/")
 
             tried.append(account_id)
             url = f"{base_url}{path}" + (f"?{query}" if query else "")
@@ -200,6 +218,7 @@ class ProxyService:
             is_stream = wants_stream or "text/event-stream" in response.headers.get("content-type", "")
 
             if is_stream and response.status_code < 400:
+                sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
                 return ProxyOutcome(
                     status_code=response.status_code,
                     headers=self._filter_response_headers(response.headers),
@@ -211,6 +230,8 @@ class ProxyService:
 
             payload = await response.aread()
             await response.aclose()
+            if response.status_code < 400:
+                sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
             usage = parse_json_usage(payload)
             if usage.model is None:
                 usage.model = model

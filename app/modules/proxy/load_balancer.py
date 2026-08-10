@@ -86,9 +86,15 @@ def select_account(
     strategy: str = "capacity_weighted",
     exclude_ids: Sequence[str] = (),
     pinned_account_id: str | None = None,
+    preferred_account_id: str | None = None,
     now: datetime | None = None,
 ) -> Account:
-    """Pick one account, or raise :class:`NoAccountAvailable`."""
+    """Pick one account, or raise :class:`NoAccountAvailable`.
+
+    ``pinned_account_id`` is a hard constraint (an API key bound to one account): if it
+    cannot be served, the request fails. ``preferred_account_id`` is a soft hint from
+    session affinity: honoured when usable, silently ignored otherwise.
+    """
     now = now or datetime.now(UTC)
     excluded = set(exclude_ids)
 
@@ -110,6 +116,14 @@ def select_account(
     available = [a for a in pool if is_available(a, now=now)]
     if not available:
         raise NoAccountAvailable("all accounts are disabled or cooling down")
+
+    if preferred_account_id is not None:
+        # `single_account` exists to force every request onto one account, so affinity
+        # must not override it; every other strategy defers to the warm cache.
+        if strategy != "single_account":
+            for account in available:
+                if account.id == preferred_account_id:
+                    return account
 
     if strategy == "single_account":
         # Deterministic: the highest-priority enabled account, no spreading.

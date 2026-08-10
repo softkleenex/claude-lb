@@ -137,3 +137,17 @@ class RequestLog(Base):
 
 Index("ix_request_logs_account_created", RequestLog.account_id, RequestLog.created_at)
 Index("ix_request_logs_key_created", RequestLog.api_key_id, RequestLog.created_at)
+
+
+class Setting(Base):
+    """Operator-editable configuration that overrides the env defaults at runtime.
+
+    One row per key so a write touches only what changed; values are JSON-encoded
+    so booleans and numbers survive the round trip.
+    """
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

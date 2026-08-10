@@ -15,6 +15,7 @@ from app.modules.accounts.api import router as accounts_router
 from app.modules.api_keys.api import router as api_keys_router
 from app.modules.dashboard.api import router as dashboard_router
 from app.modules.proxy.api import router as proxy_router
+from app.modules.settings.api import router as settings_router
 from app.modules.usage.api import prune_request_logs
 from app.modules.usage.api import router as usage_router
 
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts_router)
     app.include_router(api_keys_router)
     app.include_router(usage_router)
+    app.include_router(settings_router)
     if settings.dashboard_enabled:
         app.include_router(dashboard_router)
     # Registered last: its catch-all /v1/{path} must not shadow the management API.
