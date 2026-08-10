@@ -101,7 +101,23 @@ jobs:
           curl -sf -X POST localhost:2456/api/auth/password \
             -H 'content-type: application/json' \
             -d '{"password":"ci-smoke-password"}' -o /dev/null
-          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:2456/api/accounts)" = "401"
+          after=$(curl -s -o /dev/null -w '%{http_code}' localhost:2456/api/accounts)
+          if [ "$after" != "401" ]; then
+            echo "::error::management plane still open after setting a password (got $after)"
+            echo "--- auth status ---";  curl -s localhost:2456/api/auth/status; echo
+            echo "--- via 127.0.0.1 ---"
+            curl -s -o /dev/null -w 'accounts=%{http_code}\n' http://127.0.0.1:2456/api/accounts
+            curl -s http://127.0.0.1:2456/api/auth/status; echo
+            echo "--- audit ---"; curl -s 'localhost:2456/api/audit?limit=5'; echo
+            echo "--- dashboard_credentials rows ---"
+            python - <<'PYEOF'
+import sqlite3
+db = sqlite3.connect("/tmp/claude-lb-smoke/claude-lb.db")
+print(db.execute("select id, length(password_hash), totp_enabled from dashboard_credentials").fetchall())
+print("sessions:", db.execute("select count(*) from dashboard_sessions").fetchall())
+PYEOF
+            exit 1
+          fi
           # ...but proxy auth and health probes keep working.
           curl -sf localhost:2456/health -o /dev/null
           curl -sf localhost:2456/metrics -o /dev/null
