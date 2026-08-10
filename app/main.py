@@ -94,7 +94,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="claude-lb",
-        version="0.4.0",
+        version="0.5.0",
         summary="Anthropic API key load balancer & proxy",
         lifespan=lifespan,
     )
