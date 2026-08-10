@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv pip install --system -e ".[postgres]" pytest pytest-asyncio ruff
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test
+        run: pytest -q
+
+  smoke:
+    # Boots the real server and drives it over HTTP, so a packaging or lifespan
+    # regression fails here even when the unit tests pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv pip install --system .
+
+      - name: Boot and exercise the server
+        env:
+          CLAUDE_LB_DATA_DIR: /tmp/claude-lb-smoke
+          CLAUDE_LB_REQUIRE_API_KEY: "true"
+        run: |
+          set -euo pipefail
+          claude-lb config
+          claude-lb account add ci --api-key sk-ant-smoke-test-key
+          claude-lb account list
+          claude-lb key create ci-client
+
+          claude-lb serve &
+          for _ in $(seq 1 40); do
+            curl -sf localhost:2456/health >/dev/null && break
+            sleep 0.5
+          done
+
+          curl -sf localhost:2456/health
+          curl -sf localhost:2456/ -o /dev/null
+          curl -sf localhost:2456/api/accounts -o /dev/null
+          curl -sf 'localhost:2456/api/usage/summary?window_hours=1' -o /dev/null
+
+          # Proxy routes must reject unauthenticated calls with Anthropic's error shape.
+          status=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+            -X POST localhost:2456/v1/messages -H 'content-type: application/json' -d '{}')
+          test "$status" = "401"
+          grep -q '"authentication_error"' /tmp/body.json
+          test "$(python -c 'import json;print("detail" in json.load(open("/tmp/body.json")))')" = "False"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: claude-lb:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run the container and check health
+        run: |
+          set -euo pipefail
+          docker run -d --name clb -p 2456:2456 claude-lb:ci
+          for _ in $(seq 1 40); do
+            curl -sf localhost:2456/health >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf localhost:2456/health
+          docker exec clb claude-lb config
+          docker rm -f clb

@@ -1,0 +1,19 @@
+services:
+  claude-lb:
+    build: .
+    image: ghcr.io/softkleenex/claude-lb:latest
+    container_name: claude-lb
+    restart: unless-stopped
+    ports:
+      # Loopback only by default — the dashboard and management API are unauthenticated.
+      - "127.0.0.1:2456:2456"
+    volumes:
+      - claude-lb-data:/var/lib/claude-lb
+    environment:
+      CLAUDE_LB_ROUTING_STRATEGY: capacity_weighted
+      CLAUDE_LB_LOG_LEVEL: INFO
+      # Set this to keep credentials readable across volume rebuilds.
+      # CLAUDE_LB_SECRET_KEY: ${CLAUDE_LB_SECRET_KEY}
+
+volumes:
+  claude-lb-data:

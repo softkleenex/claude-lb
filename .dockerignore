@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+.git/
+.github/
+tests/
+*.db
+.env
+.env.local
+secret.key
+.pytest_cache/
+.ruff_cache/

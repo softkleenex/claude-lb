@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-lb</title>
+<style>
+  :root {
+    --bg: #fbfaf9; --panel: #ffffff; --border: #e6e2dd; --text: #1c1b1a;
+    --muted: #6b6560; --accent: #c2603c; --ok: #2f7d5d; --warn: #b8860b; --err: #b3402e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --panel: #201e1c; --border: #33302c; --text: #eeeae5;
+      --muted: #9a938c; --accent: #e07d55; --ok: #4fb185; --warn: #d9a441; --err: #e0705c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+  }
+  h1 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+  h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 24px; display: grid; gap: 20px; max-width: 1200px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .tile .label { color: var(--muted); font-size: 12px; }
+  .tile .value { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.num, th.num { text-align: right; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 60px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  button {
+    font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  input, select {
+    font: inherit; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+  }
+  form.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+  .empty { color: var(--muted); padding: 10px 0; }
+  .toast { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>claude-lb</h1>
+  <span class="sub" id="meta">loading…</span>
+  <span style="flex:1"></span>
+  <select id="window">
+    <option value="1">last 1h</option>
+    <option value="24" selected>last 24h</option>
+    <option value="168">last 7d</option>
+    <option value="720">last 30d</option>
+  </select>
+  <button id="refresh">Refresh</button>
+</header>
+
+<main>
+  <section>
+    <h2>Totals</h2>
+    <div class="tiles" id="totals"></div>
+  </section>
+
+  <section>
+    <h2>Accounts</h2>
+    <div id="toast"></div>
+    <form class="row" id="account-form">
+      <input name="name" placeholder="name" required>
+      <input name="api_key" placeholder="sk-ant-…" required size="28" type="password">
+      <input name="weight" placeholder="weight" type="number" step="0.1" value="1" style="width:90px">
+      <input name="priority" placeholder="priority" type="number" value="0" style="width:90px">
+      <button type="submit">Add account</button>
+    </form>
+    <div class="scroll"><table id="accounts"></table></div>
+  </section>
+
+  <section>
+    <h2>Usage by model</h2>
+    <div class="scroll"><table id="models"></table></div>
+  </section>
+
+  <section>
+    <h2>API keys</h2>
+    <form class="row" id="key-form">
+      <input name="name" placeholder="name" required>
+      <input name="max_cost_usd_per_window" placeholder="$ / window" type="number" step="0.01" style="width:130px">
+      <input name="window_seconds" placeholder="window (s)" type="number" value="3600" style="width:120px">
+      <button type="submit">Issue key</button>
+    </form>
+    <div class="scroll"><table id="keys"></table></div>
+  </section>
+
+  <section>
+    <h2>Recent requests</h2>
+    <div class="scroll"><table id="requests"></table></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = new Intl.NumberFormat();
+const usd = (n) => "$" + (n ?? 0).toFixed(4);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
+
+async function api(path, options) {
+  const res = await fetch(path, {
+    headers: { "content-type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail ?? detail; } catch {}
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function table(el, columns, rows, renderRow) {
+  if (!rows.length) {
+    el.innerHTML = `<tr><td class="empty">nothing yet</td></tr>`;
+    return;
+  }
+  const head = columns.map((c) => `<th class="${c.num ? "num" : ""}">${esc(c.label)}</th>`).join("");
+  el.innerHTML = `<thead><tr>${head}</tr></thead><tbody>${rows.map(renderRow).join("")}</tbody>`;
+}
+
+function toast(message, isError) {
+  $("#toast").innerHTML = `<div class="toast" style="${isError ? "border-color:var(--err);color:var(--err)" : ""}">${esc(message)}</div>`;
+  if (!isError) setTimeout(() => ($("#toast").innerHTML = ""), 12000);
+}
+
+const TOTAL_TILES = [
+  ["requests", "Requests", fmt.format],
+  ["errors", "Errors", fmt.format],
+  ["input_tokens", "Input tokens", fmt.format],
+  ["output_tokens", "Output tokens", fmt.format],
+  ["cache_read_input_tokens", "Cache reads", fmt.format],
+  ["cost_usd", "Cost", (v) => "$" + v.toFixed(4)],
+];
+
+async function refresh() {
+  const hours = $("#window").value;
+  const [health, accounts, keys, summary, requests] = await Promise.all([
+    api("/health"),
+    api("/api/accounts"),
+    api("/api/keys"),
+    api(`/api/usage/summary?window_hours=${hours}`),
+    api("/api/usage/requests?limit=50"),
+  ]);
+
+  $("#meta").textContent = `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`;
+
+  $("#totals").innerHTML = TOTAL_TILES.map(([key, label, format]) =>
+    `<div class="tile"><div class="label">${label}</div><div class="value">${format(summary.totals[key])}</div></div>`
+  ).join("");
+
+  const usageByAccount = Object.fromEntries(summary.by_account.map((r) => [r.account_id, r]));
+  table($("#accounts"),
+    [{label:"Name"},{label:"Key"},{label:"Status"},{label:"Headroom"},
+     {label:"Requests",num:true},{label:"Cost (window)",num:true},{label:"Cost (all time)",num:true},{label:""}],
+    accounts,
+    (a) => {
+      const window = usageByAccount[a.id] ?? {};
+      const status = a.available
+        ? `<span class="pill ok">available</span>`
+        : `<span class="pill err" title="${esc(a.disabled_reason ?? "")}">${a.enabled ? "cooling down" : "disabled"}</span>`;
+      const pct = Math.round(a.headroom * 100);
+      return `<tr>
+        <td>${esc(a.name)}</td>
+        <td><code>${esc(a.credential_hint)}</code></td>
+        <td>${status}</td>
+        <td><div class="bar" title="${pct}%"><i style="width:${pct}%"></i></div></td>
+        <td class="num">${fmt.format(a.total_requests)}</td>
+        <td class="num">${usd(window.cost_usd)}</td>
+        <td class="num">${usd(a.total_cost_usd)}</td>
+        <td><button data-toggle="${a.id}" data-enabled="${!a.enabled}">${a.enabled ? "Disable" : "Enable"}</button>
+            <button data-delete="${a.id}">Delete</button></td>
+      </tr>`;
+    });
+
+  table($("#models"),
+    [{label:"Model"},{label:"Requests",num:true},{label:"Input",num:true},{label:"Output",num:true},{label:"Cost",num:true}],
+    summary.by_model,
+    (m) => `<tr><td>${esc(m.model ?? "(unknown)")}</td><td class="num">${fmt.format(m.requests)}</td>
+      <td class="num">${fmt.format(m.input_tokens)}</td><td class="num">${fmt.format(m.output_tokens)}</td>
+      <td class="num">${usd(m.cost_usd)}</td></tr>`);
+
+  table($("#keys"),
+    [{label:"Name"},{label:"Key"},{label:"Status"},{label:"Budget"},{label:"Requests",num:true},{label:"Cost",num:true},{label:""}],
+    keys,
+    (k) => {
+      const budget = k.max_cost_usd_per_window
+        ? `$${k.max_cost_usd_per_window} / ${k.window_seconds}s`
+        : "—";
+      return `<tr>
+        <td>${esc(k.name)}</td><td><code>…${esc(k.key_hint)}</code></td>
+        <td>${k.enabled ? '<span class="pill ok">enabled</span>' : '<span class="pill err">disabled</span>'}</td>
+        <td>${esc(budget)}</td>
+        <td class="num">${fmt.format(k.total_requests)}</td>
+        <td class="num">${usd(k.total_cost_usd)}</td>
+        <td><button data-delete-key="${k.id}">Delete</button></td>
+      </tr>`;
+    });
+
+  const accountNames = Object.fromEntries(accounts.map((a) => [a.id, a.name]));
+  table($("#requests"),
+    [{label:"Time"},{label:"Account"},{label:"Model"},{label:"Status"},{label:"Stream"},
+     {label:"Tokens in",num:true},{label:"Tokens out",num:true},{label:"ms",num:true},{label:"Cost",num:true}],
+    requests,
+    (r) => {
+      const cls = r.status_code >= 500 ? "err" : r.status_code >= 400 ? "warn" : "ok";
+      return `<tr>
+        <td>${new Date(r.created_at).toLocaleTimeString()}</td>
+        <td>${esc(accountNames[r.account_id] ?? "—")}</td>
+        <td>${esc(r.model ?? "—")}</td>
+        <td class="${cls}" title="${esc(r.error ?? "")}">${r.status_code}</td>
+        <td>${r.streaming ? "yes" : "no"}</td>
+        <td class="num">${fmt.format(r.input_tokens)}</td>
+        <td class="num">${fmt.format(r.output_tokens)}</td>
+        <td class="num">${fmt.format(r.duration_ms)}</td>
+        <td class="num">${usd(r.cost_usd)}</td>
+      </tr>`;
+    });
+}
+
+function formPayload(form) {
+  const payload = {};
+  for (const [key, raw] of new FormData(form)) {
+    if (raw === "") continue;
+    const el = form.elements[key];
+    payload[key] = el.type === "number" ? Number(raw) : raw;
+  }
+  return payload;
+}
+
+$("#account-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/accounts", { method: "POST", body: JSON.stringify(formPayload(event.target)) });
+    event.target.reset();
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
+
+$("#key-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const created = await api("/api/keys", { method: "POST", body: JSON.stringify(formPayload(event.target)) });
+    event.target.reset();
+    toast(`Key created — copy it now, it is not shown again:  ${created.api_key}`);
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
+
+document.addEventListener("click", async (event) => {
+  const { toggle, delete: del, deleteKey } = event.target.dataset;
+  try {
+    if (toggle) {
+      await api(`/api/accounts/${toggle}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: event.target.dataset.enabled === "true" }),
+      });
+    } else if (del) {
+      if (!confirm("Delete this account? Its request history is kept.")) return;
+      await api(`/api/accounts/${del}`, { method: "DELETE" });
+    } else if (deleteKey) {
+      if (!confirm("Delete this API key? Clients using it will start failing.")) return;
+      await api(`/api/keys/${deleteKey}`, { method: "DELETE" });
+    } else return;
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
+
+$("#refresh").addEventListener("click", refresh);
+$("#window").addEventListener("change", refresh);
+refresh().catch((err) => toast(err.message, true));
+setInterval(() => refresh().catch(() => {}), 15000);
+</script>
+</body>
+</html>

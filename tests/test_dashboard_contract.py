@@ -1,0 +1,152 @@
+"""Guards the dashboard against silent breakage.
+
+The dashboard is hand-written JS with no build step or type checking, so a renamed
+API field fails only at runtime, in the browser, as a blank table. These tests read the
+paths and field names straight out of `index.html` and check them against live
+responses, so a backend rename breaks CI instead of the page.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
+
+INDEX = Path("app/modules/dashboard/index.html").read_text(encoding="utf-8")
+
+
+def test_dashboard_html_is_served_intact():
+    assert "<title>claude-lb</title>" in INDEX
+    assert "prefers-color-scheme: dark" in INDEX, "dashboard must render in both themes"
+
+
+class TestEndpointsExist:
+    async def test_every_endpoint_the_dashboard_calls_responds(self):
+        # api("/path") and api(`/path?...`) — strip any template interpolation.
+        raw = re.findall(r"""api\(\s*[`"']([^`"']+)""", INDEX)
+        # Cutting at `${` can leave a dangling `?window_hours=`; drop the partial param.
+        candidates = {re.sub(r"[?&][A-Za-z_]*=?$", "", p.split("${")[0]) for p in raw if p.startswith("/")}
+        # Drop per-resource URLs like `/api/accounts/${id}`; they are covered by
+        # TestMutationsTheDashboardPerforms, and a bare collection GET is all this asserts.
+        paths = sorted(p for p in candidates if not p.endswith("/"))
+        assert paths, "no API calls found — did the dashboard markup change shape?"
+
+        await add_account("primary")
+        async for client in make_client(ok_json([])):
+            results = {path: (await client.get(path)).status_code for path in paths}
+
+        assert all(status == 200 for status in results.values()), results
+
+    async def test_the_documented_endpoint_set_is_covered(self):
+        for path in ("/health", "/api/accounts", "/api/keys", "/api/usage/summary", "/api/usage/requests"):
+            assert path in INDEX, f"dashboard no longer calls {path}"
+
+
+class TestFieldNamesMatchResponses:
+    async def test_account_fields_read_by_the_dashboard_exist(self):
+        await add_account("primary")
+        async for client in make_client(ok_json([])):
+            account = (await client.get("/api/accounts")).json()[0]
+
+        for field in (
+            "id",
+            "name",
+            "credential_hint",
+            "available",
+            "enabled",
+            "disabled_reason",
+            "headroom",
+            "total_requests",
+            "total_cost_usd",
+        ):
+            assert field in account, f"dashboard reads a.{field}"
+
+    async def test_usage_summary_fields_read_by_the_dashboard_exist(self, proxy_calls):
+        await add_account("primary")
+        async for client in make_client(ok_json(proxy_calls)):
+            await client.post("/v1/messages", json=MESSAGE_BODY)
+            summary = (await client.get("/api/usage/summary?window_hours=1")).json()
+
+        # The tile list in the dashboard is keyed on these exact names.
+        for field in (
+            "requests",
+            "errors",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cost_usd",
+        ):
+            assert field in summary["totals"], f"dashboard tile reads totals.{field}"
+
+        assert {"account_id", "account_name", "cost_usd"} <= summary["by_account"][0].keys()
+        assert {"model", "requests", "input_tokens", "output_tokens", "cost_usd"} <= summary["by_model"][
+            0
+        ].keys()
+
+    async def test_request_log_fields_read_by_the_dashboard_exist(self, proxy_calls):
+        await add_account("primary")
+        async for client in make_client(ok_json(proxy_calls)):
+            await client.post("/v1/messages", json=MESSAGE_BODY)
+            row = (await client.get("/api/usage/requests?limit=1")).json()[0]
+
+        for field in (
+            "created_at",
+            "account_id",
+            "model",
+            "status_code",
+            "streaming",
+            "input_tokens",
+            "output_tokens",
+            "duration_ms",
+            "cost_usd",
+            "error",
+        ):
+            assert field in row, f"dashboard reads r.{field}"
+
+    async def test_api_key_fields_read_by_the_dashboard_exist(self):
+        async for client in make_client(ok_json([])):
+            created = (await client.post("/api/keys", json={"name": "k"})).json()
+            key = (await client.get("/api/keys")).json()[0]
+
+        assert "api_key" in created, "dashboard shows the plaintext once on create"
+        for field in (
+            "id",
+            "name",
+            "key_hint",
+            "enabled",
+            "max_cost_usd_per_window",
+            "window_seconds",
+            "total_requests",
+            "total_cost_usd",
+        ):
+            assert field in key, f"dashboard reads k.{field}"
+
+
+class TestMutationsTheDashboardPerforms:
+    async def test_add_account_form_payload_is_accepted(self):
+        async for client in make_client(ok_json([])):
+            # Mirrors the fields in the dashboard's #account-form.
+            response = await client.post(
+                "/api/accounts",
+                json={"name": "from-form", "api_key": "sk-ant-x", "weight": 1, "priority": 0},
+            )
+        assert response.status_code == 201
+
+    async def test_issue_key_form_payload_is_accepted(self):
+        async for client in make_client(ok_json([])):
+            response = await client.post(
+                "/api/keys",
+                json={"name": "from-form", "max_cost_usd_per_window": 5.0, "window_seconds": 3600},
+            )
+        assert response.status_code == 201
+
+    async def test_toggle_and_delete_buttons_hit_real_routes(self):
+        account_id = await add_account("toggle-me")
+        async for client in make_client(ok_json([])):
+            disabled = await client.patch(f"/api/accounts/{account_id}", json={"enabled": False})
+            removed = await client.delete(f"/api/accounts/{account_id}")
+
+        assert disabled.status_code == 200
+        assert disabled.json()["enabled"] is False
+        assert removed.status_code == 204
