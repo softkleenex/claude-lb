@@ -42,7 +42,9 @@ async def evaluate(request: Request, session: AsyncSession) -> AuthStatus:
         )
 
     credential = await auth.get_credential(session)
-    configured = credential is not None
+    # Latched: a configured instance can never fall back to the bootstrap path, even
+    # if this particular read came up empty.
+    configured = credential is not None or auth.password_ever_seen()
     totp_enabled = bool(credential and credential.totp_enabled)
 
     record = await auth.resolve_session(session, request.cookies.get(auth.SESSION_COOKIE))

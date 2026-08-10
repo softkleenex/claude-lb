@@ -308,3 +308,45 @@ class TestAuditLog:
 
         failures = [e for e in events if e["action"] == "auth.login" and not e["ok"]]
         assert failures, "a failed sign-in must leave a trace"
+
+
+class TestGateFailsClosed:
+    """The bootstrap path opens the management plane to loopback when no password
+    exists. That is only safe while none exists — so once this process has seen one,
+    a read that comes up empty must mean "sign in", never "unprotected"."""
+
+    async def test_a_missing_credential_row_does_not_reopen_the_gate(self):
+        async for client in make_client(ok_json([])):
+            await client.post("/api/auth/password", json={"password": PASSWORD})
+            client.cookies.clear()
+
+            # Simulate the read that started this: the row is gone as far as this
+            # request can tell.
+            async with session_scope() as session:
+                credential = await auth.get_credential(session)
+                await session.delete(credential)
+
+            status = (await client.get("/api/auth/status")).json()
+            accounts = await client.get("/api/accounts")
+
+        assert status["configured"] is True, "the latch must survive a missing row"
+        assert status["authenticated"] is False
+        assert accounts.status_code == 401, "loopback must not become a free pass again"
+
+    async def test_the_latch_is_set_by_observing_a_password_not_only_by_setting_one(self):
+        # A process that restarts against an already-configured database learns the
+        # latch from its first read.
+        async with session_scope() as session:
+            await auth.set_password(session, PASSWORD)
+        auth._reset_latch_for_tests()
+        assert auth.password_ever_seen() is False
+
+        async with session_scope() as session:
+            await auth.get_credential(session)
+        assert auth.password_ever_seen() is True
+
+    async def test_a_fresh_instance_still_allows_loopback_bootstrap(self):
+        """The hardening must not break first-run usability."""
+        assert auth.password_ever_seen() is False
+        async for client in make_client(ok_json([])):
+            assert (await client.get("/api/accounts")).status_code == 200

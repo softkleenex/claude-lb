@@ -233,6 +233,8 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
   the password ends every existing one. A fresh install has no password, so the
   management plane is reachable from loopback only until you set one — or from
   elsewhere with the one-time bootstrap token printed at startup.
+  Once a password has been observed, the gate fails **closed**: a read that cannot see
+  the credential means "sign in", never "unprotected".
 - **Proxy routes are separate.** API clients authenticate with `clb_` keys and are
   unaffected by dashboard sessions. `/health` and `/metrics` stay open so probes and
   scrapers work without a cookie; `/metrics` exposes account *names* and aggregate

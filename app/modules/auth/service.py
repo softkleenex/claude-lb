@@ -43,6 +43,15 @@ _SINGLETON = "singleton"
 # Regenerated every process start, so a restart invalidates an unused token.
 _bootstrap_token: str = secrets.token_urlsafe(24)
 
+# Latch: set once a password has been observed, never cleared.
+#
+# The bootstrap path deliberately fails *open* to loopback so a fresh install is
+# usable. That is only safe while no password exists — if a read ever failed to see
+# the credential row on a configured instance, the gate would silently re-open. A
+# one-way latch makes that direction impossible: once this process has seen a
+# password, a missing row means "sign in", never "no password set".
+_password_ever_seen: bool = False
+
 
 class AuthError(Exception):
     def __init__(self, message: str, status_code: int = 401) -> None:
@@ -77,7 +86,21 @@ def hash_password(password: str, salt: str) -> str:
 
 
 async def get_credential(session: AsyncSession) -> DashboardCredential | None:
-    return await session.get(DashboardCredential, _SINGLETON)
+    global _password_ever_seen
+    credential = await session.get(DashboardCredential, _SINGLETON)
+    if credential is not None:
+        _password_ever_seen = True
+    return credential
+
+
+def password_ever_seen() -> bool:
+    """Whether this process has ever observed a configured password."""
+    return _password_ever_seen
+
+
+def _reset_latch_for_tests() -> None:
+    global _password_ever_seen
+    _password_ever_seen = False
 
 
 async def is_configured(session: AsyncSession) -> bool:
@@ -88,6 +111,7 @@ async def set_password(session: AsyncSession, password: str) -> None:
     if len(password) < MIN_PASSWORD_LENGTH:
         raise AuthError(f"password must be at least {MIN_PASSWORD_LENGTH} characters", status_code=422)
 
+    global _password_ever_seen
     salt = secrets.token_bytes(16).hex()
     credential = await get_credential(session)
     if credential is None:
@@ -99,6 +123,7 @@ async def set_password(session: AsyncSession, password: str) -> None:
     else:
         credential.password_hash = hash_password(password, salt)
         credential.password_salt = salt
+    _password_ever_seen = True
     await session.flush()
 
 
