@@ -5,7 +5,8 @@ services:
     container_name: claude-lb
     restart: unless-stopped
     ports:
-      # Loopback only by default — the dashboard and management API are unauthenticated.
+      # Loopback only by default. Set a dashboard password before publishing the port
+      # more widely; until then the management plane needs the bootstrap token from the log.
       - "127.0.0.1:2456:2456"
     volumes:
       - claude-lb-data:/var/lib/claude-lb

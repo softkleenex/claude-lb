@@ -75,7 +75,7 @@ from anthropic import Anthropic
 
 client = Anthropic(base_url="http://127.0.0.1:2456", api_key="clb_...")
 client.messages.create(
-    model="claude-opus-5",
+    model="claude-opus-5-5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello"}],
 )
@@ -101,7 +101,7 @@ curl http://127.0.0.1:2456/v1/messages \
   -H "x-api-key: clb_..." \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
-  -d '{"model":"claude-opus-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"claude-opus-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 Every response carries `x-claude-lb-account`, naming the upstream account that served it.
@@ -194,7 +194,8 @@ key, to `single_account`, and to any failure. Turn it off with
 | `429` | Cool down until `retry-after` (or the reset header), then retry the next account |
 | `500` / `502` / `503` / `504` / `529` / `408` | Retry the next account; back off after 3 consecutive failures |
 | Transport error | Same as 5xx |
-| `401` / `403` | Disable the account and record the reason — retrying a revoked key just burns requests |
+| `401` | Disable the account and record the reason — retrying a revoked key just burns requests (OAuth accounts get one forced refresh first) |
+| `403` | Try the next account without disabling anything — a 403 is usually about the request (a model the org lacks), not the key |
 | Other `4xx` | Relayed to the caller verbatim, no retry (it's the request's fault, not the key's) |
 
 `max_attempts` (default `3`) caps how many accounts one client request may burn.
@@ -262,6 +263,10 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
   masked hints only.
 - Unknown `/v1/...` paths return 404 rather than being blindly relayed, so a typo in a
   client base URL fails loudly instead of leaking a request upstream.
+- **Browser attacks on the management plane are refused.** Before a password exists,
+  loopback access also requires a loopback `Host` (defeating DNS rebinding), and any
+  state-changing `/api` request a browser sends cross-site is rejected.
+- **Sign-in is throttled** (5 failures per client per 5 minutes) and TOTP codes are single-use.
 
 ## Upgrading
 
@@ -331,6 +336,9 @@ uv run pytest
 uv run ruff check .
 uv run claude-lb serve --reload
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md). Security reports:
+[SECURITY.md](SECURITY.md).
 
 ## License
 
