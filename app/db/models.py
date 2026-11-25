@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -87,9 +88,9 @@ class Account(Base):
     last_probe_detail: Mapped[str] = mapped_column(String(255), default="")
     models_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    total_requests: Mapped[int] = mapped_column(Integer, default=0)
-    total_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    total_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_requests: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -121,7 +122,7 @@ class ApiKey(Base):
         String(32), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
 
-    total_requests: Mapped[int] = mapped_column(Integer, default=0)
+    total_requests: Mapped[int] = mapped_column(BigInteger, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -268,10 +269,10 @@ class UsageDaily(Base):
 
     requests: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[int] = mapped_column(Integer, default=0)
-    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cache_creation_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cache_read_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cache_creation_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cache_read_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

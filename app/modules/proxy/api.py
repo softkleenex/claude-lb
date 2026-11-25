@@ -11,18 +11,25 @@ import time
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.dependencies import ApiKeyDep, ProxyServiceDep
+from app.dependencies import AdmissionDep, ProxyServiceDep
+from app.modules.api_keys.service import Admission
 from app.modules.proxy.service import (
+    ProxyService,
     UpstreamExhausted,
     record_request,
     wrap_stream_for_accounting,
 )
+from app.modules.proxy.usage_parser import Usage
 
 router = APIRouter(tags=["proxy"])
 
 # Anthropic API surfaces worth exposing. Anything else 404s rather than being blindly
 # relayed, so a typo in a client base URL fails loudly.
-PROXIED_PREFIXES = ("/v1/messages", "/v1/models", "/v1/complete", "/v1/files", "/v1/organizations")
+#
+# Not /v1/organizations: the Admin API rejects ordinary API keys, and an auth rejection
+# disables the account that received it, so relaying it let any client switch off the
+# pool one account at a time.
+PROXIED_PREFIXES = ("/v1/messages", "/v1/models", "/v1/complete", "/v1/files")
 
 
 def _is_proxied(path: str) -> bool:
@@ -38,7 +45,25 @@ async def proxy(
     full_path: str,
     request: Request,
     proxy_service: ProxyServiceDep,
-    api_key: ApiKeyDep,
+    admission: AdmissionDep,
+) -> Response:
+    # The admission holds an in-flight budget slot until the request is logged. A
+    # stream releases it from its own finalizer; every other path releases it here.
+    handed_off = False
+    try:
+        response = await _proxy(full_path, request, proxy_service, admission)
+        handed_off = isinstance(response, StreamingResponse)
+        return response
+    finally:
+        if admission is not None and not handed_off:
+            admission.release()
+
+
+async def _proxy(
+    full_path: str,
+    request: Request,
+    proxy_service: ProxyService,
+    admission: Admission | None,
 ) -> Response:
     path = f"/v1/{full_path}"
     if not _is_proxied(path):
@@ -50,6 +75,7 @@ async def proxy(
             },
         )
 
+    api_key = admission.key if admission else None
     body = await request.body()
     started_at = time.perf_counter()
     api_key_id = api_key.id if api_key else None
@@ -74,7 +100,7 @@ async def proxy(
             streaming=False,
             started_at=started_at,
             attempts=0,
-            usage=_empty_usage(),
+            usage=Usage(),
             error=str(exc),
         )
         if exc.last_body:
@@ -103,6 +129,7 @@ async def proxy(
                 status_code=outcome.status_code,
                 started_at=started_at,
                 attempts=outcome.attempts,
+                on_finished=admission.release if admission else None,
             ),
             status_code=outcome.status_code,
             headers=_response_headers(outcome.headers, outcome.account.name),
@@ -133,9 +160,3 @@ def _response_headers(headers: dict[str, str], account_name: str) -> dict[str, s
     merged.pop("content-type", None)
     merged["x-claude-lb-account"] = account_name
     return merged
-
-
-def _empty_usage():
-    from app.modules.proxy.usage_parser import Usage
-
-    return Usage()

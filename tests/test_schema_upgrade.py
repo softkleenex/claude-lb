@@ -8,7 +8,7 @@ tests build an old-shaped table on purpose.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 
 from app.db import schema
 from app.db.models import Base, UsageDaily
@@ -28,7 +28,7 @@ CREATE TABLE usage_daily (
     cache_creation_input_tokens INTEGER NOT NULL,
     cache_read_input_tokens INTEGER NOT NULL,
     cost_usd FLOAT NOT NULL,
-    updated_at DATETIME NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
     PRIMARY KEY (id)
 )
 """
@@ -126,11 +126,11 @@ class TestDefaults:
         column = Column("c", String(8), default="it's", nullable=False)
         assert schema._literal_default(column) == "'it''s'"
 
-    def test_a_boolean_default_becomes_a_numeric_literal(self):
+    def test_a_boolean_default_is_a_keyword_postgres_accepts(self):
         from sqlalchemy import Boolean, Column
 
-        assert schema._literal_default(Column("c", Boolean, default=True)) == "1"
-        assert schema._literal_default(Column("c", Boolean, default=False)) == "0"
+        assert schema._literal_default(Column("c", Boolean, default=True)) == "TRUE"
+        assert schema._literal_default(Column("c", Boolean, default=False)) == "FALSE"
 
     def test_a_numeric_default_is_rendered_bare(self):
         from sqlalchemy import Column, Integer
@@ -180,3 +180,31 @@ class TestUnsafeUpgradesFailLoudly:
             assert Base.metadata.tables is original
             async with engine.begin() as conn:
                 await conn.execute(text("DROP TABLE IF EXISTS legacy_probe"))
+
+
+class TestIntegerWidening:
+    async def test_lifetime_counters_hold_more_than_int32(self):
+        """INTEGER caps at ~2.1 billion on Postgres; a busy account crosses that and
+        every log write after it fails. The old table above declares INTEGER."""
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP TABLE usage_daily"))
+            await conn.execute(text(OLD_USAGE_DAILY))
+        await init_db()
+
+        async with session_scope() as session:
+            session.add(
+                UsageDaily(
+                    day="2026-01-01",
+                    requests=1,
+                    errors=0,
+                    input_tokens=5_000_000_000,
+                    output_tokens=0,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    cost_usd=0.0,
+                )
+            )
+        async with session_scope() as session:
+            row = (await session.execute(select(UsageDaily))).scalar_one()
+        assert row.input_tokens == 5_000_000_000

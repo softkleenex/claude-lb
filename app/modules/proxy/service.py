@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -39,6 +40,11 @@ _STRIPPED_REQUEST_HEADERS = frozenset(
         "upgrade",
         "proxy-authorization",
         "accept-encoding",
+        # The dashboard session cookie rides along on any same-origin request; it is
+        # claude-lb's credential and must never reach an upstream.
+        "cookie",
+        "te",
+        "trailer",
     }
 )
 _STRIPPED_RESPONSE_HEADERS = frozenset(
@@ -81,14 +87,17 @@ class ProxyService:
 
     @staticmethod
     async def _filter_by_model(
-        session: AsyncSession, accounts: list[Account], model: str | None
+        session: AsyncSession, accounts: list[Account], model: str | None, *, keep_id: str | None = None
     ) -> list[Account]:
         """Drop accounts whose org is *known* not to serve `model`.
 
         Fail-open: an account that has never synced stays in the pool, and if the
         catalog would rule out every account the request is attempted anyway.
+        ``keep_id`` (a key's pinned account) is never dropped — a pinned key has no
+        other account to go to, so upstream gets to answer rather than the catalog.
         """
         excluded = await health_service.unsupported_accounts(session, model or "")
+        excluded.discard(keep_id)
         if not excluded:
             return accounts
         filtered = [a for a in accounts if a.id not in excluded]
@@ -104,7 +113,18 @@ class ProxyService:
         Auth is applied afterwards by `ResolvedCredential.apply`, which knows whether
         this account wants `x-api-key` or a bearer token.
         """
-        headers = {k: v for k, v in client_headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS}
+        # RFC 9110 7.6.1: headers named in Connection are hop-by-hop too.
+        connection_scoped = {
+            token.strip().lower()
+            for key, value in client_headers.items()
+            if key.lower() == "connection"
+            for token in value.split(",")
+        }
+        headers = {
+            k: v
+            for k, v in client_headers.items()
+            if k.lower() not in _STRIPPED_REQUEST_HEADERS and k.lower() not in connection_scoped
+        }
         headers.setdefault("anthropic-version", "2023-06-01")
         headers.setdefault("content-type", "application/json")
         return headers
@@ -166,7 +186,9 @@ class ProxyService:
         for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
                 accounts = await self._load_accounts(session)
-                accounts = await self._filter_by_model(session, accounts, model)
+                accounts = await self._filter_by_model(
+                    session, accounts, model, keep_id=api_key.pinned_account_id if api_key else None
+                )
                 preferred = (
                     sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
                     # Only honour affinity on the first attempt; after a failure the whole
@@ -237,7 +259,21 @@ class ProxyService:
                 )
                 continue
 
-            if response.status_code in (401, 403):
+            if response.status_code == 403:
+                # A 403 is usually about *this request* on this org — a model or
+                # feature it has no access to — not about the credential. Disabling on
+                # it let one client request knock `max_attempts` healthy accounts out
+                # of rotation. Try the next account; if every account refuses, the
+                # caller gets the 403 verbatim. A credential that is genuinely revoked
+                # is caught by the health probe, which asks an account-level question.
+                last_body = await response.aread()
+                await response.aclose()
+                last_status = 403
+                last_error = "upstream refused the request (403)"
+                logger.info("upstream 403 on account=%s; trying the next account", account_name)
+                continue
+
+            if response.status_code == 401:
                 error_body = await response.aread()
                 await response.aclose()
                 last_status = response.status_code
@@ -360,7 +396,8 @@ async def record_request(
     error: str | None = None,
 ) -> None:
     """Write the request log and roll the counters onto the account and API key."""
-    cost = estimate_cost_usd(usage.model or model, **usage.as_dict())
+    logged_model = _clip_model(usage.model or model)
+    cost = estimate_cost_usd(logged_model, **usage.cost_inputs())
     duration_ms = int((time.perf_counter() - started_at) * 1000)
 
     async with session_scope() as session:
@@ -369,7 +406,7 @@ async def record_request(
                 account_id=account_id,
                 api_key_id=api_key_id,
                 path=path,
-                model=usage.model or model,
+                model=logged_model,
                 status_code=status_code,
                 streaming=streaming,
                 duration_ms=duration_ms,
@@ -380,29 +417,53 @@ async def record_request(
             )
         )
 
+        # Increment in SQL, not in Python: a read-modify-write here loses updates as
+        # soon as two requests finish at once on a database that runs them in parallel.
         if account_id:
-            account = await session.get(Account, account_id)
-            if account is not None:
-                account.total_requests += 1
-                account.total_input_tokens += usage.input_tokens
-                account.total_output_tokens += usage.output_tokens
-                account.total_cost_usd += cost
+            await session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(
+                    total_requests=Account.total_requests + 1,
+                    total_input_tokens=Account.total_input_tokens + usage.input_tokens,
+                    total_output_tokens=Account.total_output_tokens + usage.output_tokens,
+                    total_cost_usd=Account.total_cost_usd + cost,
+                )
+            )
 
         if api_key_id:
-            key = await session.get(ApiKey, api_key_id)
-            if key is not None:
-                key.total_requests += 1
-                key.total_cost_usd += cost
+            await session.execute(
+                update(ApiKey)
+                .where(ApiKey.id == api_key_id)
+                .values(
+                    total_requests=ApiKey.total_requests + 1,
+                    total_cost_usd=ApiKey.total_cost_usd + cost,
+                )
+            )
 
         await rollup.apply(
             session,
             account_id=account_id,
             api_key_id=api_key_id,
-            model=usage.model or model,
+            model=logged_model,
             usage=usage,
             cost_usd=cost,
             is_error=status_code >= 400,
         )
+
+
+_MODEL_COLUMN_LENGTH = 128
+
+
+def _clip_model(model: str | None) -> str | None:
+    """The model string is client-controlled whenever upstream rejects the request
+    before naming one, so it must fit the column rather than fail the log write."""
+    return model[:_MODEL_COLUMN_LENGTH] if model else model
+
+
+# Streams whose accounting outlived the request that started them. Held so the event
+# loop does not garbage-collect a task mid-write.
+_finalizers: set[asyncio.Task] = set()
 
 
 def wrap_stream_for_accounting(
@@ -415,20 +476,25 @@ def wrap_stream_for_accounting(
     status_code: int,
     started_at: float,
     attempts: int,
+    on_finished: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
-    """Pass SSE bytes through untouched, then log usage once the stream completes."""
+    """Pass SSE bytes through untouched, then log usage once the stream ends.
+
+    "Ends" includes the client hanging up mid-stream, which is routine (a user
+    pressing Esc). That arrives as a cancellation or ``GeneratorExit``, not an
+    ``Exception``, and any ``await`` in a cancelled scope is itself cancelled — so the
+    upstream close and the log write run in a task of their own that the cancellation
+    cannot reach. Without that, every aborted stream went unlogged: its input tokens
+    were still billed upstream, but never counted against spend or budgets.
+    """
     collector = StreamUsageCollector()
 
-    async def _generator() -> AsyncIterator[bytes]:
-        error: str | None = None
+    async def _finalize(error: str | None) -> None:
         try:
-            async for chunk in stream:
-                collector.feed(chunk)
-                yield chunk
-        except Exception as exc:  # client disconnect, upstream reset, ...
-            error = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
+            try:
+                await stream.aclose()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - closing a dead upstream is best effort
+                logger.debug("error closing upstream stream", exc_info=True)
             collector.close()
             usage = collector.usage
             if usage.model is None:
@@ -445,5 +511,32 @@ def wrap_stream_for_accounting(
                 usage=usage,
                 error=error,
             )
+        except Exception:  # noqa: BLE001 - nothing upstream of a finalizer can handle it
+            logger.exception("failed to record streamed request")
+        finally:
+            if on_finished is not None:
+                on_finished()
+
+    async def _generator() -> AsyncIterator[bytes]:
+        error: str | None = None
+        try:
+            async for chunk in stream:
+                collector.feed(chunk)
+                yield chunk
+        except (asyncio.CancelledError, GeneratorExit):
+            error = "client disconnected mid-stream"
+            raise
+        except Exception as exc:  # upstream reset, ...
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            task = asyncio.get_running_loop().create_task(_finalize(error))
+            _finalizers.add(task)
+            task.add_done_callback(_finalizers.discard)
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, GeneratorExit):
+                # Cancelled while waiting: the task carries on regardless.
+                pass
 
     return _generator()

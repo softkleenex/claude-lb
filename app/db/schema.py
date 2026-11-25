@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import Column, inspect, text
+from sqlalchemy import BigInteger, Column, Integer, inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.schema import CreateIndex
 
@@ -43,7 +43,9 @@ def _literal_default(column: Column) -> str | None:
         return None
     value = default.arg
     if isinstance(value, bool):
-        return "1" if value else "0"
+        # TRUE/FALSE, not 1/0: Postgres refuses an integer default on a boolean column,
+        # and SQLite (3.23+) reads the keywords as 1/0 anyway.
+        return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
@@ -94,6 +96,8 @@ async def reconcile(connection: AsyncConnection) -> list[str]:
             await connection.execute(text(clause))
             added.append(f"{table.name}.{column.name}")
 
+    added += await _widen_integers(connection, existing_tables)
+
     # An index declared alongside a new column is not created by create_all either,
     # because its table already existed.
     for table in Base.metadata.sorted_tables:
@@ -105,8 +109,12 @@ async def reconcile(connection: AsyncConnection) -> list[str]:
         }
         for index in table.indexes:
             if index.name not in known:
+                # On Postgres a failed statement aborts the whole transaction, so the
+                # attempt runs in a savepoint: a unique index that existing rows
+                # violate is logged and skipped instead of failing every later step.
                 try:
-                    await connection.execute(CreateIndex(index))
+                    async with connection.begin_nested():
+                        await connection.execute(CreateIndex(index, if_not_exists=True))
                     added.append(f"{table.name}:{index.name}")
                 except Exception as exc:  # noqa: BLE001 - a unique index may now conflict
                     logger.warning("could not create index %s: %s", index.name, exc)
@@ -114,3 +122,35 @@ async def reconcile(connection: AsyncConnection) -> list[str]:
     if added:
         logger.info("schema upgraded: added %s", ", ".join(added))
     return added
+
+
+async def _widen_integers(connection: AsyncConnection, existing_tables: set[str]) -> list[str]:
+    """Widen INTEGER columns the models now declare as BIGINT (Postgres only).
+
+    The lifetime token counters started life as INTEGER, which on Postgres tops out at
+    about 2.1 billion — a busy account gets there, and from then on every request's
+    log write fails. Widening is lossless, so unlike other type changes it is safe to
+    apply automatically. SQLite's INTEGER is already 64-bit.
+    """
+    if connection.dialect.name != "postgresql":
+        return []
+    widened: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        live = {
+            col["name"]: col["type"]
+            for col in await connection.run_sync(lambda c, name=table.name: inspect(c).get_columns(name))
+        }
+        for column in table.columns:
+            live_type = live.get(column.name)
+            if (
+                isinstance(column.type, BigInteger)
+                and isinstance(live_type, Integer)
+                and not isinstance(live_type, BigInteger)
+            ):
+                await connection.execute(
+                    text(f'ALTER TABLE "{table.name}" ALTER COLUMN "{column.name}" TYPE BIGINT')
+                )
+                widened.append(f"{table.name}.{column.name}:bigint")
+    return widened

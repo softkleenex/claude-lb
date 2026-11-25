@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.core.pricing import estimate_cost_usd, lookup
+import pytest
+
+from app.core.pricing import cache_read_savings_usd, estimate_cost_usd, lookup
 from app.modules.proxy.usage_parser import StreamUsageCollector, parse_json_usage
 
 SSE = (
@@ -95,7 +97,27 @@ class TestPricing:
         assert lookup("claude-haiku-4-5-20251001").output_per_mtok == 5.00
 
     def test_bedrock_prefix_is_stripped(self):
-        assert lookup("anthropic.claude-sonnet-5").input_per_mtok == 3.00
+        assert lookup("anthropic.claude-sonnet-4-6").input_per_mtok == 3.00
+
+    def test_bedrock_region_prefix_is_stripped(self):
+        assert lookup("us.anthropic.claude-opus-4-8").input_per_mtok == 5.00
+        assert lookup("global.anthropic.claude-haiku-4-5-20251001").input_per_mtok == 1.00
+
+    def test_point_release_is_not_charged_the_family_rate(self):
+        # The prefix match used to bill these at the older family's price.
+        assert lookup("claude-opus-5-5").input_per_mtok == 4.00
+        assert lookup("claude-sonnet-5-5").input_per_mtok == 2.00
+        assert lookup("claude-fable-5-2").input_per_mtok == 8.00
+
+    def test_current_haiku_is_priced(self):
+        # It had no entry at all, so its spend was recorded as $0.
+        assert estimate_cost_usd("claude-haiku-5-5", input_tokens=100_000) == pytest.approx(
+            100_000 * 0.10 / 1e6
+        )
+
+    def test_haiku_long_context_tier(self):
+        cost = estimate_cost_usd("claude-haiku-5-5", input_tokens=200_000, output_tokens=1_000_000)
+        assert cost == pytest.approx(200_000 * 0.50 / 1e6 + 2.50)
 
     def test_unknown_model_costs_zero_rather_than_guessing(self):
         assert estimate_cost_usd("some-future-model", input_tokens=1_000_000) == 0.0
@@ -109,4 +131,32 @@ class TestPricing:
             cache_read_input_tokens=1_000_000,
             output_tokens=1_000_000,
         )
-        assert cost == 5.0 + 6.25 + 0.5 + 25.0
+        assert cost == pytest.approx(5.0 + 6.25 + 0.5 + 25.0)
+
+    def test_model_specific_cache_read_rate(self):
+        assert estimate_cost_usd("claude-opus-5-5", cache_read_input_tokens=1_000_000) == pytest.approx(0.20)
+        assert estimate_cost_usd("claude-fable-5-1", cache_read_input_tokens=1_000_000) == pytest.approx(0.25)
+
+    def test_one_hour_cache_writes_bill_at_twice_input(self):
+        cost = estimate_cost_usd(
+            "claude-opus-5",
+            cache_creation_input_tokens=1_000_000,
+            cache_creation_1h_input_tokens=400_000,
+        )
+        assert cost == pytest.approx(600_000 * 5 * 1.25 / 1e6 + 400_000 * 5 * 2.0 / 1e6)
+
+    def test_cache_read_savings(self):
+        assert cache_read_savings_usd("claude-opus-5-5", 1_000_000) == pytest.approx(4.00 - 0.20)
+        assert cache_read_savings_usd("some-future-model", 1_000_000) == 0.0
+
+
+class TestOneHourCacheBreakdown:
+    def test_json_usage_reads_the_ttl_breakdown(self):
+        usage = parse_json_usage(
+            b'{"model":"claude-opus-5","usage":{"input_tokens":1,"output_tokens":1,'
+            b'"cache_creation_input_tokens":300,'
+            b'"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}}}'
+        )
+        assert usage.cache_creation_input_tokens == 300
+        assert usage.cache_creation_1h_input_tokens == 200
+        assert "cache_creation_1h_input_tokens" not in usage.as_dict(), "it is not a stored column"
