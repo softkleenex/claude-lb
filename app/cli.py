@@ -21,6 +21,24 @@ from app.modules.proxy.load_balancer import STRATEGIES, headroom, is_available
 
 app = typer.Typer(help="Anthropic API key load balancer & proxy.", no_args_is_help=True)
 account_app = typer.Typer(help="Manage upstream Anthropic accounts.", no_args_is_help=True)
+
+
+def _print_version(value: bool) -> None:
+    if value:
+        from app import __version__
+
+        print(f"claude-lb {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_print_version, is_eager=True, help="Show the version and exit."
+    ),
+) -> None:
+    """Anthropic API key load balancer & proxy."""
+
 key_app = typer.Typer(help="Manage locally issued proxy API keys.", no_args_is_help=True)
 app.add_typer(account_app, name="account")
 app.add_typer(key_app, name="key")

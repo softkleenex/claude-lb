@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 
+from app import __version__
 from app.core.config import get_settings
 from app.db.session import dispose_db, init_db, session_scope
 from app.modules.accounts.api import router as accounts_router
@@ -117,7 +118,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="claude-lb",
-        version="0.5.0",
+        version=__version__,
         summary="Anthropic API key load balancer & proxy",
         lifespan=lifespan,
     )
