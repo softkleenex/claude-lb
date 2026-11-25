@@ -142,14 +142,10 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const accountOptions = useMemo(
     () =>
-      (accountsData?.accounts ?? []).map((account) => ({
-        value: account.accountId,
-        label:
-          account.alias ||
-          account.displayName ||
-          account.email ||
-          account.accountId,
-        isEmail: !account.alias,
+      (accountsData ?? []).map((account) => ({
+        value: account.id,
+        label: account.name,
+        isEmail: false,
       })),
     [accountsData],
   );

@@ -1,11 +1,11 @@
 import { z } from "zod";
 
-import { AccountAdditionalQuotaSchema, AccountSummarySchema } from "@/features/accounts/schemas";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import { AccountAdditionalQuotaSchema, AccountSummarySchema } from "@/features/dashboard/legacy-account-schemas";
+import type { AccountSummary } from "@/features/dashboard/legacy-account-schemas";
 
 export { AccountAdditionalQuotaSchema, AccountSummarySchema };
 export type { AccountSummary };
-export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/accounts/schemas";
+export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/dashboard/legacy-account-schemas";
 
 const OverviewTimeframeKeySchema = z.enum(["1d", "7d", "30d"]);
 export type OverviewTimeframe = z.infer<typeof OverviewTimeframeKeySchema>;

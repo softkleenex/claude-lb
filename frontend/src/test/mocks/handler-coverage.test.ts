@@ -31,26 +31,17 @@ const EXPECTED_ENDPOINTS = [
 	// conversations
 	"GET /api/conversations",
 	"GET /api/conversations/:conversationId",
-	// accounts
+	// accounts (claude-lb)
 	"GET /api/accounts",
+	"POST /api/accounts",
 	"POST /api/accounts/import",
 	"PATCH /api/accounts/:accountId",
-	"POST /api/accounts/:accountId/pause",
-	"POST /api/accounts/:accountId/reactivate",
-	"POST /api/accounts/:accountId/probe",
-	"PUT /api/accounts/:accountId/alias",
-	"PUT /api/accounts/:accountId/limit-warmup",
-	"PUT /api/accounts/:accountId/routing-policy",
-	"GET /api/accounts/:accountId/trends",
-	"GET /api/accounts/:accountId/usage-reset-credits",
-	"POST /api/accounts/:accountId/usage-reset-credits/consume",
-	"POST /api/accounts/:accountId/export",
-	"POST /api/accounts/:accountId/export/auth",
 	"DELETE /api/accounts/:accountId",
-	// oauth
-	"POST /api/oauth/start",
-	"GET /api/oauth/status",
-	"POST /api/oauth/complete",
+	"POST /api/accounts/:accountId/probe",
+	"POST /api/accounts/:accountId/reset-quota",
+	"DELETE /api/accounts/:accountId/model-blocks",
+	"GET /api/accounts/:accountId/trends",
+	"GET /api/usage/quota",
 	// auth (claude-lb)
 	"GET /api/auth/status",
 	"POST /api/auth/login",
@@ -64,13 +55,6 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/settings",
 	"PATCH /api/settings",
 	"POST /api/settings/reset",
-	// LEGACY codex-lb upstream proxy (accounts page until Step C)
-	"GET /api/settings/upstream-proxy",
-	"POST /api/settings/upstream-proxy/endpoints",
-	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",
-	"POST /api/settings/upstream-proxy/pools",
-	"POST /api/settings/upstream-proxy/pools/:poolId/members",
-	"PUT /api/settings/upstream-proxy/accounts/:accountId/binding",
 	"GET /api/sticky-sessions",
 	"POST /api/sticky-sessions/delete",
 	"POST /api/sticky-sessions/delete-filtered",
@@ -96,17 +80,6 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/api-keys/:keyId/regenerate",
 	"GET /api/api-keys/:keyId/trends",
 	"GET /api/api-keys/:keyId/usage-7d",
-	// automations
-	"GET /api/automations",
-	"GET /api/automations/options",
-	"GET /api/automations/runs",
-	"GET /api/automations/runs/options",
-	"GET /api/automations/runs/:runId/details",
-	"POST /api/automations",
-	"PATCH /api/automations/:automationId",
-	"DELETE /api/automations/:automationId",
-	"POST /api/automations/:automationId/run-now",
-	"GET /api/automations/:automationId/runs",
 ];
 
 describe("MSW handler coverage", () => {

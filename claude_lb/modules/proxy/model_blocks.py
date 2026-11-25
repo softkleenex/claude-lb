@@ -39,6 +39,22 @@ def active_blocks(account: Account, *, now: float | None = None) -> list[str]:
     return sorted(model for model, until in _load(account).items() if until > now)
 
 
+def active_block_expiries(account: Account, *, now: float | None = None) -> list[tuple[str, float]]:
+    """Active blocks with the unix time each one lifts, sorted by model."""
+    now = now if now is not None else time.time()
+    return sorted((model, until) for model, until in _load(account).items() if until > now)
+
+
+def remove_block(account: Account, model: str) -> bool:
+    """Lift one model's block. Returns whether it was blocked."""
+    blocks = _load(account)
+    if model not in blocks:
+        return False
+    del blocks[model]
+    account.model_blocks_json = json.dumps(blocks)
+    return True
+
+
 def is_blocked(account: Account, model: str | None, *, now: float | None = None) -> bool:
     return bool(model) and model in active_blocks(account, now=now)
 

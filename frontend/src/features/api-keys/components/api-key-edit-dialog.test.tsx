@@ -1,12 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { LimitRuleCreate } from "@/features/api-keys/schemas";
-import { createAccountSummary, createApiKey } from "@/test/mocks/factories";
-import { server } from "@/test/mocks/server";
+import { createAccountWire, createApiKey } from "@/test/mocks/factories";
+import { setMockAccounts } from "@/test/mocks/handlers";
 import { renderWithProviders } from "@/test/utils";
 
 import { ApiKeyEditDialog } from "./api-key-edit-dialog";
@@ -231,20 +230,10 @@ describe("ApiKeyEditDialog", () => {
   it("submits selected assigned accounts", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary(),
-            createAccountSummary({
-              accountId: "acc_secondary",
-              email: "secondary@example.com",
-              displayName: "secondary@example.com",
-            }),
-          ],
-        }),
-      ),
-    );
+    setMockAccounts([
+      createAccountWire({ id: "acc_primary", name: "primary@example.com" }),
+      createAccountWire({ id: "acc_secondary", name: "secondary@example.com" }),
+    ]);
 
     renderWithProviders(
       <ApiKeyEditDialog
@@ -272,20 +261,10 @@ describe("ApiKeyEditDialog", () => {
 
   it("keeps the dialog open when selecting portalled model and account menu items", async () => {
     const user = userEvent.setup();
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary(),
-            createAccountSummary({
-              accountId: "acc_secondary",
-              email: "secondary@example.com",
-              displayName: "secondary@example.com",
-            }),
-          ],
-        }),
-      ),
-    );
+    setMockAccounts([
+      createAccountWire({ id: "acc_primary", name: "primary@example.com" }),
+      createAccountWire({ id: "acc_secondary", name: "secondary@example.com" }),
+    ]);
 
     renderWithProviders(<ControlledApiKeyEditDialog />);
 

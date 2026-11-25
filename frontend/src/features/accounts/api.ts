@@ -1,204 +1,73 @@
-import { del, get, patch, post, put } from "@/lib/api-client";
+import { z } from "zod";
+
+import { del, get, patch, post } from "@/lib/api-client";
+import { camelizeKeys } from "@/lib/casing";
 
 import {
-  AccountActionResponseSchema,
-  AccountAliasRequestSchema,
-  AccountAliasResponseSchema,
-  AccountAuthExportResponseSchema,
-  AccountImportResponseSchema,
-  AccountLimitWarmupUpdateRequestSchema,
-  AccountLimitWarmupUpdateResponseSchema,
-  AccountUpdateRequestSchema,
-  AccountsResponseSchema,
-  AccountRoutingPolicyUpdateRequestSchema,
-  AccountRoutingPolicyUpdateResponseSchema,
-  AccountUsageResetConsumeRequestSchema,
-  AccountUsageResetConsumeResponseSchema,
-  AccountUsageResetCreditsResponseSchema,
-  AccountTrendsResponseSchema,
-  AccountProbeRequestSchema,
+  AccountListSchema,
   AccountProbeResponseSchema,
-  ConsumeRateLimitResetCreditResponseSchema,
-  ManualOauthCallbackRequestSchema,
-  ManualOauthCallbackResponseSchema,
-  OauthCompleteRequestSchema,
-  OauthCompleteResponseSchema,
-  OauthStartRequestSchema,
-  OauthStartResponseSchema,
-  OauthStatusResponseSchema,
-  RateLimitResetCreditsSnapshotSchema,
-  RuntimeConnectAddressResponseSchema,
-} from "@/features/accounts/schemas";
-import type {
-  AccountRoutingPolicy,
-  AccountUsageResetConsumeRequest,
+  AccountSchema,
+  AccountTrendsSchema,
+  PoolQuotaSchema,
+  type AccountCreateRequest,
+  type AccountImportRequest,
+  type AccountUpdateRequest,
 } from "@/features/accounts/schemas";
 
-const ACCOUNTS_BASE_PATH = "/api/accounts";
-const OAUTH_BASE_PATH = "/api/oauth";
+const BASE = "/api/accounts";
+
+function accountPath(accountId: string, suffix = ""): string {
+  return `${BASE}/${encodeURIComponent(accountId)}${suffix}`;
+}
 
 export function listAccounts() {
-  return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+  return get(BASE, AccountListSchema);
 }
 
-export function importAccount(file: File) {
-  const formData = new FormData();
-  formData.append("auth_json", file);
-  return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
-    body: formData,
-  });
+export function createAccount(payload: AccountCreateRequest) {
+  return post(BASE, AccountSchema, { body: payload });
 }
 
-export function pauseAccount(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/pause`,
-    AccountActionResponseSchema,
-  );
+/**
+ * The credential bundle's keys are data (`claudeAiOauth.accessToken`, `refresh_token`…),
+ * so this request skips key conversion and spells the envelope in snake_case itself.
+ */
+export async function importAccount(payload: AccountImportRequest) {
+  const body: Record<string, unknown> = {
+    name: payload.name,
+    credentials: payload.credentials,
+  };
+  if (payload.planType) body.plan_type = payload.planType;
+  if (payload.routingPolicy) body.routing_policy = payload.routingPolicy;
+  const raw = await post(`${BASE}/import`, z.unknown(), { body, rawKeys: true });
+  return AccountSchema.parse(camelizeKeys(raw));
 }
 
-export function reactivateAccount(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/reactivate`,
-    AccountActionResponseSchema,
-  );
-}
-
-export function setAccountAlias(accountId: string, alias: string | null) {
-  const validated = AccountAliasRequestSchema.parse({ alias });
-  return put(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
-    AccountAliasResponseSchema,
-    { body: validated },
-  );
-}
-
-export function updateAccount(accountId: string, payload: unknown) {
-  const validated = AccountUpdateRequestSchema.parse(payload);
-  return patch(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}`,
-    AccountActionResponseSchema,
-    { body: validated },
-  );
-}
-
-export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
-  const payload = AccountLimitWarmupUpdateRequestSchema.parse({ enabled });
-  return put(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
-    AccountLimitWarmupUpdateResponseSchema,
-    { body: payload },
-  );
-}
-
-export function updateAccountRoutingPolicy(
-  accountId: string,
-  routingPolicy: AccountRoutingPolicy,
-) {
-  const payload = AccountRoutingPolicyUpdateRequestSchema.parse({ routingPolicy });
-  return put(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-policy`,
-    AccountRoutingPolicyUpdateResponseSchema,
-    { body: payload },
-  );
-}
-
-export function getAccountTrends(accountId: string) {
-  return get(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
-    AccountTrendsResponseSchema,
-  );
-}
-
-export function getAccountUsageResetCredits(accountId: string) {
-  return get(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits`,
-    AccountUsageResetCreditsResponseSchema,
-  );
-}
-
-export function consumeAccountUsageResetCredit(
-  accountId: string,
-  payload?: AccountUsageResetConsumeRequest,
-) {
-  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits/consume`,
-    AccountUsageResetConsumeResponseSchema,
-    validated ? { body: validated } : undefined,
-  );
-}
-
-export function probeAccount(accountId: string, payload?: unknown) {
-  const validated = payload === undefined ? undefined : AccountProbeRequestSchema.parse(payload);
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/probe`,
-    AccountProbeResponseSchema,
-    validated ? { body: validated } : undefined,
-  );
-}
-
-export function exportAccountAuth(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/auth`,
-    AccountAuthExportResponseSchema,
-    // The nested auth.json payloads use their own key names (e.g. `id_token`); keep them.
-    { rawKeys: true },
-  );
-}
-
-export function getRateLimitResetCredits(accountId: string) {
-  return get(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits`,
-    RateLimitResetCreditsSnapshotSchema.nullable(),
-  );
-}
-
-export function consumeRateLimitResetCredit(
-  accountId: string,
-  payload?: AccountUsageResetConsumeRequest,
-) {
-  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits/consume`,
-    ConsumeRateLimitResetCreditResponseSchema,
-    validated ? { body: validated } : undefined,
-  );
+export function updateAccount(accountId: string, payload: AccountUpdateRequest) {
+  return patch(accountPath(accountId), AccountSchema, { body: payload });
 }
 
 export function deleteAccount(accountId: string, deleteHistory = false) {
-  const qs = deleteHistory ? "?delete_history=true" : "";
-  return del(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}${qs}`,
-    AccountActionResponseSchema,
-  );
+  return del(accountPath(accountId, deleteHistory ? "?delete_history=true" : ""));
 }
 
-export function startOauth(payload: unknown) {
-  const validated = OauthStartRequestSchema.parse(payload);
-  return post(`${OAUTH_BASE_PATH}/start`, OauthStartResponseSchema, {
-    body: validated,
-  });
+export function probeAccount(accountId: string) {
+  return post(accountPath(accountId, "/probe"), AccountProbeResponseSchema);
 }
 
-export function getOauthStatus(flowId?: string) {
-  const query = flowId ? `?flowId=${encodeURIComponent(flowId)}` : "";
-  return get(`${OAUTH_BASE_PATH}/status${query}`, OauthStatusResponseSchema);
+export function resetAccountQuota(accountId: string) {
+  return post(accountPath(accountId, "/reset-quota"), AccountSchema);
 }
 
-export function completeOauth(payload?: unknown) {
-  const validated = OauthCompleteRequestSchema.parse(payload ?? {});
-  return post(`${OAUTH_BASE_PATH}/complete`, OauthCompleteResponseSchema, {
-    body: validated,
-  });
+export function clearModelBlocks(accountId: string, model?: string) {
+  const query = model ? `?model=${encodeURIComponent(model)}` : "";
+  return del(accountPath(accountId, `/model-blocks${query}`), AccountSchema);
 }
 
-export function submitManualOauthCallback(payload: unknown) {
-  const validated = ManualOauthCallbackRequestSchema.parse(payload);
-  return post(`${OAUTH_BASE_PATH}/manual-callback`, ManualOauthCallbackResponseSchema, {
-    body: validated,
-  });
+export function getAccountTrends(accountId: string, days = 7) {
+  return get(accountPath(accountId, `/trends?days=${days}`), AccountTrendsSchema);
 }
 
-export function getRuntimeConnectAddress() {
-  return get("/api/settings/runtime/connect-address", RuntimeConnectAddressResponseSchema);
+export function getPoolQuota() {
+  return get("/api/usage/quota", PoolQuotaSchema);
 }

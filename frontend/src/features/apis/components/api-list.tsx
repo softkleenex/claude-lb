@@ -97,7 +97,7 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
               {apiKeys.length === 0 ? t("apis.list.emptyTitle") : t("apis.list.noMatches")}
             </p>
             <p className="text-xs text-muted-foreground/70">
-              {apiKeys.length === 0 ? t("apis.list.emptyDescription") : t("accounts.list.adjustFilters")}
+              {apiKeys.length === 0 ? t("apis.list.emptyDescription") : t("apis.list.adjustFilters")}
             </p>
           </div>
         ) : (

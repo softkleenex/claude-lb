@@ -1,349 +1,198 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import { createAccountWire } from "@/test/mocks/factories";
+import { getMockAccounts, setMockAccounts } from "@/test/mocks/handlers";
+import { renderWithProviders } from "@/test/utils";
 
-vi.mock("@/features/accounts/hooks/use-accounts", () => ({
-  useAccounts: vi.fn(),
-  useAccountTrends: vi.fn(() => ({ data: null })),
-  useAccountUsageResetCredits: vi.fn(() => ({
-    data: { rateLimitResetCredits: { availableCount: 3 } },
-    isFetching: false,
-    error: null,
-  })),
-}));
-
-vi.mock("@/features/accounts/hooks/use-oauth", () => ({
-  useOauth: vi.fn(() => ({
-    state: {
-      status: "idle",
-      method: null,
-      authorizationUrl: null,
-      callbackUrl: null,
-      verificationUrl: null,
-      userCode: null,
-      deviceAuthId: null,
-      intervalSeconds: null,
-      expiresInSeconds: null,
-      errorMessage: null,
-    },
-    start: vi.fn(),
-    complete: vi.fn(),
-    manualCallback: vi.fn(),
-    reset: vi.fn(),
-  })),
-}));
-
-vi.mock("@/features/accounts/upstream-proxy-legacy", () => ({
-  useUpstreamProxyAdmin: vi.fn(() => ({
-    upstreamProxyQuery: { data: null, error: null },
-    accountBindingMutation: {
-      isPending: false,
-      error: null,
-      mutateAsync: vi.fn(),
-    },
-    testEndpointMutation: {
-      isPending: false,
-      error: null,
-      mutateAsync: vi.fn(),
-    },
-  })),
-}));
-
-const { useAccounts } = await import("@/features/accounts/hooks/use-accounts");
-const mockedUseAccounts = useAccounts as unknown as ReturnType<typeof vi.fn>;
-
-function idleMutation() {
-  return {
-    isPending: false,
-    error: null,
-    mutateAsync: vi.fn(),
-  };
+async function renderPage(path = "/accounts") {
+  window.history.pushState({}, "", path);
+  await useAuthStore.getState().refreshSession();
+  const user = userEvent.setup();
+  const result = renderWithProviders(<AccountsPage />);
+  await screen.findByTestId("accounts-layout");
+  return { user, ...result };
 }
 
-function account(overrides: Partial<AccountSummary>): AccountSummary {
-  return {
-    accountId: "acc-default",
-    email: "default@example.com",
-    displayName: "Default",
-    planType: "plus",
-    status: "active",
-    additionalQuotas: [],
-    limitWarmupEnabled: false,
-    ...overrides,
-  };
+function mockAccount(id: string) {
+  const account = getMockAccounts().find((item) => item.id === id);
+  if (!account) throw new Error(`no mock account ${id}`);
+  return account;
 }
 
 describe("AccountsPage", () => {
   beforeEach(() => {
-    useAuthStore.setState({ authenticated: true, canWrite: true });
-    useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
-    vi.spyOn(Date, "now").mockReturnValue(
-      new Date("2026-01-01T12:00:00.000Z").getTime(),
-    );
+    useAuthStore.setState(useAuthStore.getInitialState());
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  it("lists claude-lb accounts with plan, policy and status", async () => {
+    await renderPage();
+
+    const list = screen.getByTestId("account-list-scroll-region");
+    expect(within(list).getByText("alice-max")).toBeInTheDocument();
+    expect(within(list).getByText("console")).toBeInTheDocument();
+    expect(within(list).getByText("backup-key")).toBeInTheDocument();
+    expect(within(list).getByText("Max 5x")).toBeInTheDocument();
+    expect(within(list).getAllByText("Burn first").length).toBeGreaterThan(0);
+    expect(within(list).getByText("Paused")).toBeInTheDocument();
+    expect(within(list).getByText("1 model refused")).toBeInTheDocument();
+    // The subscription shows its 5h/7d bars; the API key shows rate-limit headroom.
+    expect(within(screen.getByTestId("account-item-acc_max")).getByText("42%")).toBeInTheDocument();
+    expect(within(screen.getByTestId("account-item-acc_console")).getByText("92% left")).toBeInTheDocument();
   });
 
-  it("defaults the selected account to the first account after display sorting", () => {
-    mockedUseAccounts.mockReturnValue({
-      accountsQuery: {
-        data: [
-          account({
-            accountId: "acc-api-first",
-            email: "api-first@example.com",
-            displayName: "API First",
-            resetAtSecondary: "2026-01-01T13:00:00.000Z",
-            windowMinutesSecondary: 10_080,
-          }),
-          account({
-            accountId: "acc-visible-first",
-            email: "visible-first@example.com",
-            displayName: "Visible First",
-            resetAtSecondary: "2026-01-01T12:10:00.000Z",
-            windowMinutesSecondary: 10_080,
-          }),
-        ],
-        error: null,
-        refetch: vi.fn(),
-      },
-      importMutation: idleMutation(),
-      pauseMutation: idleMutation(),
-      resumeMutation: idleMutation(),
-      probeMutation: idleMutation(),
-      usageResetMutation: idleMutation(),
-      deleteMutation: idleMutation(),
-      exportAuthMutation: idleMutation(),
-      setAliasMutation: idleMutation(),
-      limitWarmupMutation: idleMutation(),
-      routingPolicyMutation: idleMutation(),
-      updateMutation: idleMutation(),
-    } as unknown as ReturnType<typeof useAccounts>);
+  it("shows the selected subscription's usage, risk and refused models", async () => {
+    await renderPage();
 
-    render(
-      <MemoryRouter>
-        <AccountsPage />
-      </MemoryRouter>,
-    );
-
+    expect(screen.getByRole("heading", { name: "alice-max" })).toBeInTheDocument();
+    expect(screen.getByText("42% used")).toBeInTheDocument();
+    expect(screen.getByText("18% used")).toBeInTheDocument();
+    expect(screen.getByText("Allowed")).toBeInTheDocument();
+    expect((await screen.findAllByText("Warning")).length).toBe(2);
     expect(
-      screen
-        .getAllByText(/^(Visible First|API First)$/)
-        .map((el) => el.textContent),
-    ).toEqual(["Visible First", "API First", "Visible First"]);
-    expect(
-      screen.getByRole("heading", { name: "Visible First" }),
+      screen.getByText(/alice-max refuses claude-sonnet-5 via claude-lb — routed to other accounts until/),
     ).toBeInTheDocument();
+    expect(await screen.findByText("Last 7 days", { selector: "h3" })).toBeInTheDocument();
   });
 
-  it("renders account panels with mobile-first responsive containment", () => {
-    mockedUseAccounts.mockReturnValue({
-      accountsQuery: {
-        data: [
-          account({
-            accountId: "acc-long",
-            email: "very.long.account.identity.for.mobile@example-enterprise-workspace.invalid",
-            displayName: "very.long.account.identity.for.mobile@example-enterprise-workspace.invalid",
-          }),
-        ],
-        error: null,
-        refetch: vi.fn(),
-      },
-      importMutation: idleMutation(),
-      pauseMutation: idleMutation(),
-      resumeMutation: idleMutation(),
-      probeMutation: idleMutation(),
-      usageResetMutation: idleMutation(),
-      deleteMutation: idleMutation(),
-      exportAuthMutation: idleMutation(),
-      setAliasMutation: idleMutation(),
-      limitWarmupMutation: idleMutation(),
-      routingPolicyMutation: idleMutation(),
-      updateMutation: idleMutation(),
-    } as unknown as ReturnType<typeof useAccounts>);
+  it("clears a refused model", async () => {
+    const { user } = await renderPage();
 
-    render(
-      <MemoryRouter>
-        <AccountsPage />
-      </MemoryRouter>,
-    );
+    await user.click(screen.getByRole("button", { name: "Try claude-sonnet-5 on this account again" }));
 
-    expect(screen.getByTestId("accounts-layout")).toHaveClass(
-      "grid-cols-1",
-      "min-w-0",
-      "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
-    );
-    expect(screen.getByTestId("accounts-list-panel")).toHaveClass(
-      "min-w-0",
-      "min-h-0",
-      "self-start",
-    );
-    expect(screen.getByTestId("accounts-list-panel")).not.toHaveClass("h-full");
-    expect(screen.getByTestId("accounts-list-card")).not.toHaveClass("h-full");
-    expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
-      "min-w-0",
-      "truncate",
-    );
+    await waitFor(() => expect(mockAccount("acc_max").model_blocks).toEqual([]));
+    await waitFor(() => expect(screen.queryByText("Models this subscription refuses")).not.toBeInTheDocument());
   });
 
-  it("keeps helper instructions accessible when no accounts exist", async () => {
-    const user = userEvent.setup();
+  it("selects another account and pauses and resumes it", async () => {
+    const { user } = await renderPage();
 
-    mockedUseAccounts.mockReturnValue({
-      accountsQuery: {
-        data: [],
-        error: null,
-        refetch: vi.fn(),
-      },
-      importMutation: idleMutation(),
-      pauseMutation: idleMutation(),
-      resumeMutation: idleMutation(),
-      probeMutation: idleMutation(),
-      usageResetMutation: idleMutation(),
-      deleteMutation: idleMutation(),
-      exportAuthMutation: idleMutation(),
-      setAliasMutation: idleMutation(),
-      limitWarmupMutation: idleMutation(),
-      routingPolicyMutation: idleMutation(),
-      updateMutation: idleMutation(),
-    } as unknown as ReturnType<typeof useAccounts>);
+    await user.click(screen.getByTestId("account-item-acc_console"));
+    expect(await screen.findByRole("heading", { name: "console" })).toBeInTheDocument();
+    expect(window.location.search).toContain("selected=acc_console");
 
-    render(
-      <MemoryRouter>
-        <AccountsPage />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Need help?" }));
-    expect(screen.getByText("Windows OAuth Help")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(mockAccount("acc_console").paused).toBe(true));
+    await user.click(await screen.findByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(mockAccount("acc_console").enabled).toBe(true));
+    expect(await screen.findByRole("button", { name: "Pause" })).toBeInTheDocument();
   });
 
-  it("confirms before resetting selected account usage", async () => {
-    const user = userEvent.setup();
-    const resetUsage = vi.fn().mockResolvedValue({
-      status: "reset",
-      accountId: "acc-reset",
-      code: "reset",
-      windowsReset: 2,
-      usageWritten: true,
-      primaryUsedPercentBefore: 100,
-      primaryUsedPercentAfter: 2,
-      secondaryUsedPercentBefore: 80,
-      secondaryUsedPercentAfter: 0,
-      accountStatusBefore: "rate_limited",
-      accountStatusAfter: "active",
-    });
+  it("probes an account and shows the result", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_console");
 
-    mockedUseAccounts.mockReturnValue({
-      accountsQuery: {
-        data: [
-          account({
-            accountId: "acc-reset",
-            email: "reset@example.com",
-            displayName: "Resettable",
-            resetAtSecondary: "2026-01-01T13:00:00.000Z",
-            windowMinutesSecondary: 10_080,
-          }),
-        ],
-        error: null,
-        refetch: vi.fn(),
-      },
-      importMutation: idleMutation(),
-      pauseMutation: idleMutation(),
-      resumeMutation: idleMutation(),
-      probeMutation: idleMutation(),
-      usageResetMutation: {
-        isPending: false,
-        error: null,
-        mutateAsync: resetUsage,
-      },
-      deleteMutation: idleMutation(),
-      exportAuthMutation: idleMutation(),
-      setAliasMutation: idleMutation(),
-      limitWarmupMutation: idleMutation(),
-      routingPolicyMutation: idleMutation(),
-      updateMutation: idleMutation(),
-    } as unknown as ReturnType<typeof useAccounts>);
+    await user.click(screen.getByRole("button", { name: "Probe now" }));
 
-    render(
-      <MemoryRouter>
-        <AccountsPage />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Reset usage" }));
-
-    const dialog = await screen.findByRole("alertdialog", { name: "Reset usage" });
-    expect(resetUsage).not.toHaveBeenCalled();
-
-    await user.click(within(dialog).getByRole("button", { name: "Reset" }));
-
-    await waitFor(() => {
-      expect(resetUsage).toHaveBeenCalledWith({ accountId: "acc-reset" });
-    });
+    expect(await screen.findByTestId("probe-result")).toHaveTextContent("Probe passed — 3 models available.");
+    expect(mockAccount("acc_console").last_probe_ok).toBe(true);
   });
 
-  it("keeps force probe as an immediate action", async () => {
-    const user = userEvent.setup();
-    const probe = vi.fn().mockResolvedValue({
-      status: "probed",
-      accountId: "acc-probe",
-      probeStatusCode: 200,
-      primaryUsedPercentBefore: 10,
-      primaryUsedPercentAfter: 9,
-      secondaryUsedPercentBefore: 20,
-      secondaryUsedPercentAfter: 19,
-      accountStatusBefore: "active",
-      accountStatusAfter: "active",
-    });
+  it("shows a failed probe and the disabled reason", async () => {
+    setMockAccounts([createAccountWire({ id: "acc_bad", name: "broken-key" })]);
+    const { user } = await renderPage();
 
-    mockedUseAccounts.mockReturnValue({
-      accountsQuery: {
-        data: [
-          account({
-            accountId: "acc-probe",
-            email: "probe@example.com",
-            displayName: "Probe account",
-            resetAtSecondary: "2026-01-01T13:00:00.000Z",
-            windowMinutesSecondary: 10_080,
-          }),
-        ],
-        error: null,
-        refetch: vi.fn(),
-      },
-      importMutation: idleMutation(),
-      pauseMutation: idleMutation(),
-      resumeMutation: idleMutation(),
-      probeMutation: {
-        isPending: false,
-        error: null,
-        mutateAsync: probe,
-      },
-      usageResetMutation: idleMutation(),
-      deleteMutation: idleMutation(),
-      exportAuthMutation: idleMutation(),
-      setAliasMutation: idleMutation(),
-      limitWarmupMutation: idleMutation(),
-      routingPolicyMutation: idleMutation(),
-      updateMutation: idleMutation(),
-    } as unknown as ReturnType<typeof useAccounts>);
+    await user.click(screen.getByRole("button", { name: "Probe now" }));
 
-    render(
-      <MemoryRouter>
-        <AccountsPage />
-      </MemoryRouter>,
-    );
+    expect(await screen.findByTestId("probe-result")).toHaveTextContent("Probe failed: upstream returned 401");
+    expect(await screen.findByText("Reason: upstream returned 401")).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: "Force probe" }));
+  it("renames an account", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_console");
 
-    expect(probe).toHaveBeenCalledWith({ accountId: "acc-probe" });
-    expect(screen.queryByRole("alertdialog", { name: "Reset usage" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Rename account" }));
+    const input = screen.getByRole("textbox", { name: "Account name" });
+    await user.clear(input);
+    await user.type(input, "console-main{Enter}");
+
+    expect(await screen.findByRole("heading", { name: "console-main" })).toBeInTheDocument();
+    expect(mockAccount("acc_console").name).toBe("console-main");
+  });
+
+  it("shows a duplicate-name error inline", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_console");
+
+    await user.click(screen.getByRole("button", { name: "Rename account" }));
+    const input = screen.getByRole("textbox", { name: "Account name" });
+    await user.clear(input);
+    await user.type(input, "alice-max{Enter}");
+
+    expect(await screen.findByText("an account named 'alice-max' already exists")).toBeInTheDocument();
+  });
+
+  it("changes the routing policy", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_console");
+
+    await user.click(screen.getByRole("combobox", { name: "Routing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Preserve" }));
+
+    await waitFor(() => expect(mockAccount("acc_console").routing_policy).toBe("preserve"));
+  });
+
+  it("sets, shows and removes a spend cap", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_console");
+
+    expect(screen.getByTestId("spend-summary")).toHaveTextContent("$3.21 / $10.00");
+
+    const cap = screen.getByLabelText("Spend cap (USD)");
+    await user.clear(cap);
+    await user.type(cap, "2.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mockAccount("acc_console").spend_cap_usd).toBe(2.5));
+    expect((await screen.findAllByText("Spend cap reached")).length).toBe(2);
+    expect(screen.getByText(/Cap reached — no traffic goes here/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove cap" }));
+    await waitFor(() => expect(mockAccount("acc_console").spend_cap_usd).toBeNull());
+    expect(await screen.findByTestId("spend-summary")).toHaveTextContent("$3.21 spent · no cap");
+  });
+
+  it("resets quota state after confirming", async () => {
+    const { user } = await renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Reset quota state" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Reset quota state" }));
+
+    await waitFor(() => expect(mockAccount("acc_max").primary_used_percent).toBeNull());
+    expect(mockAccount("acc_max").model_blocks).toEqual([]);
+  });
+
+  it("deletes an account with its history after confirming", async () => {
+    const { user } = await renderPage("/accounts?selected=acc_paused");
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("Delete backup-key?")).toBeInTheDocument();
+    await user.click(within(dialog).getByLabelText("Also delete its request logs and usage history"));
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(getMockAccounts().some((account) => account.id === "acc_paused")).toBe(false));
+  });
+
+  it("filters the list by status and search", async () => {
+    const { user } = await renderPage();
+    const list = screen.getByTestId("account-list-scroll-region");
+
+    await user.click(screen.getByRole("combobox", { name: "Filter by status" }));
+    await user.click(await screen.findByRole("option", { name: "Paused" }));
+    await waitFor(() => expect(within(list).queryByText("console")).not.toBeInTheDocument());
+    expect(within(list).getByText("backup-key")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Filter by status" }));
+    await user.click(await screen.findByRole("option", { name: "All statuses" }));
+    await user.type(screen.getByRole("textbox", { name: "Search accounts…" }), "zzz");
+    expect(await within(list).findByText("No matching accounts")).toBeInTheDocument();
+  });
+
+  it("shows an empty state with no accounts", async () => {
+    setMockAccounts([]);
+    await renderPage();
+
+    expect(screen.getByText("No accounts yet")).toBeInTheDocument();
+    expect(screen.getByText("No account selected")).toBeInTheDocument();
   });
 });

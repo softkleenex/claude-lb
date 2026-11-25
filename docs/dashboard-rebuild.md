@@ -21,7 +21,7 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 ## Steps
 - [x] A. Scaffold: copy frontend, npm, outDir, SPA serving, branding, prune codex-only features, compiles
 - [x] B. Auth gate + shell (nav, status bar, theme, i18n ko/en, privacy blur) + Settings page
-- [ ] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
+- [x] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
 - [ ] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
 - [ ] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
 - [ ] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
@@ -184,3 +184,85 @@ header work. Console: only the expected 401s from the deliberate wrong sign-ins.
   `t(error)` (unknown text passes through).
 - Settings cards: build new ones from `settings-card.tsx`; save with `onSave(partialPatch)`.
 
+
+### 2026-11-26 — Step C (accounts page)
+**Done**
+- **Backend** (`claude_lb/modules/accounts/api.py`, `health/service.py`, `proxy/{load_balancer,model_blocks}.py`):
+  - Pause semantics: `PATCH enabled=false` now sets `disabled_reason = "paused by operator"` (`PAUSED_REASON`,
+    `is_paused()` in `load_balancer`). **Bug fix**: the background health probe used to re-enable *any* disabled account
+    whose `/v1/models` call passed, so an operator's "Disable" silently undid itself on the next tick; paused accounts
+    are now skipped by `_needs_probe` and never re-enabled by a probe. `PATCH enabled=true` still clears the breaker
+    (confirmed + tested). Breaker-disabled accounts (401/403) are still probed and recovered as before.
+  - `PATCH name` renames (409 on a taken name, 422 on empty).
+  - `AccountOut` gained `paused`, `spend_cap_reached`, `consecutive_failures`, `model_blocks: [{model, until}]`
+    (`blocked_models` kept).
+  - `POST /api/accounts/{id}/probe` → `{probe: {ok, status_code, detail, models}, account}` via new
+    `health.service.probe_one` (any state; does not reset 5h/7d quota status; paused stays paused; audited).
+  - `DELETE /api/accounts/{id}/model-blocks[?model=]` (404 if that model is not blocked).
+  - `GET /api/accounts/{id}/trends?days=7` → `{quota: [{t, primary_used_percent, secondary_used_percent}]` (hourly
+    max from `QuotaHistory`), `usage: [{day, requests, errors, input_tokens, output_tokens, cost_usd}]` (zero-filled,
+    from `UsageDaily` rollups), `totals}`.
+  - `DELETE /api/accounts/{id}?delete_history=true` also deletes the account's request logs and daily rollups; quota
+    snapshots are always removed (SQLite does not enforce the FK cascade).
+  - Tests: new `tests/test_accounts_api.py` (22 tests).
+- **Frontend** `features/accounts` rewritten on claude-lb shapes: `schemas.ts` (`AccountSchema` etc.), `api.ts`,
+  `status.ts` (derived status: available / cooling_down / rate_limited / quota_exceeded / spend_cap / paused /
+  disabled, `statusLiftsAt`, helpers), `sorting.ts` (name / reset soonest / most remaining + search/status filter),
+  `hooks/use-accounts.ts` (`useAccounts`, `usePoolQuota`, `useAccountTrends`, `useAccountMutations` → `create`,
+  `importCredentials`, `update`, `remove`, `probe`, `resetQuota`, `clearBlocks`, `busy`), `lib/time.ts` (`useNow`,
+  `formatAbsolute`, `formatUntil`, `formatAgo`, direction-free `formatDuration`), `lib/subscription-command.ts`.
+  Components: `account-list`, `account-list-item`, `account-badges` (status/plan/policy/provider/risk),
+  `account-quota-bars` (`UsageBar` = *used* % bar, `AccountQuotaBars` = 5h/7d or rate-limit headroom),
+  `account-detail` (name edit, badges, status + reason + countdown, Pause/Resume, Probe now with inline result, Reset
+  quota state (confirm), Delete (confirm + "also delete history")), `account-model-blocks` ("X refuses MODEL via
+  claude-lb — routed to other accounts until T", per-model / all "Try again"), `account-usage-panel` (5h/7d with
+  absolute reset + countdown, unified/overage status, rl_* headroom, all-time + last-7-days totals, credential type /
+  hint / expiry / refresh failures / base URL), `account-trend-chart` (hourly 5h/7d area chart for subscriptions +
+  daily requests bar chart), `account-settings-card` (plan, policy — save on change; weight, priority, spend cap with
+  "$spent / $cap" bar, Remove cap), `add-account-dialog` (tabs: API key / Subscription = exact
+  `uv run claude-lb account add-subscription <name> --plan-type … --routing-policy …` with copy button + paste an
+  `sk-ant-oat…` token → `POST /api/accounts {provider: oauth, auth_scheme: bearer}` / Import file → `POST
+  /api/accounts/import`, sent with `rawKeys` so the credential bundle's keys are not snakified). No OAuth flow or
+  client id anywhere. Depletion risk badge from `GET /api/usage/quota`.
+- Removed codex-only code: `upstream-proxy-legacy.ts`, proxy binding, auth export, OAuth/device-code dialog +
+  `use-oauth`, reset-credit dialog, warm-up/Trusted Access/alias UI, Windows OAuth help, `query-invalidation.ts`, the
+  hard-coded reset-credit flags, and **the whole `features/automations` folder** (codex scheduled warm-up prompts; no
+  backend, not routed since Step B) with its integration test and MSW handlers. Dashboard page: resume uses
+  `update({enabled: true})`; warm-up toggle and reset-credit dialog removed. The codex `AccountSummary` schema the
+  legacy dashboard overview still parses lives in `features/dashboard/legacy-account-schemas.ts` until Step D.
+- Consumers ported to the new `Account`: api-keys `AccountMultiSelect` (name, plan, status badge, 5h/7d "left"
+  chips; hides disabled, paused only with `allowPausedAccounts`) and the Reports account filter (`id`/`name`).
+- **MSW**: `GET /api/accounts` now returns claude-lb's JSON array of snake_case accounts. New `accountHandlers`
+  mirror the backend (create/import/patch/delete/probe/reset-quota/model-blocks/trends + `GET /api/usage/quota`);
+  wire factories `createAccountWire`, `createSubscriptionAccountWire`, `createDefaultAccountWires` (alice-max Max 5x
+  burn_first with a sonnet block, console API key with $10 cap, paused backup-key), `createAccountTrendsWire`,
+  `createPoolQuotaWire`; helpers `setMockAccounts()` / `getMockAccounts()`. A mock account whose name contains
+  "broken" fails probes with 401. Legacy overview data is `state.legacyAccounts`.
+- i18n: ~210 new `accounts.*` keys in en + ko (zh-CN falls back to en); 283 dead `accounts.*`/`automations.*` keys
+  removed from all three locales (keys still referenced by the legacy dashboard kept). The APIs page got its own
+  `apis.list.adjustFilters`.
+
+**Results**: `npm test` 107 files / 859 tests pass; `npm run lint` clean; `npm run build` OK; `ruff` clean;
+`pytest` 456 passed (+22). Browser (demo on :2461, fresh data dir, Korean UI then English + dark mode): list with
+search/filter/sort, 5h/7d bars, plan/policy/risk badges and provider icons; detail with countdowns, usage, credential,
+hourly quota + daily request charts; probe → "점검 통과" inline + toast; spend cap 3 → "$5.39 / $3.00" red bar,
+status "Spend cap reached", nav badge 3→2, Remove cap restores it; policy → Preserve; Pause → paused (`disabled_reason`
+"paused by operator") → Resume clears it; added an API key (plan api, x-api-key, cap 1.5) and a pasted `sk-ant-oat…`
+token (oauth/bearer/pro). Console: no errors (only Chrome "form field should have an id or name" issues).
+
+**Known issues**
+- The legacy Dashboard account cards still offer "warm-up" / "reset credit" actions that now do nothing (Step D
+  replaces those cards).
+- A probe is `GET /v1/models`; it validates the credential but says nothing about 5h/7d quota (by design).
+- Server error messages (e.g. duplicate name) are shown in English as the backend sends them.
+- Chrome flags a few inputs without `id`/`name` (search box, file input) — cosmetic.
+- `features/dashboard/legacy-account-schemas.ts`, `components/status-badge.tsx`, `mini-quota-bar.tsx` and
+  `utils/account-status.ts` remain only for the legacy dashboard.
+
+**Notes for next agents (Step D)**
+- Reuse for the Dashboard accounts section: `AccountListItem` (pass no `onSelect` for a static card, or `onSelect`
+  to navigate to `/accounts?selected=<id>`), `AccountQuotaBars`, `UsageBar`, `AccountStatusBadge` / `PlanBadge` /
+  `RoutingPolicyBadge` / `ProviderIcon` / `RiskBadge`, `useAccounts()` (`["accounts","list"]`), `usePoolQuota()`
+  (`["usage","quota"]`, has pool totals too), `accountStatus()` and `useNow()` for countdowns. Mutations invalidate
+  `["dashboard"]`, so a Dashboard query under that prefix refreshes after account edits.
+- Selection is the `?selected=` search param. Dates from claude-lb: always `parseServerDate` / `lib/time.ts`.

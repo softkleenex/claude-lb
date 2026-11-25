@@ -202,8 +202,7 @@ describe("DashboardPage", () => {
     const overview = createDashboardOverview();
 
     useAccountMutationsMock.mockReturnValue({
-      resumeMutation: { mutateAsync: vi.fn() },
-      limitWarmupMutation: { mutateAsync: vi.fn() },
+      update: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
     } as unknown as ReturnType<typeof useAccountMutations>);
     useDashboardMock.mockReturnValue({
       data: overview,

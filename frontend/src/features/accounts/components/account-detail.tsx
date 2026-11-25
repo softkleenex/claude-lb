@@ -1,87 +1,122 @@
-import { Check, Pencil, User, X } from "lucide-react";
-import { useState } from "react";
+import { Activity, CheckCircle2, Pause, Play, RotateCcw, Trash2, User, XCircle } from "lucide-react";
+import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 
-import { isEmailLabel } from "@/components/blur-email";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { usePrivacyStore } from "@/hooks/use-privacy";
-import { AccountActions } from "@/features/accounts/components/account-actions";
-import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
-import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
+import type { Account, AccountTrends, AccountUpdateRequest, ProbeResult } from "@/features/accounts/schemas";
+import {
+  AccountStatusBadge,
+  PlanBadge,
+  ProviderIcon,
+  RiskBadge,
+  RoutingPolicyBadge,
+} from "@/features/accounts/components/account-badges";
+import { AccountModelBlocks } from "@/features/accounts/components/account-model-blocks";
+import { AccountNameField } from "@/features/accounts/components/account-name-field";
+import { AccountSettingsCard } from "@/features/accounts/components/account-settings-card";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
-import type {
-  AccountRoutingPolicy,
-  AccountSummary,
-  AccountUsageResetCredits,
-} from "@/features/accounts/schemas";
-import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
-import type {
-  AccountProxyBindingRequest,
-  UpstreamProxyAdmin,
-  UpstreamProxyEndpointTestResponse,
-} from "@/features/accounts/upstream-proxy-legacy";
-import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatSlug } from "@/utils/formatters";
+import type { AccountTrendChartProps } from "@/features/accounts/components/account-trend-chart";
+import { formatAbsolute, formatAgo, formatUntil } from "@/features/accounts/lib/time";
+import { accountStatus, isSubscription, statusLiftsAt } from "@/features/accounts/status";
+
+const AccountTrendChart = lazy(() =>
+  import("@/features/accounts/components/account-trend-chart").then((module) => ({
+    default: (props: AccountTrendChartProps) => <module.AccountTrendChart {...props} />,
+  })),
+);
 
 export type AccountDetailProps = {
-  account: AccountSummary | null;
-  showAccountId?: boolean;
-  busy: boolean;
+  account: Account | null;
+  now: number;
+  trends?: AccountTrends | null;
+  risk?: { level: string; value: number } | null;
+  /** Result of the latest "Probe now" on this account, if any. */
+  probeResult?: ProbeResult | null;
+  busy?: boolean;
+  probing?: boolean;
   readOnly?: boolean;
-  onPause: (accountId: string) => void;
-  onResume: (accountId: string) => void;
+  onUpdate: (accountId: string, patch: AccountUpdateRequest) => Promise<unknown>;
   onProbe: (accountId: string) => void;
-  onResetUsage: (accountId: string) => void;
-  onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
+  onResetQuota: (accountId: string) => void;
+  onClearBlocks: (accountId: string, model?: string) => void;
   onDelete: (accountId: string) => void;
-  onReauth: () => void;
-  onExportAuth: (accountId: string) => void;
-  onResetCredit: (accountId: string) => void;
-  showResetCreditExpiryBadge?: boolean;
-  onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onRoutingPolicyChange: (
-    accountId: string,
-    routingPolicy: AccountRoutingPolicy,
-  ) => void;
-  onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
-  upstreamProxyAdmin?: UpstreamProxyAdmin | null;
-  onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
-  onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
-  resetCredits?: AccountUsageResetCredits | null;
-  resetCreditsLoading?: boolean;
-  resetCreditsUnavailable?: boolean;
 };
+
+function StatusSummary({ account, now }: { account: Account; now: number }) {
+  const { t } = useTranslation();
+  const status = accountStatus(account);
+  const liftsAt = statusLiftsAt(account);
+  const until = liftsAt ? formatUntil(liftsAt, now) : null;
+  const reason =
+    status === "disabled"
+      ? account.disabledReason
+      : status === "cooling_down" && account.disabledReason
+        ? account.disabledReason
+        : null;
+
+  return (
+    <div className="space-y-1 text-xs">
+      <p className="text-foreground">{t(`accounts.statusHelp.${status}`)}</p>
+      {reason ? <p className="text-muted-foreground">{t("accounts.detail.reason", { reason })}</p> : null}
+      {until && liftsAt ? (
+        <p className="text-muted-foreground" data-testid="status-countdown">
+          {t("accounts.detail.liftsAt", { time: formatAbsolute(liftsAt), label: until })}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ProbeLine({ account, result, now }: { account: Account; result: ProbeResult | null; now: number }) {
+  const { t } = useTranslation();
+  if (result) {
+    return (
+      <p
+        className={cn(
+          "flex items-center gap-1.5 text-xs",
+          result.ok ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400",
+        )}
+        data-testid="probe-result"
+      >
+        {result.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+        {result.ok
+          ? result.models > 0
+            ? t("accounts.probe.ok", { count: result.models })
+            : t("accounts.probe.okNoModels")
+          : t("accounts.probe.failed", { detail: result.detail })}
+      </p>
+    );
+  }
+  if (account.lastProbeAt === null) {
+    return <p className="text-xs text-muted-foreground">{t("accounts.probe.never")}</p>;
+  }
+  const ago = formatAgo(account.lastProbeAt, now) ?? "";
+  return (
+    <p className="text-xs text-muted-foreground">
+      {account.lastProbeOk
+        ? t("accounts.probe.lastOk", { label: ago })
+        : t("accounts.probe.lastFailed", { label: ago, detail: account.lastProbeDetail })}
+    </p>
+  );
+}
 
 export function AccountDetail({
   account,
-  showAccountId = false,
-  busy,
+  now,
+  trends = null,
+  risk = null,
+  probeResult = null,
+  busy = false,
+  probing = false,
   readOnly = false,
-  onPause,
-  onResume,
+  onUpdate,
   onProbe,
-  onResetUsage,
-  onSetAlias,
+  onResetQuota,
+  onClearBlocks,
   onDelete,
-  onReauth,
-  onExportAuth,
-  onResetCredit,
-  showResetCreditExpiryBadge = true,
-  onLimitWarmupChange,
-  onRoutingPolicyChange,
-  onSecurityWorkAuthorizedChange,
-  upstreamProxyAdmin = null,
-  onProxyBindingSave,
-  onProxyEndpointTest,
-  resetCredits = null,
-  resetCreditsLoading = false,
-  resetCreditsUnavailable = false,
 }: AccountDetailProps) {
   const { t } = useTranslation();
-  const { data: trends } = useAccountTrends(account?.accountId ?? null);
-  const blurred = usePrivacyStore((s) => s.blurred);
 
   if (!account) {
     return (
@@ -89,227 +124,114 @@ export function AccountDetail({
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
           <User className="h-5 w-5 text-muted-foreground" />
         </div>
-        <p className="mt-3 text-sm font-medium text-muted-foreground">
-          {t("accounts.detail.emptyTitle")}
-        </p>
-        <p className="mt-1 text-xs text-muted-foreground/70">
-          {t("accounts.detail.emptyDescription")}
-        </p>
+        <p className="mt-3 text-sm font-medium text-muted-foreground">{t("accounts.detail.emptyTitle")}</p>
+        <p className="mt-1 text-xs text-muted-foreground/70">{t("accounts.detail.emptyDescription")}</p>
       </div>
     );
   }
 
-  const aliasLabel = account.alias?.trim() ?? "";
-  const localLabel = aliasLabel || account.displayName || account.email;
-  const labelIsEmail = !aliasLabel && isEmailLabel(localLabel, account.email);
-  const compactId = formatCompactAccountId(account.accountId);
-  const emailSubtitle =
-    aliasLabel || (account.displayName && account.displayName !== account.email)
-      ? account.email
-      : null;
-  const idSuffix = showAccountId ? ` (${compactId})` : "";
-  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
-  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
-  const operatorRecoveryAction =
-    account.status === "reauth_required" || account.status === "deactivated";
-  const usageResetDisabled =
-    busy || readOnly || account.status === "paused" || operatorRecoveryAction || (resetCredits?.availableCount ?? 0) <= 0;
+  const disabled = busy || readOnly;
+  const update = (patch: AccountUpdateRequest) => onUpdate(account.id, patch);
+  const subscription = isSubscription(account);
 
   return (
-    <div
-      key={account.accountId}
-      className="animate-fade-in-up min-w-0 space-y-4 rounded-xl border bg-card p-4 sm:p-5"
-    >
-      {/* Account header */}
-      <div>
-        <AccountNameField
-          key={account.accountId}
-          accountId={account.accountId}
-          alias={account.alias ?? null}
-          localLabel={localLabel}
-          labelIsEmail={labelIsEmail}
-          idSuffix={emailSubtitle ? "" : idSuffix}
-          blurred={blurred}
-          busy={busy}
-          readOnly={readOnly}
-          onSetAlias={onSetAlias}
-        />
-        {emailSubtitle ? (
-          <p
-            className="mt-0.5 text-xs text-muted-foreground"
-            title={
-              showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined
-            }
-          >
-            <span className={blurred ? "privacy-blur" : ""}>
-              {emailSubtitle}
-            </span>
-            {showAccountId ? ` | ID ${compactId}` : ""}
-          </p>
-        ) : null}
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {workspaceLabel} | {formatSlug(account.planType)}{seatLabel}
-        </p>
-      </div>
+    <div key={account.id} className="animate-fade-in-up min-w-0 space-y-4 rounded-xl border bg-card p-4 sm:p-5">
+      <header className="flex items-start gap-3">
+        <ProviderIcon account={account} className="h-9 w-9" />
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <AccountNameField name={account.name} disabled={disabled} onRename={(name) => update({ name })} />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <AccountStatusBadge account={account} />
+            <PlanBadge planType={account.planType} />
+            <RoutingPolicyBadge policy={account.routingPolicy} />
+            {risk ? <RiskBadge level={risk.level} risk={risk.value} /> : null}
+          </div>
+        </div>
+      </header>
 
-      {onProxyBindingSave ? (
-        <AccountProxyBinding
-          account={account}
-          admin={upstreamProxyAdmin}
-          busy={busy}
-          readOnly={readOnly}
-          onSave={onProxyBindingSave}
-          onTestEndpoint={onProxyEndpointTest}
-        />
-      ) : null}
-      <AccountUsagePanel
-        account={account}
-        trends={trends}
-        resetCredits={resetCredits}
-        resetCreditsLoading={resetCreditsLoading}
-        resetCreditsUnavailable={resetCreditsUnavailable}
-        resetDisabled={usageResetDisabled}
-        onReset={onResetUsage}
-      />
-      <AccountTokenInfo account={account} />
-      <AccountActions
-        account={account}
-        busy={busy}
-        readOnly={readOnly}
-        onPause={onPause}
-        onResume={onResume}
-        onProbe={onProbe}
-        onDelete={onDelete}
-        onReauth={onReauth}
-        onExportAuth={onExportAuth}
-        onResetCredit={onResetCredit}
-        showResetCreditExpiryBadge={showResetCreditExpiryBadge}
-        onLimitWarmupChange={onLimitWarmupChange}
-        onRoutingPolicyChange={onRoutingPolicyChange}
-        onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
-      />
-    </div>
-  );
-}
-
-type AccountNameFieldProps = {
-  accountId: string;
-  alias: string | null;
-  localLabel: string;
-  labelIsEmail: boolean;
-  idSuffix: string;
-  blurred: boolean;
-  busy: boolean;
-  readOnly: boolean;
-  onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
-};
-
-function AccountNameField({
-  accountId,
-  alias,
-  localLabel,
-  labelIsEmail,
-  idSuffix,
-  blurred,
-  busy,
-  readOnly,
-  onSetAlias,
-}: AccountNameFieldProps) {
-  const { t } = useTranslation();
-  const [isEditing, setIsEditing] = useState(false);
-  const [aliasDraft, setAliasDraft] = useState(alias ?? "");
-
-  const handleSave = async () => {
-    const trimmed = aliasDraft.trim();
-    await onSetAlias(accountId, trimmed === "" ? null : trimmed);
-    setIsEditing(false);
-  };
-
-  const handleCancel = () => {
-    setAliasDraft(alias ?? "");
-    setIsEditing(false);
-  };
-
-  if (isEditing) {
-    return (
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-1.5">
-          <Input
-            id="account-alias"
-            aria-label={t("accounts.detail.aliasLabel")}
-            className="h-8 text-sm"
-            maxLength={255}
-            placeholder={t("accounts.detail.aliasPlaceholder")}
-            value={aliasDraft}
-            autoFocus
-            disabled={busy || readOnly}
-            onChange={(event) => setAliasDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void handleSave();
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                handleCancel();
-              }
-            }}
-          />
+      <section className="space-y-3 rounded-lg border bg-muted/30 p-4">
+        <StatusSummary account={account} now={now} />
+        <ProbeLine account={account} result={probeResult} now={now} />
+        <div className="flex flex-wrap gap-2">
+          {account.enabled ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={disabled}
+              onClick={() => void update({ enabled: false }).catch(() => null)}
+            >
+              <Pause className="h-3.5 w-3.5" />
+              {t("accounts.actions.pause")}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              className="gap-1.5"
+              disabled={disabled}
+              onClick={() => void update({ enabled: true }).catch(() => null)}
+            >
+              <Play className="h-3.5 w-3.5" />
+              {t("accounts.actions.resume")}
+            </Button>
+          )}
           <Button
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={t("accounts.detail.saveAlias")}
-            disabled={busy || readOnly}
-            onClick={() => void handleSave()}
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            disabled={disabled}
+            onClick={() => onProbe(account.id)}
           >
-            <Check className="size-4" />
+            <Activity className={cn("h-3.5 w-3.5", probing && "animate-pulse")} />
+            {probing ? t("accounts.actions.probing") : t("accounts.actions.probe")}
           </Button>
           <Button
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={t("common.cancel")}
-            onClick={handleCancel}
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            disabled={disabled}
+            onClick={() => onResetQuota(account.id)}
           >
-            <X className="size-4" />
+            <RotateCcw className="h-3.5 w-3.5" />
+            {t("accounts.actions.resetQuota")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="gap-1.5 text-destructive hover:text-destructive"
+            disabled={disabled}
+            onClick={() => onDelete(account.id)}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            {t("common.actions.delete")}
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground">
-          {t("accounts.detail.aliasHelp")}
+        <p className="text-[11px] text-muted-foreground">
+          {account.enabled ? t("accounts.actions.pauseHelp") : t("accounts.actions.resumeHelp")}
         </p>
-      </div>
-    );
-  }
+      </section>
 
-  return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <h2 className="min-w-0 truncate text-base font-semibold">
-        {labelIsEmail ? (
-          <>
-            <span className={cn(blurred && "privacy-blur")}>{localLabel}</span>
-            {idSuffix}
-          </>
-        ) : (
-          <>
-            {localLabel}
-            {idSuffix}
-          </>
-        )}
-      </h2>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        aria-label={t("accounts.detail.editAlias")}
-        title={t("accounts.detail.aliasHelp")}
-        disabled={busy || readOnly}
-        onClick={() => {
-          setAliasDraft(alias ?? "");
-          setIsEditing(true);
-        }}
-      >
-        <Pencil className="size-3.5" />
-      </Button>
+      <AccountModelBlocks
+        account={account}
+        now={now}
+        disabled={disabled}
+        onClear={(model) => onClearBlocks(account.id, model)}
+      />
+
+      <AccountUsagePanel account={account} now={now} trends={trends} />
+
+      {trends ? (
+        <Suspense fallback={<div className="h-[220px]" />}>
+          <AccountTrendChart trends={trends} showQuota={subscription} />
+        </Suspense>
+      ) : null}
+
+      <AccountSettingsCard account={account} disabled={disabled} onUpdate={update} />
     </div>
   );
 }

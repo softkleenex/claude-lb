@@ -13,7 +13,7 @@ import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/us
 import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
-  listAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
+  listAccounts: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/features/dashboard/api", () => ({
@@ -92,7 +92,7 @@ describe("ReportsPage", () => {
     getRequestLogOptionsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
-    listAccountsMock.mockResolvedValue({ accounts: [] });
+    listAccountsMock.mockResolvedValue([]);
     getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
@@ -735,7 +735,7 @@ describe("ReportsPage", () => {
     );
     listAccountsMock
       .mockRejectedValueOnce(new Error("accounts backend timeout"))
-      .mockResolvedValueOnce({ accounts: [] });
+      .mockResolvedValueOnce([]);
 
     renderWithProviders(<ReportsPage />);
 

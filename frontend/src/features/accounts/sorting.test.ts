@@ -1,103 +1,43 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_ACCOUNT_SORT_MODE, sortAccountsForDisplay } from "@/features/accounts/sorting";
-import type { AccountSummary } from "@/features/accounts/schemas";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { AccountSchema } from "@/features/accounts/schemas";
+import { filterAccounts, sortAccounts } from "@/features/accounts/sorting";
+import { camelizeKeys } from "@/lib/casing";
+import { createAccountWire, type AccountWire } from "@/test/mocks/factories";
 
-const BOTH = "both";
+function account(overrides: Partial<AccountWire>) {
+  return AccountSchema.parse(camelizeKeys(createAccountWire(overrides)));
+}
 
-describe("sortAccountsForDisplay — most_reset_credits", () => {
-  it("uses most reset credits as the default sort mode", () => {
-    expect(DEFAULT_ACCOUNT_SORT_MODE).toBe("most_reset_credits");
+const now = Date.parse("2026-01-01T00:00:00Z");
+const accounts = [
+  account({ id: "c", name: "charlie", primary_used_percent: 90, primary_reset_at: "2026-01-01T01:00:00Z" }),
+  account({ id: "a", name: "alpha", primary_used_percent: 10, primary_reset_at: "2026-01-01T03:00:00Z" }),
+  account({ id: "b", name: "bravo", enabled: false, available: false, paused: true }),
+];
+
+describe("sortAccounts", () => {
+  it("sorts by name", () => {
+    expect(sortAccounts(accounts, "name", now).map((a) => a.name)).toEqual(["alpha", "bravo", "charlie"]);
   });
 
-  it("orders accounts by available reset credits descending", () => {
-    const fewer = createAccountSummary({
-      accountId: "acc-fewer",
-      displayName: "Fewer",
-      availableResetCredits: 1,
-    });
-    const more = createAccountSummary({
-      accountId: "acc-more",
-      displayName: "More",
-      availableResetCredits: 4,
-    });
-
-    const sorted = sortAccountsForDisplay([fewer, more], BOTH, "most_reset_credits");
-
-    expect(sorted.map((account) => account.accountId)).toEqual([
-      "acc-more",
-      "acc-fewer",
-    ]);
+  it("puts the soonest reset first and unknown resets last", () => {
+    expect(sortAccounts(accounts, "reset_soonest", now).map((a) => a.id)).toEqual(["c", "a", "b"]);
   });
 
-  it("breaks ties by soonest expiry ascending", () => {
-    const later = createAccountSummary({
-      accountId: "acc-later",
-      displayName: "Later",
-      availableResetCredits: 2,
-      resetCreditNearestExpiresAt: "2026-02-01T00:00:00.000Z",
-    });
-    const sooner = createAccountSummary({
-      accountId: "acc-sooner",
-      displayName: "Sooner",
-      availableResetCredits: 2,
-      resetCreditNearestExpiresAt: "2026-01-10T00:00:00.000Z",
-    });
+  it("puts available accounts with the most headroom first", () => {
+    expect(sortAccounts(accounts, "most_remaining", now).map((a) => a.id)).toEqual(["a", "c", "b"]);
+  });
+});
 
-    const sorted = sortAccountsForDisplay([later, sooner], BOTH, "most_reset_credits");
-
-    expect(sorted.map((account) => account.accountId)).toEqual([
-      "acc-sooner",
-      "acc-later",
-    ]);
+describe("filterAccounts", () => {
+  it("matches name, plan and policy text", () => {
+    expect(filterAccounts(accounts, "BRA", "all").map((a) => a.id)).toEqual(["b"]);
+    expect(filterAccounts(accounts, "api", "all")).toHaveLength(3);
   });
 
-  it("sorts accounts with null expiry after accounts that have one", () => {
-    const noExpiry = createAccountSummary({
-      accountId: "acc-no-expiry",
-      displayName: "No Expiry",
-      availableResetCredits: 3,
-      resetCreditNearestExpiresAt: null,
-    });
-    const withExpiry = createAccountSummary({
-      accountId: "acc-with-expiry",
-      displayName: "With Expiry",
-      availableResetCredits: 3,
-      resetCreditNearestExpiresAt: "2026-01-10T00:00:00.000Z",
-    });
-
-    const sorted = sortAccountsForDisplay(
-      [noExpiry, withExpiry],
-      BOTH,
-      "most_reset_credits",
-    ) as AccountSummary[];
-
-    expect(sorted.map((account) => account.accountId)).toEqual([
-      "acc-with-expiry",
-      "acc-no-expiry",
-    ]);
-  });
-
-  it("still sorts credits descending when both accounts have null expiry", () => {
-    const low = createAccountSummary({
-      accountId: "acc-low",
-      displayName: "Low",
-      availableResetCredits: 1,
-      resetCreditNearestExpiresAt: null,
-    });
-    const high = createAccountSummary({
-      accountId: "acc-high",
-      displayName: "High",
-      availableResetCredits: 5,
-      resetCreditNearestExpiresAt: null,
-    });
-
-    const sorted = sortAccountsForDisplay([low, high], BOTH, "most_reset_credits");
-
-    expect(sorted.map((account) => account.accountId)).toEqual([
-      "acc-high",
-      "acc-low",
-    ]);
+  it("filters by derived status", () => {
+    expect(filterAccounts(accounts, "", "paused").map((a) => a.id)).toEqual(["b"]);
+    expect(filterAccounts(accounts, "", "available").map((a) => a.id)).toEqual(["c", "a"]);
   });
 });

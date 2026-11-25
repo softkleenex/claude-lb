@@ -102,8 +102,11 @@ def _needs_probe(account: Account, *, now: datetime) -> bool:
     """Probe accounts the balancer currently refuses to use.
 
     Healthy accounts are left alone: real traffic already tells us they work, and
-    probing them would just add requests.
+    probing them would just add requests. An account the operator paused is left
+    alone too — a successful probe would put it back in rotation against their wish.
     """
+    if lb.is_paused(account):
+        return False
     if not account.enabled:
         return True
     cooldown = account.cooldown_until
@@ -157,23 +160,64 @@ async def run_health_probes(client: httpx.AsyncClient) -> list[ProbeResult]:
             account = await session.get(Account, account_id)
             if account is None:
                 continue
-            account.last_probe_at = datetime.now(UTC)
-            account.last_probe_ok = outcome.ok
-            account.last_probe_detail = outcome.detail[:255]
-
-            if outcome.ok:
-                was_down = not account.enabled or account.consecutive_failures
-                account.enabled = True
-                account.quota_status = "active"
-                lb.record_success(account)
-                if was_down:
-                    logger.info("account %s recovered and is back in rotation", name)
-            elif outcome.status_code in (401, 403):
-                # Still rejected: leave it disabled, but keep the reason current.
-                account.enabled = False
-                account.disabled_reason = outcome.detail[:255]
+            _fold_probe_outcome(account, outcome)
 
     return probes
+
+
+def _fold_probe_outcome(account: Account, outcome: ProbeResult, *, reset_quota_status: bool = True) -> None:
+    """Record a probe result on the account and update its breaker state.
+
+    `GET /v1/models` says nothing about 5h/7d quota, so an on-demand probe of an
+    account mid-window leaves its quota status alone (``reset_quota_status=False``).
+    """
+    account.last_probe_at = datetime.now(UTC)
+    account.last_probe_ok = outcome.ok
+    account.last_probe_detail = outcome.detail[:255]
+
+    if lb.is_paused(account):
+        # The operator's pause outranks whatever the probe found.
+        return
+    if outcome.ok:
+        was_down = not account.enabled or account.consecutive_failures
+        account.enabled = True
+        if reset_quota_status:
+            account.quota_status = "active"
+        lb.record_success(account)
+        if was_down:
+            logger.info("account %s recovered and is back in rotation", account.name)
+    elif outcome.status_code in (401, 403):
+        # Still rejected: leave it disabled, but keep the reason current.
+        account.enabled = False
+        account.disabled_reason = outcome.detail[:255]
+
+
+async def probe_one(client: httpx.AsyncClient, account_id: str) -> ProbeResult | None:
+    """Probe one account now, whatever its state, and fold the result into its row.
+
+    Returns None when the account does not exist.
+    """
+    env = get_settings()
+    async with session_scope() as session:
+        account = await session.get(Account, account_id)
+        if account is None:
+            return None
+        reconcile_expired_quota(account)
+        name = account.name
+        credential = _credential_for(account)
+        base_url = account.base_url or env.upstream_base_url
+
+    stub = Account(id=account_id, name=name)
+    try:
+        outcome = await probe_account(client, stub, base_url=base_url, credential=credential)
+    except Exception as exc:  # noqa: BLE001 - a probe failure is a result, not a crash
+        outcome = ProbeResult(account_id, name, False, None, str(exc), [])
+
+    async with session_scope() as session:
+        account = await session.get(Account, account_id)
+        if account is not None:
+            _fold_probe_outcome(account, outcome, reset_quota_status=False)
+    return outcome
 
 
 async def sync_model_catalog(client: httpx.AsyncClient) -> dict[str, int]:

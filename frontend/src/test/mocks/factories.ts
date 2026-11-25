@@ -1,17 +1,6 @@
 import type { z } from "zod";
-import type {
-	AccountSummary,
-	AccountTrendsResponse,
-	OauthStartResponse,
-	OauthStatusResponse,
-} from "@/features/accounts/schemas";
-import {
-	AccountSummarySchema,
-	AccountTrendsResponseSchema,
-	OauthCompleteResponseSchema,
-	OauthStartResponseSchema,
-	OauthStatusResponseSchema,
-} from "@/features/accounts/schemas";
+import type { AccountSummary } from "@/features/dashboard/legacy-account-schemas";
+import { AccountSummarySchema } from "@/features/dashboard/legacy-account-schemas";
 import type { ApiKey, ApiKeyCreateResponse } from "@/features/api-keys/schemas";
 import {
 	ApiKeyCreateResponseSchema,
@@ -45,8 +34,6 @@ import {
 	RequestLogSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
-import type { UpstreamProxyAdmin } from "@/features/accounts/upstream-proxy-legacy";
-import { UpstreamProxyAdminSchema } from "@/features/accounts/upstream-proxy-legacy";
 import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
@@ -67,18 +54,13 @@ export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
 export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
-export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
 export type {
 	AccountSummary,
-	AccountTrendsResponse,
 	DashboardOverview,
 	DashboardProjections,
 	RequestLogsResponse,
 	RequestLogFilterOptions,
-	UpstreamProxyAdmin,
-	OauthStartResponse,
-	OauthStatusResponse,
 	ApiKey,
 	ApiKeyCreateResponse,
 	ApiKeyTrendsResponse,
@@ -487,71 +469,6 @@ export function createQuotaPlannerWarmupActionResponse(
 	});
 }
 
-export function createUpstreamProxyAdmin(
-	overrides: Partial<UpstreamProxyAdmin> = {},
-): UpstreamProxyAdmin {
-	return UpstreamProxyAdminSchema.parse({
-		routingEnabled: false,
-		defaultPoolId: null,
-		endpoints: [
-			{
-				id: "ep_primary",
-				name: "Primary proxy",
-				scheme: "http",
-				host: "proxy-primary.test",
-				port: 8080,
-				username: "operator",
-				isActive: true,
-			},
-		],
-		pools: [
-			{
-				id: "pool_primary",
-				name: "Primary pool",
-				isActive: true,
-				endpointIds: ["ep_primary"],
-			},
-		],
-		bindings: [],
-		...overrides,
-	});
-}
-
-export function createOauthStartResponse(
-	overrides: Partial<OauthStartResponse> = {},
-): OauthStartResponse {
-	return OauthStartResponseSchema.parse({
-		method: "browser",
-		authorizationUrl: "https://auth.example.com/start",
-		callbackUrl: "http://localhost:3000/api/oauth/callback",
-		verificationUrl: null,
-		userCode: null,
-		deviceAuthId: null,
-		intervalSeconds: null,
-		expiresInSeconds: null,
-		...overrides,
-	});
-}
-
-export function createOauthStatusResponse(
-	overrides: Partial<OauthStatusResponse> = {},
-): OauthStatusResponse {
-	return OauthStatusResponseSchema.parse({
-		status: "pending",
-		errorMessage: null,
-		...overrides,
-	});
-}
-
-export function createOauthCompleteResponse(
-	overrides: Partial<OauthCompleteResponse> = {},
-): OauthCompleteResponse {
-	return OauthCompleteResponseSchema.parse({
-		status: "ok",
-		...overrides,
-	});
-}
-
 export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 	return ApiKeySchema.parse({
 		id: "key_1",
@@ -619,28 +536,6 @@ export function createDefaultApiKeys(): ApiKey[] {
 			limits: [],
 		}),
 	];
-}
-
-function createUsageTrendPoints(
-	basePercent: number,
-	count = 28,
-): Array<{ t: string; v: number }> {
-	return Array.from({ length: count }, (_, i) => ({
-		t: new Date(BASE_TIME.getTime() - (count - i) * 6 * 3600_000).toISOString(),
-		v: Math.max(0, Math.min(100, basePercent + Math.sin(i) * 15)),
-	}));
-}
-
-export function createAccountTrends(
-	accountId: string,
-	overrides: Partial<AccountTrendsResponse> = {},
-): AccountTrendsResponse {
-	return AccountTrendsResponseSchema.parse({
-		accountId,
-		primary: createUsageTrendPoints(80),
-		secondary: createUsageTrendPoints(55),
-		...overrides,
-	});
 }
 
 function createApiKeyTrendPoints(count = 28): Array<{ t: string; v: number }> {
@@ -840,4 +735,244 @@ export function createRuntimeSettings(overrides: Partial<RuntimeSettingsWire> = 
 /** `GET/PATCH /api/settings` envelope. */
 export function createSettingsEnvelope(overrides: Partial<RuntimeSettingsWire> = {}) {
 	return { settings: createRuntimeSettings(overrides), available_strategies: [...ROUTING_STRATEGIES_WIRE] };
+}
+
+// ---------------------------------------------------------------------------
+// claude-lb accounts (`/api/accounts`, `/api/usage/quota`) — snake_case wire shapes.
+// ---------------------------------------------------------------------------
+
+export type AccountWire = {
+	id: string;
+	name: string;
+	provider: string;
+	credential_hint: string;
+	base_url: string | null;
+	weight: number;
+	priority: number;
+	enabled: boolean;
+	available: boolean;
+	headroom: number;
+	plan_type: string;
+	routing_policy: string;
+	capacity_credits: number | null;
+	spend_cap_usd: number | null;
+	blocked_models: string[];
+	model_blocks: Array<{ model: string; until: string }>;
+	paused: boolean;
+	spend_cap_reached: boolean;
+	consecutive_failures: number;
+	effective_capacity: number;
+	primary_used_percent: number | null;
+	primary_reset_at: string | null;
+	secondary_used_percent: number | null;
+	secondary_reset_at: string | null;
+	unified_status: string | null;
+	overage_status: string | null;
+	quota_status: string;
+	quota_observed_at: string | null;
+	disabled_reason: string | null;
+	cooldown_until: string | null;
+	rl_requests_limit: number | null;
+	rl_requests_remaining: number | null;
+	rl_tokens_limit: number | null;
+	rl_tokens_remaining: number | null;
+	rl_reset_at: string | null;
+	total_requests: number;
+	total_input_tokens: number;
+	total_output_tokens: number;
+	total_cost_usd: number;
+	last_used_at: string | null;
+	last_probe_at: string | null;
+	last_probe_ok: boolean | null;
+	last_probe_detail: string;
+	models_synced_at: string | null;
+	auth_scheme: string;
+	credential_expires_at: string | null;
+	last_refresh_at: string | null;
+	refresh_failures: number;
+	created_at: string;
+};
+
+const PLAN_CAPACITY: Record<string, number> = {
+	free: 10,
+	pro: 100,
+	api: 100,
+	team: 150,
+	enterprise: 300,
+	max: 500,
+	max_5x: 500,
+	max_20x: 2000,
+};
+
+function hoursFromNow(hours: number): string {
+	return new Date(Date.now() + hours * 3_600_000).toISOString();
+}
+
+/** A Console API-key account as `GET /api/accounts` returns it. */
+export function createAccountWire(overrides: Partial<AccountWire> = {}): AccountWire {
+	const planType = overrides.plan_type ?? "api";
+	return {
+		id: "acc_console",
+		name: "console",
+		provider: "anthropic_api_key",
+		credential_hint: "sk-ant-…a1b2",
+		base_url: null,
+		weight: 1,
+		priority: 0,
+		enabled: true,
+		available: true,
+		headroom: 0.92,
+		plan_type: planType,
+		routing_policy: "normal",
+		capacity_credits: null,
+		spend_cap_usd: null,
+		blocked_models: [],
+		model_blocks: [],
+		paused: false,
+		spend_cap_reached: false,
+		consecutive_failures: 0,
+		effective_capacity: PLAN_CAPACITY[planType] ?? 100,
+		primary_used_percent: null,
+		primary_reset_at: null,
+		secondary_used_percent: null,
+		secondary_reset_at: null,
+		unified_status: null,
+		overage_status: null,
+		quota_status: "active",
+		quota_observed_at: null,
+		disabled_reason: null,
+		cooldown_until: null,
+		rl_requests_limit: 4000,
+		rl_requests_remaining: 3680,
+		rl_tokens_limit: 2_000_000,
+		rl_tokens_remaining: 1_900_000,
+		rl_reset_at: hoursFromNow(0.02),
+		total_requests: 1234,
+		total_input_tokens: 456_000,
+		total_output_tokens: 78_900,
+		total_cost_usd: 3.21,
+		last_used_at: hoursFromNow(-0.1),
+		last_probe_at: null,
+		last_probe_ok: null,
+		last_probe_detail: "",
+		models_synced_at: null,
+		auth_scheme: "x-api-key",
+		credential_expires_at: null,
+		last_refresh_at: null,
+		refresh_failures: 0,
+		created_at: "2026-11-01T09:00:00",
+		...overrides,
+	};
+}
+
+/** A Claude Max 5x subscription account with live 5h/7d utilization. */
+export function createSubscriptionAccountWire(overrides: Partial<AccountWire> = {}): AccountWire {
+	return createAccountWire({
+		id: "acc_max",
+		name: "alice-max",
+		provider: "oauth",
+		credential_hint: "sk-ant-oat01-…z9y8",
+		plan_type: "max_5x",
+		routing_policy: "burn_first",
+		effective_capacity: 500,
+		auth_scheme: "bearer",
+		primary_used_percent: 42,
+		primary_reset_at: hoursFromNow(2),
+		secondary_used_percent: 18,
+		secondary_reset_at: hoursFromNow(80),
+		unified_status: "allowed",
+		overage_status: "rejected",
+		quota_observed_at: hoursFromNow(-0.05),
+		rl_requests_limit: null,
+		rl_requests_remaining: null,
+		rl_tokens_limit: null,
+		rl_tokens_remaining: null,
+		rl_reset_at: null,
+		credential_expires_at: hoursFromNow(24 * 300),
+		...overrides,
+	});
+}
+
+export function createDefaultAccountWires(): AccountWire[] {
+	return [
+		createSubscriptionAccountWire({
+			blocked_models: ["claude-sonnet-5"],
+			model_blocks: [{ model: "claude-sonnet-5", until: hoursFromNow(11) }],
+		}),
+		createAccountWire({ spend_cap_usd: 10 }),
+		createAccountWire({
+			id: "acc_paused",
+			name: "backup-key",
+			enabled: false,
+			available: false,
+			paused: true,
+			disabled_reason: "paused by operator",
+			routing_policy: "preserve",
+			total_requests: 0,
+			total_cost_usd: 0,
+		}),
+	];
+}
+
+export function createAccountTrendsWire(accountId: string, days = 7) {
+	const today = new Date();
+	const usage = Array.from({ length: days }, (_, index) => {
+		const day = new Date(today.getTime() - (days - 1 - index) * 86_400_000).toISOString().slice(0, 10);
+		const requests = index === days - 1 ? 12 : index * 3;
+		return {
+			day,
+			requests,
+			errors: index === days - 1 ? 1 : 0,
+			input_tokens: requests * 1000,
+			output_tokens: requests * 200,
+			cost_usd: +(requests * 0.01).toFixed(6),
+		};
+	});
+	const quota = Array.from({ length: 6 }, (_, index) => ({
+		t: new Date(Date.now() - (6 - index) * 3_600_000).toISOString(),
+		primary_used_percent: 10 + index * 5,
+		secondary_used_percent: 12 + index,
+	}));
+	const sum = (key: "requests" | "errors" | "input_tokens" | "output_tokens" | "cost_usd") =>
+		usage.reduce((total, day) => total + day[key], 0);
+	return {
+		account_id: accountId,
+		days,
+		quota,
+		usage,
+		totals: {
+			requests: sum("requests"),
+			errors: sum("errors"),
+			input_tokens: sum("input_tokens"),
+			output_tokens: sum("output_tokens"),
+			cost_usd: +sum("cost_usd").toFixed(6),
+		},
+	};
+}
+
+export function createPoolQuotaWire(accounts: AccountWire[]) {
+	return {
+		total_accounts: accounts.length,
+		available_accounts: accounts.filter((account) => account.available).length,
+		total_capacity_credits: accounts.reduce((total, account) => total + account.effective_capacity, 0),
+		remaining_capacity_credits: 0,
+		pool_remaining_percent: 100,
+		accounts: accounts.map((account) => ({
+			account_id: account.id,
+			account_name: account.name,
+			plan_type: account.plan_type,
+			routing_policy: account.routing_policy,
+			effective_capacity: account.effective_capacity,
+			available: account.available,
+			quota_status: account.quota_status,
+			primary_used_percent: account.primary_used_percent,
+			primary_reset_at: account.primary_reset_at,
+			secondary_used_percent: account.secondary_used_percent,
+			secondary_reset_at: account.secondary_reset_at,
+			unified_status: account.unified_status,
+			overage_status: account.overage_status,
+			depletion_risk: account.plan_type === "api" ? 0 : 0.65,
+			risk_level: account.plan_type === "api" ? "safe" : "warning",
+		})),
+	};
 }

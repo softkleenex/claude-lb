@@ -1,184 +1,65 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
-import { createAccountSummary } from "@/test/mocks/factories";
-import { server } from "@/test/mocks/server";
+import { createAccountWire, createSubscriptionAccountWire } from "@/test/mocks/factories";
+import { setMockAccounts } from "@/test/mocks/handlers";
 import { renderWithProviders } from "@/test/utils";
 
 import { AccountMultiSelect } from "./account-multi-select";
 
 describe("AccountMultiSelect", () => {
-  it("shows available account limits inside the picker", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({
-              accountId: "acc_quota",
-              email: "quota@example.com",
-              displayName: "Quota account",
-              usage: {
-                primaryRemainingPercent: 82,
-                secondaryRemainingPercent: 67,
-              },
-            }),
-          ],
-        }),
-      ),
-    );
-
+  it("shows 5h/7d headroom for subscription accounts inside the picker", async () => {
+    setMockAccounts([
+      createSubscriptionAccountWire({ id: "acc_quota", name: "quota-sub", primary_used_percent: 18, secondary_used_percent: 33 }),
+    ]);
     const user = userEvent.setup();
 
     renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} />);
 
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
-
     expect(await screen.findByText("5h 82% left")).toBeInTheDocument();
     expect(screen.getByText("7d 67% left")).toBeInTheDocument();
-    expect(screen.queryByText(/GPT-5\.3-Codex-Spark/i)).not.toBeInTheDocument();
   });
 
-  it("keeps account selection working with the richer rows", async () => {
+  it("selects an account by id", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
 
     renderWithProviders(<AccountMultiSelect value={[]} onChange={onChange} />);
 
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /console/i }));
 
     await waitFor(() => {
-      expect(onChange).toHaveBeenCalledWith(["acc_primary"]);
+      expect(onChange).toHaveBeenCalledWith(["acc_console"]);
     });
   });
 
   it("pluralizes the selected account count", async () => {
-    renderWithProviders(
-      <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,
-    );
+    renderWithProviders(<AccountMultiSelect value={["acc_console", "acc_max"]} onChange={vi.fn()} />);
 
     expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
   });
 
-  it("excludes hard-blocked accounts from new selections", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({
-              accountId: "acc_active_picker",
-              email: "active-picker@example.com",
-              displayName: "Active picker",
-            }),
-            createAccountSummary({
-              accountId: "acc_reauth_picker",
-              email: "reauth-picker@example.com",
-              displayName: "Reauth picker",
-              status: "reauth_required",
-            }),
-            createAccountSummary({
-              accountId: "acc_paused_picker",
-              email: "paused-picker@example.com",
-              displayName: "Paused picker",
-              status: "paused",
-            }),
-            createAccountSummary({
-              accountId: "acc_deactivated_picker",
-              email: "deactivated-picker@example.com",
-              displayName: "Deactivated picker",
-              status: "deactivated",
-            }),
-          ],
-        }),
-      ),
-    );
-
+  it("hides disabled accounts and shows paused ones only when allowed", async () => {
+    setMockAccounts([
+      createAccountWire({ id: "acc_ok", name: "ok-key" }),
+      createAccountWire({ id: "acc_broken", name: "broken-key", enabled: false, disabled_reason: "upstream returned 401" }),
+      createAccountWire({ id: "acc_paused", name: "paused-key", enabled: false, disabled_reason: "paused by operator" }),
+    ]);
     const user = userEvent.setup();
 
-    renderWithProviders(<AccountMultiSelect value={["acc_reauth_picker"]} onChange={vi.fn()} />);
-
-    expect(await screen.findByText("reauth-picker@example.com")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "1 account selected" }));
-
-    expect(await screen.findByRole("menuitemcheckbox", { name: /active-picker@example\.com/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
-  });
-
-  it("can include paused accounts while keeping other hard-blocked accounts hidden", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({
-              accountId: "acc_paused_picker",
-              email: "paused-picker@example.com",
-              displayName: "Paused picker",
-              status: "paused",
-            }),
-            createAccountSummary({
-              accountId: "acc_reauth_picker",
-              email: "reauth-picker@example.com",
-              displayName: "Reauth picker",
-              status: "reauth_required",
-            }),
-            createAccountSummary({
-              accountId: "acc_deactivated_picker",
-              email: "deactivated-picker@example.com",
-              displayName: "Deactivated picker",
-              status: "deactivated",
-            }),
-          ],
-        }),
-      ),
-    );
-
-    const user = userEvent.setup();
+    const { unmount } = renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "All accounts" }));
+    expect(await screen.findByRole("menuitemcheckbox", { name: /ok-key/ })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: /broken-key/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: /paused-key/ })).not.toBeInTheDocument();
+    unmount();
 
     renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} allowPausedAccounts />);
-
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
-
-    expect(await screen.findByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
-  });
-
-  it("shows Monthly left for monthly-only free accounts", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({
-              accountId: "acc_free",
-              email: "free@example.com",
-              displayName: "Free monthly",
-              planType: "free",
-              usage: {
-                primaryRemainingPercent: null,
-                secondaryRemainingPercent: null,
-                monthlyRemainingPercent: 95,
-              },
-              windowMinutesPrimary: null,
-              windowMinutesSecondary: null,
-              windowMinutesMonthly: 43_200,
-            }),
-          ],
-        }),
-      ),
-    );
-
-    const user = userEvent.setup();
-
-    renderWithProviders(<AccountMultiSelect value={[]} onChange={vi.fn()} />);
-
-    await user.click(await screen.findByRole("button", { name: "All accounts" }));
-
-    expect(await screen.findByText("Monthly 95% left")).toBeInTheDocument();
-    expect(screen.queryByText(/7d .* left/i)).not.toBeInTheDocument();
+    expect(await screen.findByRole("menuitemcheckbox", { name: /paused-key/ })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox", { name: /broken-key/ })).not.toBeInTheDocument();
   });
 });

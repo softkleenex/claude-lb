@@ -1,125 +1,59 @@
-import type { AccountSummary } from "@/features/accounts/schemas";
-import type { AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
-import { parseDate } from "@/utils/formatters";
+import type { Account } from "@/features/accounts/schemas";
+import {
+  accountStatus,
+  nextResetAt,
+  peakUsedPercent,
+  rateLimitRemainingPercent,
+  type AccountStatus,
+} from "@/features/accounts/status";
 
-export type AccountSortMode =
-  | "reset_soonest"
-  | "reset_latest"
-  | "name_asc"
-  | "name_desc"
-  | "most_reset_credits";
+export const ACCOUNT_SORT_MODES = ["name", "reset_soonest", "most_remaining"] as const;
+export type AccountSortMode = (typeof ACCOUNT_SORT_MODES)[number];
+export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "name";
 
-export const ACCOUNT_SORT_OPTIONS: readonly { value: AccountSortMode; label: string }[] = [
-  { value: "reset_soonest", label: "Reset time (soonest)" },
-  { value: "reset_latest", label: "Reset time (latest)" },
-  { value: "most_reset_credits", label: "Most reset credits" },
-  { value: "name_asc", label: "Name (A-Z)" },
-  { value: "name_desc", label: "Name (Z-A)" },
-] as const;
+export type AccountStatusFilter = "all" | AccountStatus;
 
-export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "most_reset_credits";
-
-function visibleQuotaResetTimestamps(
-  account: AccountSummary,
-  quotaDisplay: AccountQuotaDisplayPreference,
-): number[] {
-  const now = Date.now();
-  const hasPrimary = account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null || account.resetAtPrimary != null;
-  const hasSecondary = account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null || account.resetAtSecondary != null;
-  const showPrimary = hasPrimary && (quotaDisplay !== "weekly" || !hasSecondary);
-  const showSecondary = hasSecondary && (quotaDisplay !== "5h" || !hasPrimary);
-
-  return [
-    showPrimary ? parseDate(account.resetAtPrimary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
-    showSecondary ? parseDate(account.resetAtSecondary)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY,
-  ].filter((resetAt) => resetAt > now);
+function byName(a: Account, b: Account): number {
+  return a.name.localeCompare(b.name);
 }
 
-function accountSortLabel(account: AccountSummary): string {
-  return (account.displayName || account.email || account.accountId).trim().toLowerCase();
+/** Share of the account's budget left, in percent; unknown counts as full. */
+function remainingPercent(account: Account): number {
+  const used = peakUsedPercent(account);
+  if (used !== null) return Math.max(0, 100 - used);
+  return rateLimitRemainingPercent(account) ?? 100;
 }
 
-function accountResetTimestamp(account: AccountSummary, quotaDisplay: AccountQuotaDisplayPreference): number {
-  const resets = visibleQuotaResetTimestamps(account, quotaDisplay);
-  return resets.length > 0 ? Math.min(...resets) : Number.POSITIVE_INFINITY;
-}
-
-function compareResetTimestamps(leftReset: number, rightReset: number, direction: "asc" | "desc"): number {
-  const leftFinite = Number.isFinite(leftReset);
-  const rightFinite = Number.isFinite(rightReset);
-  if (leftFinite !== rightFinite) {
-    return leftFinite ? -1 : 1;
-  }
-  if (leftReset === rightReset) {
-    return 0;
-  }
-  return direction === "desc" ? rightReset - leftReset : leftReset - rightReset;
-}
-
-function resetCreditNearestExpiry(account: AccountSummary): number {
-  const parsed = parseDate(account.resetCreditNearestExpiresAt);
-  return parsed ? parsed.getTime() : Number.POSITIVE_INFINITY;
-}
-
-function compareByResetCredits(left: AccountSummary, right: AccountSummary): number {
-  const leftCount = left.availableResetCredits ?? 0;
-  const rightCount = right.availableResetCredits ?? 0;
-  if (leftCount !== rightCount) {
-    return rightCount - leftCount;
-  }
-  // Tiebreak by soonest expiry ascending; null expiry (Infinity) sorts last.
-  return compareResetTimestamps(
-    resetCreditNearestExpiry(left),
-    resetCreditNearestExpiry(right),
-    "asc",
-  );
-}
-
-export function sortAccountsForDisplay(
-  accounts: AccountSummary[],
-  quotaDisplay: AccountQuotaDisplayPreference,
-  sortMode: AccountSortMode = DEFAULT_ACCOUNT_SORT_MODE,
-): AccountSummary[] {
-  return accounts
-    .slice()
-    .sort((left, right) => {
-      if (sortMode === "most_reset_credits") {
-        const creditComparison = compareByResetCredits(left, right);
-        if (creditComparison !== 0) {
-          return creditComparison;
-        }
-      } else if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
-        const leftReset = accountResetTimestamp(left, quotaDisplay);
-        const rightReset = accountResetTimestamp(right, quotaDisplay);
-        const resetComparison = compareResetTimestamps(
-          leftReset,
-          rightReset,
-          sortMode === "reset_latest" ? "desc" : "asc",
-        );
-        if (resetComparison !== 0) {
-          return resetComparison;
-        }
-      } else {
-        const leftLabel = accountSortLabel(left);
-        const rightLabel = accountSortLabel(right);
-        const labelComparison = sortMode === "name_asc"
-          ? leftLabel.localeCompare(rightLabel)
-          : rightLabel.localeCompare(leftLabel);
-        if (labelComparison !== 0) {
-          return labelComparison;
-        }
-      }
-
-      const leftReset = accountResetTimestamp(left, quotaDisplay);
-      const rightReset = accountResetTimestamp(right, quotaDisplay);
-      const resetComparison = compareResetTimestamps(leftReset, rightReset, "asc");
-      if (resetComparison !== 0) {
-        return resetComparison;
-      }
-      const labelComparison = accountSortLabel(left).localeCompare(accountSortLabel(right));
-      if (labelComparison !== 0) {
-        return labelComparison;
-      }
-      return left.accountId.localeCompare(right.accountId);
+export function sortAccounts(accounts: Account[], mode: AccountSortMode, now = Date.now()): Account[] {
+  const sorted = [...accounts];
+  if (mode === "reset_soonest") {
+    sorted.sort((a, b) => {
+      const left = nextResetAt(a, now);
+      const right = nextResetAt(b, now);
+      if (left === right) return byName(a, b);
+      if (left === null) return 1;
+      if (right === null) return -1;
+      return left - right;
     });
+  } else if (mode === "most_remaining") {
+    sorted.sort((a, b) => {
+      // Accounts that can take traffic now come first; remaining quota orders within.
+      if (a.available !== b.available) return a.available ? -1 : 1;
+      return remainingPercent(b) - remainingPercent(a) || byName(a, b);
+    });
+  } else {
+    sorted.sort(byName);
+  }
+  return sorted;
+}
+
+export function filterAccounts(accounts: Account[], search: string, status: AccountStatusFilter): Account[] {
+  const needle = search.trim().toLowerCase();
+  return accounts.filter((account) => {
+    if (status !== "all" && accountStatus(account) !== status) return false;
+    if (!needle) return true;
+    return [account.name, account.planType, account.routingPolicy, account.credentialHint, account.id].some(
+      (value) => value.toLowerCase().includes(needle),
+    );
+  });
 }

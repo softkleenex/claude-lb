@@ -69,6 +69,18 @@ def top_policy_tier(available: list[Account]) -> list[Account]:
     return available
 
 
+PAUSED_REASON = "paused by operator"
+"""`disabled_reason` of an account the operator switched off.
+
+Kept distinct from breaker-disabled accounts so the health probe does not quietly
+put a paused account back into rotation.
+"""
+
+
+def is_paused(account: Account) -> bool:
+    return not account.enabled and account.disabled_reason == PAUSED_REASON
+
+
 def spend_cap_reached(account: Account) -> bool:
     cap = getattr(account, "spend_cap_usd", None)
     return cap is not None and (account.total_cost_usd or 0.0) >= cap

@@ -24,6 +24,8 @@ function lazyRechartsComponent(name: keyof RechartsModule) {
 
 export const Area = lazyRechartsComponent("Area");
 export const AreaChart = lazyRechartsComponent("AreaChart");
+export const Bar = lazyRechartsComponent("Bar");
+export const BarChart = lazyRechartsComponent("BarChart");
 export const CartesianGrid = lazyRechartsComponent("CartesianGrid");
 export const Cell = lazyRechartsComponent("Cell");
 export const Line = lazyRechartsComponent("Line");

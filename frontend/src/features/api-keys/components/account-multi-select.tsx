@@ -12,12 +12,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { StatusBadge } from "@/components/status-badge";
+import { AccountStatusBadge } from "@/features/accounts/components/account-badges";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { Account } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
-import { isAccountAssignmentSelectable, normalizeStatus } from "@/utils/account-status";
-import { formatPercentNullable, formatSlug, formatWindowLabel } from "@/utils/formatters";
+import { formatPercentNullable } from "@/utils/formatters";
 
 export type AccountMultiSelectProps = {
   value: string[];
@@ -32,48 +31,25 @@ export type AccountMultiSelectProps = {
 type LimitChip = {
   key: string;
   label: string;
+  /** Percent left, for the chip colour. */
   percent: number | null;
 };
 
-function buildLimitChips(account: AccountSummary, t: ReturnType<typeof useTranslation>["t"]): LimitChip[] {
+function buildLimitChips(account: Account, t: ReturnType<typeof useTranslation>["t"]): LimitChip[] {
   const chips: LimitChip[] = [];
-  const monthlyOnly =
-    account.windowMinutesMonthly != null &&
-    account.windowMinutesPrimary == null &&
-    account.windowMinutesSecondary == null;
-
-  if (monthlyOnly || account.usage?.monthlyRemainingPercent != null) {
+  const windows: Array<[string, string, number | null]> = [
+    ["primary", t("accounts.quota.fiveHour"), account.primaryUsedPercent],
+    ["secondary", t("accounts.quota.sevenDay"), account.secondaryUsedPercent],
+  ];
+  for (const [key, label, used] of windows) {
+    if (used === null) continue;
+    const left = Math.max(0, 100 - used);
     chips.push({
-      key: `${account.accountId}-monthly`,
-      label: t("apiKeys.accountSelect.limitLeft", {
-        label: t("common.quota.monthly"),
-        percent: formatPercentNullable(account.usage?.monthlyRemainingPercent),
-      }),
-      percent: account.usage?.monthlyRemainingPercent ?? null,
+      key: `${account.id}-${key}`,
+      label: t("apiKeys.accountSelect.limitLeft", { label, percent: formatPercentNullable(left) }),
+      percent: left,
     });
   }
-
-  if (!monthlyOnly && (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null)) {
-    chips.push({
-      key: `${account.accountId}-primary`,
-      label: t("apiKeys.accountSelect.limitLeft", {
-        label: formatWindowLabel("primary", account.windowMinutesPrimary),
-        percent: formatPercentNullable(account.usage?.primaryRemainingPercent),
-      }),
-      percent: account.usage?.primaryRemainingPercent ?? null,
-    });
-  }
-  if (!monthlyOnly && (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null)) {
-    chips.push({
-      key: `${account.accountId}-secondary`,
-      label: t("apiKeys.accountSelect.limitLeft", {
-        label: formatWindowLabel("secondary", account.windowMinutesSecondary),
-        percent: formatPercentNullable(account.usage?.secondaryRemainingPercent),
-      }),
-      percent: account.usage?.secondaryRemainingPercent ?? null,
-    });
-  }
-
   return chips;
 }
 
@@ -91,29 +67,20 @@ function chipToneClass(percent: number | null): string {
   return "border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-300";
 }
 
-function AccountOption({ account }: { account: AccountSummary }) {
+function AccountOption({ account }: { account: Account }) {
   const { t } = useTranslation();
-  const status = normalizeStatus(account.status);
-  const title = account.displayName || account.email;
-  const subtitle =
-    account.displayName && account.displayName !== account.email
-      ? `${account.email} · ${formatSlug(account.planType)}`
-      : formatSlug(account.planType);
   const limitChips = buildLimitChips(account, t);
 
   return (
     <div className="min-w-0 flex-1 py-0.5">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{title}</div>
-          <div
-            className="truncate text-[11px] text-muted-foreground"
-            title={t("accounts.detail.accountIdTitle", { accountId: account.accountId })}
-          >
-            {subtitle}
+          <div className="truncate text-sm font-medium">{account.name}</div>
+          <div className="truncate text-[11px] text-muted-foreground">
+            {t(`accounts.plans.${account.planType}`, { defaultValue: account.planType })}
           </div>
         </div>
-        <StatusBadge status={status} />
+        <AccountStatusBadge account={account} />
       </div>
 
       <div className="mt-1.5 flex flex-wrap gap-1">
@@ -145,14 +112,11 @@ export function AccountMultiSelect({
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
-  const { accountsQuery } = useAccounts();
+  const accountsQuery = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const selectableAccounts = useMemo(
     () =>
-      accounts.filter(
-        (account) =>
-          isAccountAssignmentSelectable(account.status) || (allowPausedAccounts && account.status === "paused"),
-      ),
+      accounts.filter((account) => account.enabled || (allowPausedAccounts && account.paused)),
     [accounts, allowPausedAccounts],
   );
   const [search, setSearch] = useState("");
@@ -161,10 +125,7 @@ export function AccountMultiSelect({
     if (!search.trim()) return selectableAccounts;
     const query = search.toLowerCase();
     return selectableAccounts.filter(
-      (account) =>
-        account.accountId.toLowerCase().includes(query) ||
-        account.email.toLowerCase().includes(query) ||
-        account.displayName.toLowerCase().includes(query),
+      (account) => account.id.toLowerCase().includes(query) || account.name.toLowerCase().includes(query),
     );
   }, [search, selectableAccounts]);
 
@@ -172,7 +133,7 @@ export function AccountMultiSelect({
   const selectedAccounts = useMemo(
     () =>
       value
-        .map((accountId) => accounts.find((account) => account.accountId === accountId))
+        .map((accountId) => accounts.find((account) => account.id === accountId))
         .filter((account): account is (typeof accounts)[number] => account !== undefined),
     [accounts, value],
   );
@@ -243,9 +204,9 @@ export function AccountMultiSelect({
           <DropdownMenuSeparator />
           {filtered.map((account) => (
             <DropdownMenuCheckboxItem
-              key={account.accountId}
-              checked={selectedSet.has(account.accountId)}
-              onCheckedChange={() => toggle(account.accountId)}
+              key={account.id}
+              checked={selectedSet.has(account.id)}
+              onCheckedChange={() => toggle(account.id)}
               onSelect={(event) => event.preventDefault()}
               className="items-start"
             >
@@ -261,12 +222,12 @@ export function AccountMultiSelect({
       {selectedAccounts.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {selectedAccounts.map((account) => (
-            <Badge key={account.accountId} variant="secondary" className="gap-1 text-xs">
-              {account.email}
+            <Badge key={account.id} variant="secondary" className="gap-1 text-xs">
+              {account.name}
               <button
                 type="button"
                 className="ml-0.5 hover:text-foreground"
-                onClick={() => remove(account.accountId)}
+                onClick={() => remove(account.id)}
               >
                 <X className="size-3" />
               </button>

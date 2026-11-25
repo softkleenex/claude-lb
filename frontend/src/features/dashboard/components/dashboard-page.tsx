@@ -15,9 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SpinnerBlock } from "@/components/ui/spinner";
-import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
-import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
@@ -113,9 +111,7 @@ export function DashboardPage() {
   const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
   });
-  const { resumeMutation, limitWarmupMutation } = useAccountMutations();
-  type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
-  const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
+  const { update: updateAccountMutation } = useAccountMutations();
 
   const activeListIsFetching = dashboardView === "request-logs"
     ? logsQuery.isFetching
@@ -170,29 +166,17 @@ export function DashboardPage() {
           break;
         case "resume":
           if (canWrite) {
-            void resumeMutation.mutateAsync(account.accountId);
+            void updateAccountMutation
+              .mutateAsync({ accountId: account.accountId, patch: { enabled: true } })
+              .catch(() => null);
           }
           break;
         case "reauth":
           navigate(`/accounts?selected=${account.accountId}`);
           break;
-        case "warmup-toggle":
-          if (canWrite) {
-            void limitWarmupMutation.mutateAsync({
-              accountId: account.accountId,
-              enabled: !account.limitWarmupEnabled,
-            });
-          }
-          break;
-        case "reset-credit":
-          resetCreditDialog.show({
-            accountId: account.accountId,
-            availableResetCredits: account.availableResetCredits ?? 0,
-          });
-          break;
       }
     },
-    [canWrite, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
+    [canWrite, navigate, updateAccountMutation],
   );
 
   const handleConversationClick = useCallback(
@@ -581,14 +565,6 @@ export function DashboardPage() {
         </>
       )}
 
-      {resetCreditDialog.data ? (
-        <ResetCreditConfirmDialog
-          open={resetCreditDialog.open}
-          accountId={resetCreditDialog.data.accountId}
-          summaryAvailableCount={resetCreditDialog.data.availableResetCredits}
-          onOpenChange={resetCreditDialog.onOpenChange}
-        />
-      ) : null}
 
     </div>
   );

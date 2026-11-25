@@ -13,8 +13,6 @@ import {
   type ApiKey,
   type ConversationDetails,
   type ConversationEntry,
-  createAccountSummary,
-  createAccountTrends,
   createApiKey,
   createApiKeyCreateResponse,
   createApiKeyTrends,
@@ -26,18 +24,19 @@ import {
   createDashboardProjections,
   createRuntimeSettings,
   createDefaultAccounts,
+  createDefaultAccountWires,
+  createAccountWire,
+  createAccountTrendsWire,
+  createPoolQuotaWire,
+  type AccountWire,
   createDefaultApiKeys,
   createDefaultConversations,
   createDefaultRequestLogs,
-  createOauthCompleteResponse,
-  createOauthStartResponse,
-  createOauthStatusResponse,
   createQuotaPlannerDecision,
   createQuotaPlannerForecast,
   createQuotaPlannerSettings,
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
-  createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type AuthStatusWire,
   MOCK_BOOTSTRAP_TOKEN,
@@ -49,17 +48,12 @@ import {
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
   type RequestLogEntry,
-  type UpstreamProxyAdmin,
 } from "@/test/mocks/factories";
 
 const MODEL_OPTION_DELIMITER = ":::";
 const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as const;
 
 // ── Zod schemas for mock request bodies ──
-
-const OauthStartPayloadSchema = z.looseObject({
-  forceMethod: z.string().optional(),
-});
 
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
@@ -94,14 +88,6 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
     .optional(),
 });
 
-const AccountAliasPayloadSchema = z.object({
-  alias: z.string().max(255).nullable(),
-});
-
-const AccountRoutingPolicyPayloadSchema = z.object({
-  routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
-});
-
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
   mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
   timezone: z.string().optional(),
@@ -118,41 +104,6 @@ const QuotaPlannerSettingsPayloadSchema = z.looseObject({
   warmupModelPreference: z.string().nullable().optional(),
   dryRun: z.boolean().optional(),
 });
-
-const AutomationSchedulePayloadSchema = z.object({
-	type: z.literal("daily"),
-	time: z.string().regex(/^\d{2}:\d{2}$/),
-	timezone: z.string().min(1),
-	thresholdMinutes: z.number().int().min(0).max(240).default(0),
-	days: z
-		.array(z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]))
-		.min(1)
-		.max(7),
-});
-
-const AutomationCreatePayloadSchema = z.object({
-	name: z.string().min(1),
-	enabled: z.boolean().optional(),
-	includePausedAccounts: z.boolean().optional(),
-	schedule: AutomationSchedulePayloadSchema,
-	model: z.string().min(1),
-	reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
-	prompt: z.string().optional(),
-	accountIds: z.array(z.string().min(1)),
-});
-
-const AutomationUpdatePayloadSchema = z
-	.object({
-		name: z.string().min(1).optional(),
-		enabled: z.boolean().optional(),
-		includePausedAccounts: z.boolean().optional(),
-		schedule: AutomationSchedulePayloadSchema.optional(),
-		model: z.string().min(1).optional(),
-		reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
-		prompt: z.string().min(1).optional(),
-		accountIds: z.array(z.string().min(1)).optional(),
-	})
-	.passthrough();
 
 // ── Helpers ──
 
@@ -189,7 +140,10 @@ async function parseJsonBody<T>(
 }
 
 type MockState = {
-  accounts: AccountSummary[];
+  /** claude-lb `GET /api/accounts` rows (snake_case wire shape). */
+  accounts: AccountWire[];
+  /** LEGACY codex-lb account summaries for `/api/dashboard/overview` (until Step D). */
+  legacyAccounts: AccountSummary[];
   requestLogs: RequestLogEntry[];
   conversations: ConversationEntry[];
   conversationDetails: ConversationDetails[];
@@ -201,68 +155,8 @@ type MockState = {
   settings: RuntimeSettingsWire;
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
-  upstreamProxyAdmin: UpstreamProxyAdmin;
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
-  automations: Array<{
-    id: string;
-    name: string;
-    enabled: boolean;
-    includePausedAccounts: boolean;
-    schedule: {
-      type: "daily";
-      time: string;
-      timezone: string;
-      thresholdMinutes: number;
-      days: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
-    };
-    model: string;
-    reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
-    prompt: string;
-    accountIds: string[];
-    nextRunAt: string | null;
-    lastRun: {
-      id: string;
-      jobId: string;
-      model: string | null;
-      reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
-      trigger: "scheduled" | "manual";
-      status: "running" | "success" | "failed" | "partial";
-      scheduledFor: string;
-      startedAt: string;
-      finishedAt: string | null;
-      accountId: string | null;
-      errorCode: string | null;
-      errorMessage: string | null;
-      attemptCount: number;
-    } | null;
-  }>;
-  automationRuns: Record<
-    string,
-    Array<{
-      id: string;
-      jobId: string;
-      model: string | null;
-      reasoningEffort:
-        | "minimal"
-        | "low"
-        | "medium"
-        | "high"
-        | "xhigh"
-        | "max"
-        | "ultra"
-        | null;
-      trigger: "scheduled" | "manual";
-      status: "running" | "success" | "failed" | "partial";
-      scheduledFor: string;
-      startedAt: string;
-      finishedAt: string | null;
-      accountId: string | null;
-      errorCode: string | null;
-      errorMessage: string | null;
-      attemptCount: number;
-    }>
-  >;
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -277,7 +171,8 @@ type MockState = {
 
 function createInitialState(): MockState {
   return {
-    accounts: createDefaultAccounts(),
+    accounts: createDefaultAccountWires(),
+    legacyAccounts: createDefaultAccounts(),
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -295,11 +190,8 @@ function createInitialState(): MockState {
     settings: createRuntimeSettings(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
-    upstreamProxyAdmin: createUpstreamProxyAdmin(),
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
-    automations: [],
-    automationRuns: {},
     firewallEntries: [],
     stickySessions: [],
   };
@@ -490,212 +382,9 @@ function requestLogOptionsFromEntries(
   });
 }
 
-function findAccount(accountId: string): AccountSummary | undefined {
-  return state.accounts.find((account) => account.accountId === accountId);
-}
-
 function findApiKey(keyId: string): ApiKey | undefined {
   return state.apiKeys.find((item) => item.id === keyId);
 }
-
-function findAutomation(automationId: string) {
-	return state.automations.find((item) => item.id === automationId);
-}
-
-function findAutomationRun(runId: string) {
-	for (const runs of Object.values(state.automationRuns)) {
-		const run = runs.find((entry) => entry.id === runId);
-		if (run) {
-			return run;
-		}
-	}
-	return null;
-}
-
-function randomId(prefix: string): string {
-	return `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function createAutomationRun(automationId: string, trigger: "manual" | "scheduled") {
-	const nowIso = new Date().toISOString();
-	const automation = findAutomation(automationId);
-	const run = {
-		id: randomId("run"),
-		jobId: automationId,
-		model: automation?.model ?? null,
-		reasoningEffort: automation?.reasoningEffort ?? null,
-		trigger,
-		status: "success" as const,
-		scheduledFor: nowIso,
-		startedAt: nowIso,
-		finishedAt: nowIso,
-		accountId: null,
-		errorCode: null,
-		errorMessage: null,
-		attemptCount: 1,
-	};
-	const existingRuns = state.automationRuns[automationId] ?? [];
-	state.automationRuns[automationId] = [run, ...existingRuns].slice(0, 20);
-	if (automation) {
-		automation.lastRun = run;
-	}
-	return run;
-}
-
-function toFiniteNonNegative(value: string | null, fallback: number): number {
-	const parsed = Number(value);
-	if (!Number.isFinite(parsed)) {
-		return fallback;
-	}
-	const normalized = Math.floor(parsed);
-	return normalized >= 0 ? normalized : fallback;
-}
-
-function listFilteredAutomationJobs(url: URL) {
-	const search = (url.searchParams.get("search") || "").trim().toLowerCase();
-	const accountIds = new Set(url.searchParams.getAll("accountId"));
-	const models = new Set(url.searchParams.getAll("model"));
-	const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
-	const scheduleTypes = new Set(url.searchParams.getAll("scheduleType"));
-
-	return state.automations.filter((automation) => {
-		if (search.length > 0) {
-			const haystack = [
-				automation.id,
-				automation.name,
-				automation.prompt,
-				automation.model,
-				automation.reasoningEffort,
-			]
-				.filter(Boolean)
-				.join(" ")
-				.toLowerCase();
-			if (!haystack.includes(search)) {
-				return false;
-			}
-		}
-
-		if (accountIds.size > 0) {
-			const isAllAccountsJob = automation.accountIds.length === 0;
-			const hasMatch = automation.accountIds.some((accountId) => accountIds.has(accountId));
-			if (!isAllAccountsJob && !hasMatch) {
-				return false;
-			}
-		}
-
-		if (models.size > 0 && !models.has(automation.model)) {
-			return false;
-		}
-
-		if (scheduleTypes.size > 0 && !scheduleTypes.has(automation.schedule.type)) {
-			return false;
-		}
-
-		if (statuses.size > 0 && !statuses.has("all")) {
-			const mappedStatus = automation.enabled ? "enabled" : "disabled";
-			if (!statuses.has(mappedStatus)) {
-				return false;
-			}
-		}
-
-		return true;
-	});
-}
-
-function listAutomationRunsWithContext() {
-	const entries: Array<
-		(MockState["automationRuns"][string][number] & {
-			jobName: string | null;
-			model: string | null;
-			reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
-			effectiveStatus: "running" | "success" | "failed" | "partial";
-			totalAccounts: number;
-			completedAccounts: number;
-			pendingAccounts: number;
-			cycleKey: string;
-		})
-	> = [];
-
-	for (const [jobId, runs] of Object.entries(state.automationRuns)) {
-		const job = findAutomation(jobId);
-		for (const run of runs) {
-			entries.push({
-				...run,
-				jobName: job?.name ?? null,
-				model: job?.model ?? null,
-				reasoningEffort: run.reasoningEffort ?? job?.reasoningEffort ?? null,
-				effectiveStatus: run.status,
-				totalAccounts: 1,
-				completedAccounts: 1,
-				pendingAccounts: 0,
-				cycleKey: `${run.trigger}:${run.jobId}:${run.id}`,
-			});
-		}
-	}
-
-	entries.sort((a, b) => {
-		const aTs = new Date(a.startedAt).getTime();
-		const bTs = new Date(b.startedAt).getTime();
-		return bTs - aTs;
-	});
-	return entries;
-}
-
-function listFilteredAutomationRuns(url: URL) {
-	const search = (url.searchParams.get("search") || "").trim().toLowerCase();
-	const accountIds = new Set(url.searchParams.getAll("accountId"));
-	const models = new Set(url.searchParams.getAll("model"));
-	const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
-	const triggers = new Set(url.searchParams.getAll("trigger").map((value) => value.toLowerCase()));
-	const automationIds = new Set(url.searchParams.getAll("automationId"));
-
-	return listAutomationRunsWithContext().filter((run) => {
-		if (search.length > 0) {
-			const haystack = [
-				run.id,
-				run.jobId,
-				run.jobName,
-				run.model,
-				run.reasoningEffort,
-				run.accountId,
-				run.errorCode,
-				run.errorMessage,
-			]
-				.filter(Boolean)
-				.join(" ")
-				.toLowerCase();
-			if (!haystack.includes(search)) {
-				return false;
-			}
-		}
-
-		if (accountIds.size > 0 && (!run.accountId || !accountIds.has(run.accountId))) {
-			return false;
-		}
-
-		if (models.size > 0 && (!run.model || !models.has(run.model))) {
-			return false;
-		}
-
-		if (statuses.size > 0 && !statuses.has("all") && !statuses.has(run.status)) {
-			return false;
-		}
-
-		if (triggers.size > 0 && !triggers.has(run.trigger)) {
-			return false;
-		}
-
-		if (automationIds.size > 0 && !automationIds.has(run.jobId)) {
-			return false;
-		}
-
-		return true;
-	});
-}
-
-// ── claude-lb endpoints ──
-// These mirror the real FastAPI backend: snake_case bodies, `{"detail": ...}` errors,
-// 204 for bodiless success, 401 from the management-auth dependency.
 
 const SETTINGS_BOUNDS: Record<string, [number, number]> = {
   max_attempts: [1, 10],
@@ -728,6 +417,248 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
 
 function settingsEnvelope() {
   return { settings: state.settings, available_strategies: [...ROUTING_STRATEGIES_WIRE] };
+}
+
+
+// ── claude-lb accounts ──
+
+const PAUSED_REASON = "paused by operator";
+const PLAN_TYPES_WIRE = ["api", "free", "pro", "max", "max_5x", "max_20x", "team", "enterprise"];
+const ROUTING_POLICIES_WIRE = ["normal", "burn_first", "preserve"];
+
+function maskSecret(secret: string): string {
+  return `${secret.slice(0, 7)}…${secret.slice(-4)}`;
+}
+
+/** Re-derive the computed fields the backend's `AccountOut.of` would return. */
+function refreshAccount(account: AccountWire): AccountWire {
+  const capReached = account.spend_cap_usd !== null && account.total_cost_usd >= account.spend_cap_usd;
+  account.spend_cap_reached = capReached;
+  account.paused = !account.enabled && account.disabled_reason === PAUSED_REASON;
+  account.blocked_models = account.model_blocks.map((block) => block.model);
+  account.available =
+    account.enabled && !capReached && account.quota_status === "active" && account.cooldown_until === null;
+  return account;
+}
+
+function findAccountWire(accountId: string): AccountWire | undefined {
+  return state.accounts.find((account) => account.id === accountId);
+}
+
+function nameTaken(name: string, exceptId?: string): boolean {
+  return state.accounts.some((account) => account.name === name && account.id !== exceptId);
+}
+
+function newAccountId(): string {
+  return `acc_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+const accountHandlers = [
+  http.get("/api/accounts", () => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    return HttpResponse.json([...state.accounts].sort((a, b) => a.name.localeCompare(b.name)));
+  }),
+
+  http.post("/api/accounts", async ({ request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const body = await readJsonObject(request);
+    const name = typeof body.name === "string" ? body.name : "";
+    const apiKey = typeof body.api_key === "string" ? body.api_key : "";
+    if (!name || apiKey.length < 8) {
+      return detail(422, [{ loc: ["body", !name ? "name" : "api_key"], msg: "invalid value" }]);
+    }
+    if (nameTaken(name)) return detail(409, `an account named '${name}' already exists`);
+    const provider = body.provider === "oauth" ? "oauth" : "anthropic_api_key";
+    const planType = typeof body.plan_type === "string" ? body.plan_type : provider === "oauth" ? "pro" : "api";
+    if (!PLAN_TYPES_WIRE.includes(planType)) return detail(422, "plan_type is invalid");
+    const account = refreshAccount(
+      createAccountWire({
+        id: newAccountId(),
+        name,
+        provider,
+        plan_type: planType,
+        auth_scheme:
+          typeof body.auth_scheme === "string" ? body.auth_scheme : provider === "oauth" ? "bearer" : "x-api-key",
+        credential_hint: maskSecret(apiKey),
+        routing_policy: typeof body.routing_policy === "string" ? body.routing_policy : "normal",
+        weight: typeof body.weight === "number" ? body.weight : 1,
+        priority: typeof body.priority === "number" ? body.priority : 0,
+        spend_cap_usd: typeof body.spend_cap_usd === "number" ? body.spend_cap_usd : null,
+        total_requests: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cost_usd: 0,
+        rl_requests_limit: null,
+        rl_requests_remaining: null,
+        rl_tokens_limit: null,
+        rl_tokens_remaining: null,
+        rl_reset_at: null,
+        last_used_at: null,
+        created_at: new Date().toISOString(),
+      }),
+    );
+    state.accounts = [...state.accounts, account];
+    return HttpResponse.json(account, { status: 201 });
+  }),
+
+  http.post("/api/accounts/import", async ({ request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const body = await readJsonObject(request);
+    const name = typeof body.name === "string" ? body.name : "";
+    const credentials = body.credentials as Record<string, unknown> | undefined;
+    if (!name || !credentials || typeof credentials !== "object") {
+      return detail(422, [{ loc: ["body", "credentials"], msg: "field required" }]);
+    }
+    if (nameTaken(name)) return detail(409, `an account named '${name}' already exists`);
+    const nested = (credentials.claudeAiOauth ?? credentials) as Record<string, unknown>;
+    const token = nested.accessToken ?? nested.access_token;
+    if (typeof token !== "string" || !token) {
+      return detail(422, "credential bundle has no access token");
+    }
+    const account = refreshAccount(
+      createAccountWire({
+        id: newAccountId(),
+        name,
+        provider: "oauth",
+        auth_scheme: "bearer",
+        plan_type: typeof body.plan_type === "string" ? body.plan_type : "pro",
+        routing_policy: typeof body.routing_policy === "string" ? body.routing_policy : "normal",
+        credential_hint: maskSecret(token),
+        rl_requests_limit: null,
+        rl_requests_remaining: null,
+        rl_tokens_limit: null,
+        rl_tokens_remaining: null,
+        total_requests: 0,
+        total_cost_usd: 0,
+      }),
+    );
+    state.accounts = [...state.accounts, account];
+    return HttpResponse.json(account, { status: 201 });
+  }),
+
+  http.patch("/api/accounts/:accountId", async ({ params, request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const account = findAccountWire(String(params.accountId));
+    if (!account) return detail(404, "account not found");
+    const body = await readJsonObject(request);
+    if (typeof body.name === "string") {
+      if (!body.name) return detail(422, [{ loc: ["body", "name"], msg: "too short" }]);
+      if (nameTaken(body.name, account.id)) return detail(409, `an account named '${body.name}' already exists`);
+      account.name = body.name;
+    }
+    if (typeof body.plan_type === "string") {
+      if (!PLAN_TYPES_WIRE.includes(body.plan_type)) return detail(422, "plan_type is invalid");
+      account.plan_type = body.plan_type;
+    }
+    if (typeof body.routing_policy === "string") {
+      if (!ROUTING_POLICIES_WIRE.includes(body.routing_policy)) return detail(422, "routing_policy is invalid");
+      account.routing_policy = body.routing_policy;
+    }
+    if (typeof body.weight === "number") account.weight = body.weight;
+    if (typeof body.priority === "number") account.priority = body.priority;
+    if ("spend_cap_usd" in body) {
+      account.spend_cap_usd = typeof body.spend_cap_usd === "number" ? body.spend_cap_usd : null;
+    }
+    if (body.enabled === true) {
+      account.enabled = true;
+      account.disabled_reason = null;
+      account.cooldown_until = null;
+      account.consecutive_failures = 0;
+      account.quota_status = "active";
+    } else if (body.enabled === false) {
+      account.enabled = false;
+      account.disabled_reason = PAUSED_REASON;
+    }
+    return HttpResponse.json(refreshAccount(account));
+  }),
+
+  http.delete("/api/accounts/:accountId", ({ params }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    if (!findAccountWire(String(params.accountId))) return detail(404, "account not found");
+    state.accounts = state.accounts.filter((account) => account.id !== params.accountId);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/accounts/:accountId/probe", ({ params }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const account = findAccountWire(String(params.accountId));
+    if (!account) return detail(404, "account not found");
+    const ok = !account.name.includes("broken");
+    account.last_probe_at = new Date().toISOString();
+    account.last_probe_ok = ok;
+    account.last_probe_detail = ok ? "ok" : "upstream returned 401";
+    if (!ok && !account.paused) {
+      account.enabled = false;
+      account.disabled_reason = "upstream returned 401";
+    }
+    return HttpResponse.json({
+      probe: { ok, status_code: ok ? 200 : 401, detail: account.last_probe_detail, models: ok ? 3 : 0 },
+      account: refreshAccount(account),
+    });
+  }),
+
+  http.post("/api/accounts/:accountId/reset-quota", ({ params }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const account = findAccountWire(String(params.accountId));
+    if (!account) return detail(404, "account not found");
+    Object.assign(account, {
+      quota_status: "active",
+      model_blocks: [],
+      primary_used_percent: null,
+      primary_reset_at: null,
+      secondary_used_percent: null,
+      secondary_reset_at: null,
+      unified_status: null,
+      cooldown_until: null,
+    });
+    return HttpResponse.json(refreshAccount(account));
+  }),
+
+  http.delete("/api/accounts/:accountId/model-blocks", ({ params, request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const account = findAccountWire(String(params.accountId));
+    if (!account) return detail(404, "account not found");
+    const model = new URL(request.url).searchParams.get("model");
+    if (model === null) {
+      account.model_blocks = [];
+    } else if (account.model_blocks.some((block) => block.model === model)) {
+      account.model_blocks = account.model_blocks.filter((block) => block.model !== model);
+    } else {
+      return detail(404, `'${model}' is not blocked on this account`);
+    }
+    return HttpResponse.json(refreshAccount(account));
+  }),
+
+  http.get("/api/accounts/:accountId/trends", ({ params, request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    if (!findAccountWire(String(params.accountId))) return detail(404, "account not found");
+    const days = Number(new URL(request.url).searchParams.get("days") ?? 7) || 7;
+    return HttpResponse.json(createAccountTrendsWire(String(params.accountId), days));
+  }),
+
+  http.get("/api/usage/quota", () => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    return HttpResponse.json(createPoolQuotaWire(state.accounts));
+  }),
+];
+
+/** Replaces the claude-lb account rows for a test (wire shape). */
+export function setMockAccounts(accounts: AccountWire[]): void {
+  state.accounts = accounts.map((account) => refreshAccount({ ...account }));
+}
+
+export function getMockAccounts(): AccountWire[] {
+  return state.accounts;
 }
 
 const claudeLbHandlers = [
@@ -872,11 +803,12 @@ const claudeLbHandlers = [
 
 export const handlers = [
   ...claudeLbHandlers,
+  ...accountHandlers,
 
   http.get("/api/dashboard/overview", () => {
     return HttpResponse.json(
       createDashboardOverview({
-        accounts: state.accounts,
+        accounts: state.legacyAccounts,
       }),
     );
   }),
@@ -957,542 +889,6 @@ export const handlers = [
     }
     return HttpResponse.json(details);
   }),
-
-  http.get("/api/accounts", () => {
-    return HttpResponse.json({ accounts: state.accounts });
-  }),
-
-  http.post("/api/accounts/import", async () => {
-    const sequence = state.accounts.length + 1;
-    const created = createAccountSummary({
-      accountId: `acc_imported_${sequence}`,
-      email: `imported-${sequence}@example.com`,
-      displayName: `imported-${sequence}@example.com`,
-      status: "active",
-    });
-    state.accounts = [...state.accounts, created];
-    return HttpResponse.json({
-      accountId: created.accountId,
-      email: created.email,
-      planType: created.planType,
-      status: created.status,
-    });
-  }),
-
-  http.post("/api/accounts/:accountId/pause", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    account.status = "paused";
-    return HttpResponse.json({ status: "paused" });
-  }),
-
-  http.post("/api/accounts/:accountId/reactivate", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    account.status = "active";
-    return HttpResponse.json({ status: "reactivated" });
-  }),
-
-  http.put("/api/accounts/:accountId/alias", async ({ params, request }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    const payload = await parseJsonBody(request, AccountAliasPayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(
-        {
-          error: { code: "validation_error", message: "Invalid alias payload" },
-        },
-        { status: 422 },
-      );
-    }
-    const normalized =
-      typeof payload.alias === "string" ? payload.alias.trim() : null;
-    account.alias = normalized === "" ? null : normalized;
-    account.displayName = account.alias ?? account.email;
-    return HttpResponse.json({ accountId, alias: account.alias });
-  }),
-
-  http.put(
-    "/api/accounts/:accountId/limit-warmup",
-    async ({ params, request }) => {
-      const accountId = String(params.accountId);
-      const account = findAccount(accountId);
-      if (!account) {
-        return HttpResponse.json(
-          {
-            error: { code: "account_not_found", message: "Account not found" },
-          },
-          { status: 404 },
-        );
-      }
-      const body = await legacyJson(request).catch(() => ({}));
-      const enabled =
-        typeof body === "object" && body !== null && "enabled" in body
-          ? Boolean((body as { enabled?: unknown }).enabled)
-          : false;
-      account.limitWarmupEnabled = enabled;
-      return HttpResponse.json({
-        status: enabled ? "enabled" : "disabled",
-        enabled,
-      });
-    },
-  ),
-
-  http.put(
-    "/api/accounts/:accountId/routing-policy",
-    async ({ params, request }) => {
-      const accountId = String(params.accountId);
-      const account = findAccount(accountId);
-      if (!account) {
-        return HttpResponse.json(
-          {
-            error: { code: "account_not_found", message: "Account not found" },
-          },
-          { status: 404 },
-        );
-      }
-      const payload = await parseJsonBody(
-        request,
-        AccountRoutingPolicyPayloadSchema,
-      );
-      if (!payload) {
-        return HttpResponse.json(
-          {
-            error: {
-              code: "validation_error",
-              message: "Invalid routing policy payload",
-            },
-          },
-          { status: 422 },
-        );
-      }
-      account.routingPolicy = payload.routingPolicy;
-      return HttpResponse.json({
-        accountId,
-        routingPolicy: account.routingPolicy,
-      });
-    },
-  ),
-
-  http.patch("/api/accounts/:accountId", async ({ params, request }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    const payload = (await legacyJson(request)) as {
-      securityWorkAuthorized?: boolean;
-    };
-    if (typeof payload.securityWorkAuthorized === "boolean") {
-      account.securityWorkAuthorized = payload.securityWorkAuthorized;
-    }
-    return HttpResponse.json({ status: "updated" });
-  }),
-
-  http.get("/api/accounts/:accountId/trends", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json(createAccountTrends(accountId));
-  }),
-
-  http.get("/api/accounts/:accountId/usage-reset-credits", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      accountId,
-      rateLimitResetCredits: { availableCount: 3 },
-    });
-  }),
-
-  http.post("/api/accounts/:accountId/usage-reset-credits/consume", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      status: "reset",
-      accountId,
-      code: "reset",
-      windowsReset: 2,
-      usageWritten: true,
-      primaryUsedPercentBefore: 99,
-      primaryUsedPercentAfter: 1,
-      secondaryUsedPercentBefore: 80,
-      secondaryUsedPercentAfter: 0,
-      accountStatusBefore: account.status,
-      accountStatusAfter: account.status,
-    });
-  }),
-
-  http.post("/api/accounts/:accountId/probe", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      status: "probed",
-      accountId,
-      probeStatusCode: 200,
-      primaryUsedPercentBefore: account.usage?.primaryRemainingPercent ?? null,
-      primaryUsedPercentAfter: account.usage?.primaryRemainingPercent ?? null,
-      secondaryUsedPercentBefore: account.usage?.secondaryRemainingPercent ?? null,
-      secondaryUsedPercentAfter: account.usage?.secondaryRemainingPercent ?? null,
-      accountStatusBefore: account.status,
-      accountStatusAfter: account.status,
-    });
-  }),
-
-	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
-		const accountId = String(params.accountId);
-		const account = findAccount(accountId);
-		if (!account) {
-			return HttpResponse.json(
-				{ error: { code: "account_not_found", message: "Account not found" } },
-				{ status: 404 },
-			);
-		}
-		return HttpResponse.json({
-			filename: `opencode-auth-${account.email}.json`,
-			account: {
-				accountId: account.accountId,
-				chatgptAccountId: account.accountId,
-				email: account.email,
-			},
-			tokens: {
-				idToken: "id-token-mock-value",
-				accessToken: "access-token-mock-value",
-				refreshToken: "refresh-token-mock-value",
-				expiresAtMs: 2_000_000_000_000,
-			},
-			codexAuthJson: {
-				auth_mode: "chatgpt",
-				OPENAI_API_KEY: null,
-				tokens: {
-					id_token: "id-token",
-					access_token: "access-token",
-					refresh_token: "refresh-token",
-					account_id: accountId,
-				},
-				last_refresh: "2026-01-01T12:00:00.000000Z",
-			},
-			opencodeAuthJson: {
-				openai: {
-					type: "oauth",
-					refresh: "refresh-token",
-					access: "access-token",
-					expires: 2_000_000_000_000,
-					accountId: accountId,
-				},
-			},
-		});
-	}),
-
-	http.delete("/api/accounts/:accountId", ({ params }) => {
-		const accountId = String(params.accountId);
-		const exists = state.accounts.some(
-			(account) => account.accountId === accountId,
-		);
-		if (!exists) {
-			return HttpResponse.json(
-				{ error: { code: "account_not_found", message: "Account not found" } },
-				{ status: 404 },
-			);
-		}
-		state.accounts = state.accounts.filter(
-			(account) => account.accountId !== accountId,
-		);
-		return HttpResponse.json({ status: "deleted" });
-	}),
-
-  http.post("/api/accounts/:accountId/export", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      accountId: account.accountId,
-      email: account.email,
-      planType: account.planType,
-      status: account.status,
-      authJson: JSON.stringify(
-        {
-          auth_mode: "chatgpt",
-          OPENAI_API_KEY: null,
-          tokens: {
-            id_token: "id-token",
-            access_token: "access-token",
-            refresh_token: "refresh-token",
-            account_id: accountId,
-          },
-          last_refresh: "2026-01-01T12:00:00.000000Z",
-        },
-        null,
-        2,
-      ),
-    });
-  }),
-
-  http.delete("/api/accounts/:accountId", ({ params }) => {
-    const accountId = String(params.accountId);
-    const exists = state.accounts.some(
-      (account) => account.accountId === accountId,
-    );
-    if (!exists) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    state.accounts = state.accounts.filter(
-      (account) => account.accountId !== accountId,
-    );
-    return HttpResponse.json({ status: "deleted" });
-  }),
-
-  http.post("/api/oauth/start", async ({ request }) => {
-    const payload = await parseJsonBody(request, OauthStartPayloadSchema);
-    if (payload?.forceMethod === "device") {
-      return HttpResponse.json(
-        createOauthStartResponse({
-          method: "device",
-          authorizationUrl: null,
-          callbackUrl: null,
-          verificationUrl: "https://auth.example.com/device",
-          userCode: "AAAA-BBBB",
-          deviceAuthId: "device-auth-id",
-          intervalSeconds: 5,
-          expiresInSeconds: 900,
-        }),
-      );
-    }
-    return HttpResponse.json(createOauthStartResponse());
-  }),
-
-  http.get("/api/oauth/status", () => {
-    return HttpResponse.json(createOauthStatusResponse());
-  }),
-
-  http.post("/api/oauth/complete", () => {
-    return HttpResponse.json(createOauthCompleteResponse());
-  }),
-
-  http.get("/api/settings/upstream-proxy", () => {
-    return HttpResponse.json(state.upstreamProxyAdmin);
-  }),
-
-  http.post("/api/settings/upstream-proxy/endpoints", async ({ request }) => {
-    const payload = await parseJsonBody(
-      request,
-      z.looseObject({
-          name: z.string().min(1),
-          scheme: z.enum(["http", "https", "socks5", "socks5h"]),
-          host: z.string().min(1),
-          port: z.number().int(),
-          username: z.string().nullable().optional(),
-          isActive: z.boolean().optional(),
-        }),
-    );
-    if (!payload) {
-      return HttpResponse.json(
-        {
-          error: {
-            code: "invalid_proxy_endpoint",
-            message: "Invalid proxy endpoint",
-          },
-        },
-        { status: 400 },
-      );
-    }
-    const endpoint = {
-      id: `ep_${state.upstreamProxyAdmin.endpoints.length + 1}`,
-      name: payload.name,
-      scheme: payload.scheme,
-      host: payload.host,
-      port: payload.port,
-      username: payload.username ?? null,
-      isActive: payload.isActive ?? true,
-    };
-    state.upstreamProxyAdmin = {
-      ...state.upstreamProxyAdmin,
-      endpoints: [...state.upstreamProxyAdmin.endpoints, endpoint],
-    };
-    return HttpResponse.json(endpoint);
-  }),
-
-  http.post("/api/settings/upstream-proxy/endpoints/:endpointId/test", ({ params }) => {
-    const endpointId = String(params.endpointId);
-    const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);
-    if (!endpoint) {
-      return HttpResponse.json(
-        { error: { code: "proxy_endpoint_not_found", message: "Proxy endpoint not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      endpointId,
-      ok: true,
-      statusCode: 200,
-      elapsedMs: 24,
-      error: null,
-    });
-  }),
-
-  http.post("/api/settings/upstream-proxy/pools", async ({ request }) => {
-    const payload = await parseJsonBody(
-      request,
-      z.looseObject({
-          name: z.string().min(1),
-          endpointIds: z.array(z.string()).optional(),
-          isActive: z.boolean().optional(),
-        }),
-    );
-    if (!payload) {
-      return HttpResponse.json(
-        { error: { code: "invalid_proxy_pool", message: "Invalid proxy pool" } },
-        { status: 400 },
-      );
-    }
-    const pool = {
-      id: `pool_${state.upstreamProxyAdmin.pools.length + 1}`,
-      name: payload.name,
-      isActive: payload.isActive ?? true,
-      endpointIds: payload.endpointIds ?? [],
-    };
-    state.upstreamProxyAdmin = {
-      ...state.upstreamProxyAdmin,
-      pools: [...state.upstreamProxyAdmin.pools, pool],
-    };
-    return HttpResponse.json(pool);
-  }),
-
-  http.post(
-    "/api/settings/upstream-proxy/pools/:poolId/members",
-    async ({ params, request }) => {
-      const poolId = String(params.poolId);
-      const payload = await parseJsonBody(
-        request,
-        z.looseObject({ endpointId: z.string().min(1) }),
-      );
-      const pool = state.upstreamProxyAdmin.pools.find(
-        (item) => item.id === poolId,
-      );
-      if (!pool || !payload) {
-        return HttpResponse.json(
-          {
-            error: {
-              code: "proxy_pool_not_found",
-              message: "Proxy pool not found",
-            },
-          },
-          { status: 404 },
-        );
-      }
-      if (pool.endpointIds.includes(payload.endpointId)) {
-        return HttpResponse.json(
-          {
-            error: {
-              code: "proxy_pool_member_duplicate",
-              message: "Proxy endpoint is already a member of this pool",
-            },
-          },
-          { status: 400 },
-        );
-      }
-      const updatedPool = {
-        ...pool,
-        endpointIds: [...pool.endpointIds, payload.endpointId],
-      };
-      state.upstreamProxyAdmin = {
-        ...state.upstreamProxyAdmin,
-        pools: state.upstreamProxyAdmin.pools.map((item) =>
-          item.id === poolId ? updatedPool : item,
-        ),
-      };
-      return HttpResponse.json(updatedPool);
-    },
-  ),
-
-  http.put(
-    "/api/settings/upstream-proxy/accounts/:accountId/binding",
-    async ({ params, request }) => {
-      const accountId = String(params.accountId);
-      const payload = await parseJsonBody(
-        request,
-        z.looseObject({ poolId: z.string().min(1), isActive: z.boolean().optional() }),
-      );
-      if (!payload) {
-        return HttpResponse.json(
-          {
-            error: {
-              code: "invalid_proxy_binding",
-              message: "Invalid proxy binding",
-            },
-          },
-          { status: 400 },
-        );
-      }
-      const binding = {
-        accountId,
-        poolId: payload.poolId,
-        isActive: payload.isActive ?? true,
-      };
-      state.upstreamProxyAdmin = {
-        ...state.upstreamProxyAdmin,
-        bindings: [
-          ...state.upstreamProxyAdmin.bindings.filter(
-            (item) => item.accountId !== accountId,
-          ),
-          binding,
-        ],
-      };
-      return HttpResponse.json(binding);
-    },
-  ),
 
   http.get("/api/firewall/ips", () => {
     return HttpResponse.json({
@@ -1670,246 +1066,6 @@ export const handlers = [
       hasMore: offset + entries.length < filteredEntries.length,
     });
   }),
-  http.get("/api/automations", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const filtered = listFilteredAutomationJobs(url);
-    const total = filtered.length;
-    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
-    const offset = toFiniteNonNegative(url.searchParams.get("offset"), 0);
-    const items = filtered.slice(offset, offset + limit);
-    return HttpResponse.json({
-      items,
-      total,
-      hasMore: offset + limit < total,
-    });
-  }),
-
-  http.get("/api/automations/options", ({ request }) => {
-    const filtered = listFilteredAutomationJobs(legacyRequestUrl(request));
-    const accountIds = [
-      ...new Set(state.accounts.map((account) => account.accountId)),
-    ].sort();
-    const models = [
-      ...new Set(
-        filtered
-          .map((entry) => entry.model)
-          .filter((value) => value.length > 0),
-      ),
-    ].sort();
-    const scheduleTypes = [
-      ...new Set(
-        filtered
-          .map((entry) => entry.schedule.type)
-          .filter((value) => value.length > 0),
-      ),
-    ].sort();
-    const statuses = [
-      ...new Set(filtered.map((entry) => (entry.enabled ? "enabled" : "disabled"))),
-    ].sort();
-    return HttpResponse.json({
-      accountIds,
-      models,
-      statuses,
-      scheduleTypes,
-    });
-  }),
-
-  http.post("/api/automations", async ({ request }) => {
-    const payload = await parseJsonBody(request, AutomationCreatePayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(
-        { error: { code: "validation_error", message: "Invalid request payload" } },
-        { status: 422 },
-      );
-    }
-    const now = new Date();
-    const nextRunAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
-    const item = {
-      id: randomId("job"),
-      name: payload.name,
-      enabled: payload.enabled ?? true,
-      schedule: payload.schedule,
-      model: payload.model,
-      reasoningEffort: payload.reasoningEffort ?? null,
-      includePausedAccounts: payload.includePausedAccounts ?? false,
-      prompt: payload.prompt ?? "ping",
-      accountIds: payload.accountIds,
-      nextRunAt: payload.enabled === false ? null : nextRunAt,
-      lastRun: null,
-    };
-    state.automations = [item, ...state.automations];
-    state.automationRuns[item.id] = [];
-    return HttpResponse.json(item);
-  }),
-
-  http.patch("/api/automations/:automationId", async ({ params, request }) => {
-    const automationId = String(params.automationId);
-    const automation = findAutomation(automationId);
-    if (!automation) {
-      return HttpResponse.json(
-        { error: { code: "automation_not_found", message: "Automation not found" } },
-        { status: 404 },
-      );
-    }
-    const payload = await parseJsonBody(request, AutomationUpdatePayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(
-        { error: { code: "validation_error", message: "Invalid request payload" } },
-        { status: 422 },
-      );
-    }
-    if (payload.name !== undefined) automation.name = payload.name;
-    if (payload.enabled !== undefined) automation.enabled = payload.enabled;
-    if (payload.schedule !== undefined) automation.schedule = payload.schedule;
-    if (payload.model !== undefined) automation.model = payload.model;
-    if (payload.reasoningEffort !== undefined) {
-      automation.reasoningEffort = payload.reasoningEffort;
-    }
-    if (payload.includePausedAccounts !== undefined) {
-      automation.includePausedAccounts = payload.includePausedAccounts;
-    }
-    if (payload.prompt !== undefined) automation.prompt = payload.prompt;
-    if (payload.accountIds !== undefined) automation.accountIds = payload.accountIds;
-    if (!automation.enabled) {
-      automation.nextRunAt = null;
-    } else if (!automation.nextRunAt) {
-      automation.nextRunAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    }
-    return HttpResponse.json(automation);
-  }),
-
-  http.delete("/api/automations/:automationId", ({ params }) => {
-    const automationId = String(params.automationId);
-    const exists = state.automations.some((item) => item.id === automationId);
-    if (!exists) {
-      return HttpResponse.json(
-        { error: { code: "automation_not_found", message: "Automation not found" } },
-        { status: 404 },
-      );
-    }
-    state.automations = state.automations.filter((item) => item.id !== automationId);
-    delete state.automationRuns[automationId];
-    return HttpResponse.json({ status: "deleted" });
-  }),
-
-  http.post("/api/automations/:automationId/run-now", ({ params }) => {
-    const automationId = String(params.automationId);
-    const automation = findAutomation(automationId);
-    if (!automation) {
-      return HttpResponse.json(
-        { error: { code: "automation_not_found", message: "Automation not found" } },
-        { status: 404 },
-      );
-    }
-    const run = createAutomationRun(automationId, "manual");
-    return HttpResponse.json(run, { status: 202 });
-  }),
-
-  http.get("/api/automations/runs", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const filtered = listFilteredAutomationRuns(url);
-    const total = filtered.length;
-    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
-    const offset = toFiniteNonNegative(url.searchParams.get("offset"), 0);
-    const items = filtered.slice(offset, offset + limit);
-    return HttpResponse.json({
-      items,
-      total,
-      hasMore: offset + limit < total,
-    });
-  }),
-
-  http.get("/api/automations/runs/options", ({ request }) => {
-    const filtered = listFilteredAutomationRuns(legacyRequestUrl(request));
-    const accountIds = [
-      ...new Set(state.accounts.map((account) => account.accountId)),
-    ].sort();
-    const models = [
-      ...new Set(
-        filtered
-          .map((entry) => entry.model)
-          .filter((value): value is string => !!value && value.length > 0),
-      ),
-    ].sort();
-    const statuses = ["running", "success", "partial", "failed"];
-    const triggers = ["scheduled", "manual"];
-    return HttpResponse.json({
-      accountIds,
-      models,
-      statuses,
-      triggers,
-    });
-  }),
-
-  http.get("/api/automations/runs/:runId/details", ({ params }) => {
-    const runId = String(params.runId);
-    const run = findAutomationRun(runId);
-    if (!run) {
-      return HttpResponse.json(
-        {
-          error: { code: "automation_run_not_found", message: "Automation run not found" },
-        },
-        { status: 404 },
-      );
-    }
-    const automation = findAutomation(run.jobId);
-    return HttpResponse.json({
-      run: {
-        ...run,
-        jobName: automation?.name ?? null,
-        model: run.model ?? automation?.model ?? null,
-        reasoningEffort: run.reasoningEffort ?? automation?.reasoningEffort ?? null,
-        effectiveStatus: run.status,
-        totalAccounts: run.accountId ? 1 : 0,
-        completedAccounts: run.accountId ? 1 : 0,
-        pendingAccounts: 0,
-        cycleKey: `${run.trigger}:${run.jobId}:${run.id}`,
-      },
-      accounts: run.accountId
-        ? [
-            {
-              accountId: run.accountId,
-              status: run.status,
-              runId: run.id,
-              scheduledFor: run.scheduledFor,
-              startedAt: run.startedAt,
-              finishedAt: run.finishedAt,
-              errorCode: run.errorCode,
-              errorMessage: run.errorMessage,
-            },
-          ]
-        : [],
-      totalAccounts: run.accountId ? 1 : 0,
-      completedAccounts: run.accountId ? 1 : 0,
-      pendingAccounts: 0,
-    });
-  }),
-
-  http.get("/api/automations/:automationId/runs", ({ params, request }) => {
-    const automationId = String(params.automationId);
-    const automation = findAutomation(automationId);
-    if (!automation) {
-      return HttpResponse.json(
-        { error: { code: "automation_not_found", message: "Automation not found" } },
-        { status: 404 },
-      );
-    }
-    const url = legacyRequestUrl(request);
-    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 20));
-    const all = state.automationRuns[automationId] ?? [];
-    const items = all.slice(0, limit).map((run) => ({
-      ...run,
-      jobName: automation.name,
-      model: automation.model,
-      reasoningEffort: run.reasoningEffort ?? automation.reasoningEffort ?? null,
-    }));
-    return HttpResponse.json({
-      items,
-      total: all.length,
-      hasMore: all.length > limit,
-    });
-  }),
-
   http.post("/api/sticky-sessions/delete", async ({ request }) => {
     const payload = (await parseJsonBody(
       request,
