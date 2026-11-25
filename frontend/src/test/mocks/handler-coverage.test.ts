@@ -73,13 +73,6 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/health/catalog",
 	"POST /api/health/sync-models",
 	"POST /api/health/probe",
-	// quota planner
-	"GET /api/quota-planner/settings",
-	"PUT /api/quota-planner/settings",
-	"GET /api/quota-planner/decisions",
-	"GET /api/quota-planner/forecast",
-	"POST /api/quota-planner/warm-now",
-	"POST /api/quota-planner/decisions/:decisionId/cancel",
 	// firewall (proxy IP allowlist)
 	"GET /api/firewall",
 	"GET /api/firewall/check",

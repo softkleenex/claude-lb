@@ -1,7 +1,5 @@
 import { HttpResponse, http } from "msw";
-import { z } from "zod";
 
-import { camelizeKeys, snakeToCamel } from "@/lib/casing";
 
 import {
   type ApiKeyWire,
@@ -28,19 +26,12 @@ import {
   createReportOptionsWire,
   type ReportWire,
   type RequestLogWire,
-  createQuotaPlannerDecision,
-  createQuotaPlannerForecast,
-  createQuotaPlannerSettings,
-  createQuotaPlannerWarmupActionResponse,
   type AuthStatusWire,
   MOCK_BOOTSTRAP_TOKEN,
   MOCK_DASHBOARD_PASSWORD,
   MOCK_TOTP_CODE,
   ROUTING_STRATEGIES_WIRE,
   type RuntimeSettingsWire,
-  type QuotaPlannerDecision,
-  type QuotaPlannerForecast,
-  type QuotaPlannerSettings,
   type AuditEventWire,
   type StickyEntryWire,
   createCatalogWire,
@@ -66,58 +57,7 @@ const REQUEST_STATUS_ORDER = [
   "server_error",
 ] as const;
 
-// ── Zod schemas for mock request bodies ──
-
-const QuotaPlannerSettingsPayloadSchema = z.looseObject({
-  mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
-  timezone: z.string().optional(),
-  workingDays: z.array(z.number().int().min(0).max(6)).optional(),
-  workingHoursStart: z.string().optional(),
-  workingHoursEnd: z.string().optional(),
-  prewarmEnabled: z.boolean().optional(),
-  prewarmLeadMinutes: z.number().int().min(0).optional(),
-  maxWarmupsPerDay: z.number().int().min(0).optional(),
-  maxWarmupCreditsPerDay: z.number().min(0).optional(),
-  minExpectedGain: z.number().min(0).optional(),
-  forecastQuantile: z.enum(["p50", "p75", "p90"]).optional(),
-  allowSyntheticTraffic: z.boolean().optional(),
-  warmupModelPreference: z.string().nullable().optional(),
-  dryRun: z.boolean().optional(),
-});
-
-// ── Helpers ──
-
-// LEGACY: the codex-lb handlers below model codex-lb's camelCase API. The api-client now
-// sends snake_case bodies and query keys (claude-lb's wire format), so these helpers
-// convert requests back before the legacy handlers read them. Handlers for claude-lb
-// endpoints must NOT use them: they read the snake_case request as the real backend does.
-// Remove once Steps C–G have replaced every codex-lb handler.
-function legacyRequestUrl(request: Request): URL {
-  const url = new URL(request.url);
-  const converted = new URLSearchParams();
-  for (const [key, value] of url.searchParams) {
-    converted.append(snakeToCamel(key), value);
-  }
-  url.search = converted.toString();
-  return url;
-}
-
-async function legacyJson(request: Request): Promise<unknown> {
-  return camelizeKeys(await request.json());
-}
-
-async function parseJsonBody<T>(
-  request: Request,
-  schema: z.ZodType<T>,
-): Promise<T | null> {
-  try {
-    const raw: unknown = await legacyJson(request);
-    const result = schema.safeParse(raw);
-    return result.success ? result.data : null;
-  } catch {
-    return null;
-  }
-}
+// ── Mock state ──
 
 type MockState = {
   /** claude-lb `GET /api/accounts` rows (snake_case wire shape). */
@@ -132,9 +72,6 @@ type MockState = {
   totpEnabled: boolean;
   totpPending: boolean;
   settings: RuntimeSettingsWire;
-  quotaPlannerSettings: QuotaPlannerSettings;
-  quotaPlannerDecisions: QuotaPlannerDecision[];
-  quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKeyWire[];
   firewall: { mode: "allow_all" | "allowlist"; entries: FirewallEntryWire[]; clientIp: string };
   guest: { enabled: boolean; password: string | null };
@@ -156,9 +93,6 @@ function createInitialState(): MockState {
     totpEnabled: false,
     totpPending: false,
     settings: createRuntimeSettings(),
-    quotaPlannerSettings: createQuotaPlannerSettings(),
-    quotaPlannerDecisions: [createQuotaPlannerDecision()],
-    quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeyWires(),
     firewall: { mode: "allow_all", entries: [createFirewallEntryWire()], clientIp: "127.0.0.1" },
     guest: { enabled: false, password: null },
@@ -1631,77 +1565,4 @@ export const handlers = [
         : null,
     });
   }),
-
-  http.get("/api/quota-planner/settings", () =>
-    HttpResponse.json(state.quotaPlannerSettings),
-  ),
-
-  http.put("/api/quota-planner/settings", async ({ request }) => {
-    const payload = await parseJsonBody(
-      request,
-      QuotaPlannerSettingsPayloadSchema,
-    );
-    if (!payload) {
-      return HttpResponse.json(state.quotaPlannerSettings);
-    }
-    state.quotaPlannerSettings = createQuotaPlannerSettings({
-      ...state.quotaPlannerSettings,
-      ...payload,
-    });
-    return HttpResponse.json(state.quotaPlannerSettings);
-  }),
-
-  http.get("/api/quota-planner/decisions", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const limit = Number(url.searchParams.get("limit") ?? "50");
-    return HttpResponse.json(state.quotaPlannerDecisions.slice(0, limit));
-  }),
-
-  http.get("/api/quota-planner/forecast", () =>
-    HttpResponse.json(state.quotaPlannerForecast),
-  ),
-
-  http.post("/api/quota-planner/warm-now", async ({ request }) => {
-    const payload = await parseJsonBody(
-      request,
-      z.object({
-        accountId: z.string().min(1),
-        model: z.string().nullable().optional(),
-        apiKeyId: z.string().nullable().optional(),
-        forceProbe: z.boolean().optional(),
-      }),
-    );
-    const decision = createQuotaPlannerDecision({
-      id: `decision_${state.quotaPlannerDecisions.length + 1}`,
-      accountId: payload?.accountId ?? null,
-      action: "warmup",
-      status: "skipped",
-      reason: "synthetic_traffic_disabled",
-    });
-    state.quotaPlannerDecisions = [decision, ...state.quotaPlannerDecisions];
-    return HttpResponse.json(
-      createQuotaPlannerWarmupActionResponse({
-        decisionId: decision.id,
-        status: decision.status,
-        reason: decision.reason ?? "synthetic_traffic_disabled",
-      }),
-    );
-  }),
-
-  http.post("/api/quota-planner/decisions/:decisionId/cancel", ({ params }) => {
-    const decisionId = String(params.decisionId);
-    state.quotaPlannerDecisions = state.quotaPlannerDecisions.map((decision) =>
-      decision.id === decisionId
-        ? { ...decision, status: "canceled", reason: "admin_canceled" }
-        : decision,
-    );
-    return HttpResponse.json(
-      createQuotaPlannerWarmupActionResponse({
-        decisionId,
-        status: "canceled",
-        reason: "admin_canceled",
-      }),
-    );
-  }),
-
 ];

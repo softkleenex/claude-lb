@@ -61,11 +61,14 @@ async def test_path_traversal_does_not_escape_the_build_dir(built_spa):
     assert "nope" not in response.text
 
 
-async def test_without_a_build_the_legacy_dashboard_is_served(tmp_path, monkeypatch):
+async def test_without_a_build_a_build_hint_is_served(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard_api, "STATIC_DIR", tmp_path / "missing")
     async for client in make_client(ok_json([])):
         root = await client.get("/")
         deep = await client.get("/accounts")
-    assert root.status_code == 200
-    assert "<title>claude-lb</title>" in root.text
+        health = await client.get("/health")
+    assert root.status_code == 503
+    assert "npm run build" in root.text
+    assert root.headers["cache-control"] == "no-cache"
     assert deep.text == root.text
+    assert health.status_code == 200

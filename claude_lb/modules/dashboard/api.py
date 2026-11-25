@@ -3,7 +3,8 @@
 The React build (``frontend/`` -> ``static/``) is committed, so a plain install serves
 it without Node. Hashed files under ``/assets`` are cached for a year; every other
 non-API GET falls back to ``index.html`` so client-side routes (``/accounts``) work on
-reload. Without a build, the legacy single-file dashboard is served instead.
+reload. Without a build (a source checkout where ``static/`` was removed), a short page
+explains how to build it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from starlette.types import Scope
 
 _HERE = Path(__file__).parent
 STATIC_DIR = _HERE / "static"
-LEGACY_INDEX = _HERE / "index.html"
 
 # First path segments that belong to the API/proxy, never to the SPA. A miss under
 # these must stay a 404 rather than turn into an HTML page a client would misparse.
@@ -55,11 +55,25 @@ def _static_file(relative: str) -> Path | None:
     return candidate
 
 
+_NOT_BUILT_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Claude LB - dashboard not built</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem">
+<h1>Claude LB</h1>
+<p>The dashboard has not been built. The proxy (<code>/v1/*</code>) and the management
+API (<code>/api/*</code>) work as usual.</p>
+<p>Build it from the repository root, then reload this page:</p>
+<pre>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</pre>
+</body></html>
+"""
+
+
 def _index_response() -> Response:
     built = STATIC_DIR / "index.html"
     if built.is_file():
         return FileResponse(built, media_type="text/html", headers=_NO_CACHE)
-    return HTMLResponse(LEGACY_INDEX.read_text(encoding="utf-8"), headers=_NO_CACHE)
+    # 503: the page exists in a packaged install; here it is missing, not "not found".
+    return HTMLResponse(_NOT_BUILT_HTML, status_code=503, headers=_NO_CACHE)
 
 
 @router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)

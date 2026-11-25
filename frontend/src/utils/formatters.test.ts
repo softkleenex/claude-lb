@@ -7,14 +7,12 @@ import i18n from "@/i18n";
 import {
   formatChartDateTime,
   formatDateTimeInline,
-  formatAccessTokenLabel,
   formatCachedTokensMeta,
   formatLocalDateTimeSeconds,
   formatCompactNumber,
   formatElapsed,
   formatCountdown,
   formatCurrency,
-  formatIdTokenLabel,
   formatNumber,
   formatPercent,
   formatPercentNullable,
@@ -23,8 +21,6 @@ import {
   formatQuotaResetMeta,
   formatRate,
   formatResetRelative,
-  formatSingleUnitRemaining,
-  formatRefreshTokenLabel,
   formatRelative,
   formatTimeLong,
   formatTokensWithCached,
@@ -171,29 +167,6 @@ it("formats elapsed latency values", () => {
     expect(formatCountdown(125)).toBe("2:05");
   });
 
-  it("formats single-unit reset-credit countdowns", () => {
-    expect(formatSingleUnitRemaining("2026-01-08T00:00:00.000Z")).toEqual({
-      label: "7d",
-      expiringSoon: false,
-    });
-    expect(formatSingleUnitRemaining("2026-01-07T00:00:00.000Z")).toEqual({
-      label: "6d",
-      expiringSoon: true,
-    });
-    expect(formatSingleUnitRemaining("2026-01-01T01:00:00.000Z")).toEqual({
-      label: "1h",
-      expiringSoon: true,
-    });
-    expect(formatSingleUnitRemaining("2026-01-01T00:01:00.000Z")).toEqual({
-      label: "1m",
-      expiringSoon: true,
-    });
-    expect(formatSingleUnitRemaining("2025-12-31T23:59:59.000Z")).toEqual({
-      label: "now",
-      expiringSoon: true,
-    });
-  });
-
   it("formats quota reset labels", () => {
     const in30m = new Date(Date.now() + 30 * 60_000).toISOString();
     const in4h13m = new Date(Date.now() + (4 * 60 + 13) * 60_000).toISOString();
@@ -212,49 +185,5 @@ it("formats elapsed latency values", () => {
     expect(truncateText("short", 10)).toBe("short");
     expect(truncateText("1234567890", 5)).toBe("1234\u2026");
     expect(truncateText(null, 5)).toBe("");
-  });
-
-  it("formats auth token status labels", () => {
-    const future = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
-
-    expect(formatAccessTokenLabel(null)).toBe("Missing");
-    expect(
-      formatAccessTokenLabel({
-        access: { expiresAt: "invalid-date" },
-      }),
-    ).toBe("Unknown");
-    expect(
-      formatAccessTokenLabel({
-        access: { expiresAt: "1970-01-01T00:00:00.000Z" },
-      }),
-    ).toBe("Expired");
-    expect(
-      formatAccessTokenLabel({
-        access: { expiresAt: future },
-      }),
-    ).toBe("Valid (in 2h)");
-
-    expect(
-      formatRefreshTokenLabel({
-        refresh: { state: "stored" },
-      }),
-    ).toBe("Stored");
-    expect(
-      formatRefreshTokenLabel({
-        refresh: { state: "expired" },
-      }),
-    ).toBe("Expired");
-    expect(formatRefreshTokenLabel(undefined)).toBe("Unknown");
-
-    expect(
-      formatIdTokenLabel({
-        idToken: { state: "parsed" },
-      }),
-    ).toBe("Parsed");
-    expect(
-      formatIdTokenLabel({
-        idToken: { state: "unknown" },
-      }),
-    ).toBe("Unknown");
   });
 });

@@ -106,27 +106,6 @@ function getChartDateTimeFormatter(): Intl.DateTimeFormat {
   );
 }
 
-type TokenState = {
-  state?: string | null;
-};
-
-type AccessTokenState = {
-  expiresAt?: string | null;
-};
-
-export type AccountAuthStatus = {
-  access?: AccessTokenState | null;
-  refresh?: TokenState | null;
-  idToken?: TokenState | null;
-};
-
-export function formatSlug(value: string): string {
-  if (!value) return "";
-  const words = value.split("_");
-  words[0] = words[0].charAt(0).toUpperCase() + words[0].slice(1);
-  return words.join(" ");
-}
-
 export function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -377,35 +356,6 @@ export function formatQuotaResetLabel(resetAt: string | null | undefined): strin
   return formatResetRelative(diffMs);
 }
 
-const DAY_MS = 86_400_000;
-const HOUR_MS = 3_600_000;
-const MINUTE_MS = 60_000;
-const EXPIRING_SOON_THRESHOLD_MS = 7 * DAY_MS;
-
-export type SingleUnitRemaining = {
-  label: string;
-  expiringSoon: boolean;
-};
-
-export function formatSingleUnitRemaining(expiresAtIso: string): SingleUnitRemaining {
-  const ms = new Date(expiresAtIso).getTime() - Date.now();
-  if (ms <= 0) {
-    return { label: t("formatters.now"), expiringSoon: true };
-  }
-  const days = Math.floor(ms / DAY_MS);
-  const hours = Math.floor(ms / HOUR_MS);
-  const minutes = Math.floor(ms / MINUTE_MS);
-  const label =
-    days >= 1
-      ? `${days}d`
-      : hours >= 1
-        ? `${hours}h`
-        : minutes >= 1
-          ? `${minutes}m`
-          : t("formatters.now");
-  return { label, expiringSoon: ms < EXPIRING_SOON_THRESHOLD_MS };
-}
-
 export function formatQuotaResetMeta(
   resetAtSecondary: string | null | undefined,
   windowMinutesSecondary: unknown,
@@ -430,39 +380,4 @@ export function truncateText(value: unknown, maxLen = 80): string {
     return text.slice(0, maxLen);
   }
   return `${text.slice(0, maxLen - 1)}\u2026`;
-}
-
-export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {
-  const expiresAt = auth?.access?.expiresAt;
-  if (!expiresAt) {
-    return t("formatters.token.missing");
-  }
-  const expiresDate = parseDate(expiresAt);
-  if (!expiresDate) {
-    return t("formatters.token.unknown");
-  }
-  const diffMs = expiresDate.getTime() - Date.now();
-  if (diffMs <= 0) {
-    return t("formatters.token.expired");
-  }
-  return t("formatters.token.valid", { relative: formatRelative(diffMs) });
-}
-
-export function formatRefreshTokenLabel(auth: AccountAuthStatus | null | undefined): string {
-  const state = auth?.refresh?.state;
-  const labelMap: Record<string, string> = {
-    stored: t("formatters.token.stored"),
-    missing: t("formatters.token.missing"),
-    expired: t("formatters.token.expired"),
-  };
-  return state && labelMap[state] ? labelMap[state] : t("formatters.token.unknown");
-}
-
-export function formatIdTokenLabel(auth: AccountAuthStatus | null | undefined): string {
-  const state = auth?.idToken?.state;
-  const labelMap: Record<string, string> = {
-    parsed: t("formatters.token.parsed"),
-    unknown: t("formatters.token.unknown"),
-  };
-  return state && labelMap[state] ? labelMap[state] : t("formatters.token.unknown");
 }
