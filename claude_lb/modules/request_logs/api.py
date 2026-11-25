@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from claude_lb.core.pricing import cost_breakdown_usd
 from claude_lb.dependencies import SessionDep
+from claude_lb.modules.auth.dependencies import is_guest
 from claude_lb.modules.dashboard.timeframes import TIMEFRAMES
 from claude_lb.modules.request_logs import conversations, service
 from claude_lb.modules.request_logs.service import STATUS_CATEGORIES, LogFilters
@@ -92,6 +93,11 @@ class FilterOptions(BaseModel):
     statuses: list[str]
 
 
+def _masked(item: dict, request: Request) -> dict:
+    """Guests get a read-only view without client addresses (user agents stay)."""
+    return {**item, "client_ip": None} if is_guest(request) else item
+
+
 def _since(timeframe: str | None, since: datetime | None) -> datetime | None:
     if since is not None:
         return since if since.tzinfo else since.replace(tzinfo=UTC)
@@ -105,6 +111,7 @@ def _since(timeframe: str | None, since: datetime | None) -> datetime | None:
 
 @router.get("", response_model=RequestLogPage)
 async def list_request_logs(
+    request: Request,
     session: SessionDep,
     limit: int = Query(default=25, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -131,10 +138,11 @@ async def list_request_logs(
         models=model or (),
         statuses=status,
         session_key=session_key,
+        search_client_ip=not is_guest(request),
     )
     items, total = await service.list_page(session, filters, limit=limit, offset=offset)
     return RequestLogPage(
-        requests=[RequestLogItem(**item) for item in items],
+        requests=[RequestLogItem(**_masked(item, request)) for item in items],
         total=total,
         limit=limit,
         offset=offset,
@@ -152,7 +160,7 @@ async def request_log_options(
 
 
 @router.get("/{request_id}", response_model=RequestLogDetail)
-async def request_log_detail(request_id: str, session: SessionDep) -> RequestLogDetail:
+async def request_log_detail(request_id: str, request: Request, session: SessionDep) -> RequestLogDetail:
     item = await service.get_one(session, request_id)
     if item is None:
         raise HTTPException(404, "request log not found")
@@ -163,7 +171,7 @@ async def request_log_detail(request_id: str, session: SessionDep) -> RequestLog
         cache_creation_input_tokens=item["cache_creation_input_tokens"],
         cache_read_input_tokens=item["cache_read_input_tokens"],
     )
-    return RequestLogDetail(**item, cost_breakdown=CostBreakdown(**breakdown))
+    return RequestLogDetail(**_masked(item, request), cost_breakdown=CostBreakdown(**breakdown))
 
 
 # ---------------------------------------------------------------- conversations
@@ -248,6 +256,7 @@ class ConversationDetail(BaseModel):
 
 @conversations_router.get("", response_model=ConversationPage)
 async def list_conversations(
+    request: Request,
     session: SessionDep,
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -256,7 +265,12 @@ async def list_conversations(
     since: datetime | None = None,
 ) -> ConversationPage:
     items, total = await conversations.list_page(
-        session, since=_since(timeframe, since), search=search, limit=limit, offset=offset
+        session,
+        since=_since(timeframe, since),
+        search=search,
+        search_client_ip=not is_guest(request),
+        limit=limit,
+        offset=offset,
     )
     return ConversationPage(
         conversations=[ConversationItem(**item) for item in items],
@@ -268,8 +282,9 @@ async def list_conversations(
 
 
 @conversations_router.get("/{session_key}", response_model=ConversationDetail)
-async def conversation_detail(session_key: str, session: SessionDep) -> ConversationDetail:
+async def conversation_detail(session_key: str, request: Request, session: SessionDep) -> ConversationDetail:
     item = await conversations.detail(session, session_key)
     if item is None:
         raise HTTPException(404, "conversation not found")
+    item["timeline"] = [_masked(row, request) for row in item["timeline"]]
     return ConversationDetail(**item)

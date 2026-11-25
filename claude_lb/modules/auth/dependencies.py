@@ -30,6 +30,14 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def is_guest(request: Request) -> bool:
+    """True when `require_management_auth` admitted this request as a read-only guest.
+
+    Endpoints use it to withhold what a guest has no need to see (client addresses).
+    """
+    return getattr(request.state, "dashboard_role", None) == auth.ROLE_GUEST
+
+
 def _presented_bootstrap(request: Request) -> str | None:
     return request.headers.get(BOOTSTRAP_HEADER) or request.query_params.get("bootstrap")
 
@@ -107,6 +115,7 @@ async def require_management_auth(
             detail=status.reason or "authentication required",
             headers={"x-claude-lb-auth": "required"},
         )
+    request.state.dashboard_role = status.role
     if status.role == auth.ROLE_GUEST and request.method not in _READ_ONLY_METHODS:
         raise HTTPException(
             status_code=403,

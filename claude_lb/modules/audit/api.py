@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.audit import service
-from claude_lb.modules.auth.dependencies import ManagementAuthDep
+from claude_lb.modules.auth.dependencies import ManagementAuthDep, is_guest
 from claude_lb.modules.dashboard.timeframes import TIMEFRAMES
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -38,6 +38,12 @@ class AuditActionCount(BaseModel):
     count: int
 
 
+def _out(event, *, guest: bool) -> AuditEventOut:
+    out = AuditEventOut.model_validate(event, from_attributes=True)
+    # Guests get a read-only view; who connected from where is not part of it.
+    return out.model_copy(update={"client_ip": ""}) if guest else out
+
+
 def _aware(value: datetime | None) -> datetime | None:
     if value is None or value.tzinfo:
         return value
@@ -46,6 +52,7 @@ def _aware(value: datetime | None) -> datetime | None:
 
 @router.get("", response_model=list[AuditEventOut])
 async def list_events(
+    request: Request,
     session: SessionDep,
     _: ManagementAuthDep,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -53,11 +60,13 @@ async def list_events(
 ) -> list[AuditEventOut]:
     """Most recent events as a plain list (kept for scripts and the legacy dashboard)."""
     events = await service.recent(session, limit=limit, action=action)
-    return [AuditEventOut.model_validate(e, from_attributes=True) for e in events]
+    guest = is_guest(request)
+    return [_out(e, guest=guest) for e in events]
 
 
 @router.get("/events", response_model=AuditPage)
 async def page_events(
+    request: Request,
     session: SessionDep,
     _: ManagementAuthDep,
     limit: int = Query(default=50, ge=1, le=500),
@@ -76,6 +85,7 @@ async def page_events(
         if frame is None:
             raise HTTPException(422, f"timeframe must be one of all, {', '.join(TIMEFRAMES)}")
         since = datetime.now(UTC) - frame.window
+    guest = is_guest(request)
     events, total = await service.page(
         session,
         limit=limit,
@@ -86,9 +96,10 @@ async def page_events(
         since=_aware(since),
         until=_aware(until),
         ok=ok,
+        search_client_ip=not guest,
     )
     return AuditPage(
-        events=[AuditEventOut.model_validate(e, from_attributes=True) for e in events],
+        events=[_out(e, guest=guest) for e in events],
         total=total,
         limit=limit,
         offset=offset,

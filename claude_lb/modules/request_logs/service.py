@@ -68,6 +68,9 @@ class LogFilters:
     models: Sequence[str] = ()
     statuses: Sequence[str] = ()
     session_key: str | None = None
+    # Off for guest sessions, which never see client addresses and so must not be
+    # able to probe for one through search either.
+    search_client_ip: bool = True
 
 
 def _escape_like(term: str) -> str:
@@ -92,19 +95,19 @@ def _apply(stmt: Select, filters: LogFilters) -> Select:
     term = (filters.search or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"
-        stmt = stmt.where(
-            or_(
-                RequestLog.id.ilike(pattern, escape="\\"),
-                RequestLog.model.ilike(pattern, escape="\\"),
-                RequestLog.error.ilike(pattern, escape="\\"),
-                RequestLog.session_key.ilike(pattern, escape="\\"),
-                RequestLog.user_agent.ilike(pattern, escape="\\"),
-                RequestLog.client_ip.ilike(pattern, escape="\\"),
-                RequestLog.path.ilike(pattern, escape="\\"),
-                Account.name.ilike(pattern, escape="\\"),
-                ApiKey.name.ilike(pattern, escape="\\"),
-            )
-        )
+        columns = [
+            RequestLog.id,
+            RequestLog.model,
+            RequestLog.error,
+            RequestLog.session_key,
+            RequestLog.user_agent,
+            RequestLog.path,
+            Account.name,
+            ApiKey.name,
+        ]
+        if filters.search_client_ip:
+            columns.append(RequestLog.client_ip)
+        stmt = stmt.where(or_(*(column.ilike(pattern, escape="\\") for column in columns)))
     return stmt
 
 

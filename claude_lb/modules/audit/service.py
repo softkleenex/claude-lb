@@ -83,6 +83,7 @@ async def page(
     since: datetime | None = None,
     until: datetime | None = None,
     ok: bool | None = None,
+    search_client_ip: bool = True,
 ) -> tuple[list[AuditEvent], int]:
     """A filtered page of events, newest first, plus the total that matched."""
     conditions = []
@@ -99,15 +100,10 @@ async def page(
     term = (search or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"
-        conditions.append(
-            or_(
-                AuditEvent.action.ilike(pattern, escape="\\"),
-                AuditEvent.target.ilike(pattern, escape="\\"),
-                AuditEvent.detail.ilike(pattern, escape="\\"),
-                AuditEvent.client_ip.ilike(pattern, escape="\\"),
-                AuditEvent.actor.ilike(pattern, escape="\\"),
-            )
-        )
+        columns = [AuditEvent.action, AuditEvent.target, AuditEvent.detail, AuditEvent.actor]
+        if search_client_ip:
+            columns.append(AuditEvent.client_ip)
+        conditions.append(or_(*(column.ilike(pattern, escape="\\") for column in columns)))
     total = (await session.execute(select(func.count(AuditEvent.id)).where(*conditions))).scalar_one()
     rows = await session.execute(
         select(AuditEvent)

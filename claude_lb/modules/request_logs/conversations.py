@@ -34,7 +34,7 @@ def _window(since: datetime | None, until: datetime | None) -> list:
     return conditions
 
 
-def _search_condition(term: str):
+def _search_condition(term: str, *, include_client_ip: bool = True):
     """Conversations with at least one request matching the term."""
     pattern = f"%{_escape_like(term)}%"
     matching = (
@@ -45,12 +45,17 @@ def _search_condition(term: str):
         .where(
             RequestLog.session_key.is_not(None),
             or_(
-                RequestLog.session_key.ilike(pattern, escape="\\"),
-                RequestLog.model.ilike(pattern, escape="\\"),
-                RequestLog.user_agent.ilike(pattern, escape="\\"),
-                RequestLog.client_ip.ilike(pattern, escape="\\"),
-                Account.name.ilike(pattern, escape="\\"),
-                ApiKey.name.ilike(pattern, escape="\\"),
+                *(
+                    column.ilike(pattern, escape="\\")
+                    for column in (
+                        RequestLog.session_key,
+                        RequestLog.model,
+                        RequestLog.user_agent,
+                        *((RequestLog.client_ip,) if include_client_ip else ()),
+                        Account.name,
+                        ApiKey.name,
+                    )
+                )
             ),
         )
     )
@@ -74,13 +79,14 @@ async def list_page(
     since: datetime | None,
     until: datetime | None = None,
     search: str | None = None,
+    search_client_ip: bool = True,
     limit: int = 25,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
     conditions = _window(since, until)
     term = (search or "").strip()
     if term:
-        conditions.append(_search_condition(term))
+        conditions.append(_search_condition(term, include_client_ip=search_client_ip))
 
     total = (
         await session.execute(select(func.count(func.distinct(RequestLog.session_key))).where(*conditions))

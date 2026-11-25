@@ -6,7 +6,7 @@ import re
 
 from sqlalchemy import select
 
-from claude_lb.db.models import Account, AuditEvent
+from claude_lb.db.models import Account, AuditEvent, RequestLog
 from claude_lb.db.session import session_scope
 from claude_lb.main import create_app
 from claude_lb.modules.auth import service as auth
@@ -182,3 +182,71 @@ class TestGuestIsReadOnly:
         assert secret not in joined
         assert GUEST_PASSWORD not in joined and PASSWORD not in joined
         assert auth.bootstrap_token() not in joined
+
+
+class TestGuestPrivacy:
+    """Guests read the logs, but not who connected from where (user agents stay)."""
+
+    IP = "203.0.113.77"
+    SESSION = "f" * 64
+
+    async def seed(self) -> str:
+        async with session_scope() as session:
+            log = RequestLog(
+                path="/v1/messages",
+                model="claude-opus-5",
+                status_code=200,
+                session_key=self.SESSION,
+                user_agent="claude-cli/2.0",
+                client_ip=self.IP,
+            )
+            session.add(log)
+            session.add(AuditEvent(action="settings.updated", target="x", client_ip=self.IP))
+            await session.commit()
+            return log.id
+
+    async def read_everything(self, client, log_id: str) -> dict[str, dict | list]:
+        return {
+            "logs": (await client.get("/api/request-logs")).json(),
+            "detail": (await client.get(f"/api/request-logs/{log_id}")).json(),
+            "conversation": (await client.get(f"/api/conversations/{self.SESSION}")).json(),
+            "audit": (await client.get("/api/audit/events")).json(),
+            "audit_legacy": (await client.get("/api/audit")).json(),
+            "ip_search_logs": (await client.get("/api/request-logs", params={"search": self.IP})).json(),
+            "ip_search_conversations": (
+                await client.get("/api/conversations", params={"search": self.IP})
+            ).json(),
+            "ip_search_audit": (await client.get("/api/audit/events", params={"search": self.IP})).json(),
+        }
+
+    async def test_admin_sees_client_addresses(self):
+        log_id = await self.seed()
+        async for client in make_client(ok_json([])):
+            await admin_with_guest(client)
+            await client.post("/api/auth/login", json={"password": PASSWORD})
+            seen = await self.read_everything(client, log_id)
+        assert seen["logs"]["requests"][0]["client_ip"] == self.IP
+        assert seen["detail"]["client_ip"] == self.IP
+        assert seen["conversation"]["timeline"][0]["client_ip"] == self.IP
+        assert any(e["client_ip"] == self.IP for e in seen["audit"]["events"])
+        assert seen["ip_search_logs"]["total"] == 1
+        assert seen["ip_search_conversations"]["total"] == 1
+        assert seen["ip_search_audit"]["total"] == 1
+
+    async def test_guest_gets_no_client_address_anywhere(self):
+        log_id = await self.seed()
+        async for client in make_client(ok_json([])):
+            await admin_with_guest(client)
+            assert (await client.post("/api/auth/guest/login", json={})).status_code == 200
+            seen = await self.read_everything(client, log_id)
+        assert self.IP not in repr(seen)
+        row = seen["logs"]["requests"][0]
+        assert row["client_ip"] is None and row["user_agent"] == "claude-cli/2.0"
+        assert seen["detail"]["client_ip"] is None
+        assert seen["conversation"]["timeline"][0]["client_ip"] is None
+        assert all(e["client_ip"] == "" for e in seen["audit"]["events"])
+        assert all(e["client_ip"] == "" for e in seen["audit_legacy"])
+        # Search must not confirm an address either.
+        assert seen["ip_search_logs"]["total"] == 0
+        assert seen["ip_search_conversations"]["total"] == 0
+        assert seen["ip_search_audit"]["total"] == 0
