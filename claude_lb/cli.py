@@ -99,6 +99,88 @@ def serve(
 
 
 @app.command()
+def demo(
+    port: Annotated[int, typer.Option(help="Port for the demo server.")] = 2457,
+    traffic: Annotated[bool, typer.Option(help="Send simulated requests continuously.")] = True,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the dashboard.")] = True,
+) -> None:
+    """Try claude-lb with no API key: a simulated upstream and live synthetic traffic.
+
+    Runs on a throwaway data directory, so it never touches a real instance, and no
+    request leaves this machine.
+    """
+    from claude_lb import demo as demo_mode
+
+    data_dir = demo_mode.prepare_environment(port)
+    url = f"http://127.0.0.1:{port}"
+
+    def ready(keys: list[str]) -> None:
+        console.print(f"\n[bold green]claude-lb demo[/bold green] running at [bold]{url}[/bold]")
+        console.print("  Upstream is simulated, so no request leaves this machine.")
+        console.print(f"  Data: {data_dir} (throwaway)", soft_wrap=True)
+        console.print(
+            "  Watch [green]Saved by prompt cache[/green] grow as sticky routing keeps caches warm."
+        )
+        console.print(
+            f"\n  Point a client at it: base URL {url}, API key [bold]{keys[0]}[/bold]", soft_wrap=True
+        )
+        console.print("\n[dim]Ctrl+C to stop.[/dim]")
+        if open_browser:
+            _open_browser(url)
+
+    try:
+        asyncio.run(demo_mode.run(port, traffic=traffic, on_ready=ready))
+    except KeyboardInterrupt:
+        pass
+
+
+setup_app = typer.Typer(help="Connect a client to claude-lb.", no_args_is_help=True)
+app.add_typer(setup_app, name="setup")
+
+
+@setup_app.command("claude-code")
+def setup_claude_code(
+    name: Annotated[str, typer.Option(help="Name for the key this creates.")] = "claude-code",
+    base_url: Annotated[str | None, typer.Option(help="URL clients reach claude-lb on.")] = None,
+    max_cost: Annotated[float | None, typer.Option(help="USD budget per window for this key.")] = None,
+    window: Annotated[int, typer.Option(help="Budget window in seconds.")] = 3600,
+) -> None:
+    """Issue a key for Claude Code and print the settings that route it through claude-lb."""
+    settings = get_settings()
+    host = "127.0.0.1" if settings.host in ("0.0.0.0", "::") else settings.host
+    url = (base_url or f"http://{host}:{settings.port}").rstrip("/")
+
+    async def _create() -> str:
+        from claude_lb.db.models import ApiKey
+
+        async with session_scope() as session:
+            existing = await session.execute(select(ApiKey).where(ApiKey.name == name))
+            if existing.scalar_one_or_none() is not None:
+                console.print(
+                    f"[red]A key named {name!r} already exists.[/red] Pass --name to issue another."
+                )
+                raise typer.Exit(1)
+            issued = await create_api_key(
+                session, name=name, max_cost_usd_per_window=max_cost, window_seconds=window
+            )
+            return issued.plaintext
+
+    key = _run(_create())
+    env = {"ANTHROPIC_BASE_URL": url, "ANTHROPIC_API_KEY": key}
+
+    console.print(f"[green]Issued key[/green] {name} — shown once, copy it now.\n")
+    console.print("[bold]Shell[/bold] (current session):")
+    for k, v in env.items():
+        print(f"  export {k}={v}")
+    console.print("\n[bold]Or[/bold] add to [bold]~/.claude/settings.json[/bold] (every session):")
+    print(json.dumps({"env": env}, indent=2))
+    console.print(
+        "\nThen run [bold]claude[/bold]. Each response names the account that served it in the "
+        "x-claude-lb-account header, and spend for this key shows under Cost reports → API key."
+    )
+
+
+@app.command()
 def config() -> None:
     """Show the resolved configuration."""
     settings = get_settings()

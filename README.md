@@ -1,8 +1,37 @@
 # claude-lb
 
-Load balancer and proxy for **Anthropic API keys**. Pool multiple keys, route around rate
-limits, track spend per key and per model, and hand out scoped keys to your own clients —
-all behind one Anthropic-compatible endpoint.
+[![CI](https://github.com/softkleenex/claude-lb/actions/workflows/ci.yml/badge.svg)](https://github.com/softkleenex/claude-lb/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/claude-lb)](https://pypi.org/project/claude-lb/)
+[![Python](https://img.shields.io/pypi/pyversions/claude-lb)](https://pypi.org/project/claude-lb/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+**A self-hosted gateway for your Anthropic API keys.** Pool them behind one endpoint,
+keep prompt caches warm, and see what every client and model costs.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
+  <img alt="claude-lb dashboard: savings from prompt caching, cost, per-account headroom" src="docs/dashboard-light.png">
+</picture>
+
+**Try it without an API key.** Ten seconds, simulated upstream, nothing leaves your machine:
+
+```bash
+uvx claude-lb demo
+```
+
+## Why
+
+- **Your prompt cache is per key, and a naive load balancer wastes it.** Spread one
+  conversation across keys and every turn pays the 1.25× cache-*write* price instead of
+  the 0.025–0.1× *read*. claude-lb pins each conversation to the key that cached it. The
+  dashboard shows the dollars that saved you, priced per model.
+- **You can see who spends what.** Every client gets its own `clb_` key with optional
+  request, token, or USD budgets. Cost reports by key, account, model, or day export to CSV.
+- **One 429 does not take your app down.** Rate limits, overloads (529), and 5xx errors fail
+  over to the next key. Keys that recover come back into rotation on their own.
+
+Point Claude Code at it with one command (`claude-lb setup claude-code`). The same goes for
+the Anthropic SDKs and anything else that takes a base URL.
 
 Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anthropic API.
 
@@ -21,14 +50,15 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 | **Key pooling** | Route across many Anthropic keys — separate workspaces, orgs, or billing buckets |
 | **Bring-your-own credentials** | `x-api-key` or bearer, with RFC 6749 refresh, token rotation, and 401 self-healing |
 | **Rate-limit aware** | Reads `anthropic-ratelimit-*` response headers and steers traffic toward headroom |
-| **Prompt-cache affinity** | Pins a conversation to one account so its cache stays warm (0.1x reads, not 1.25x writes) |
+| **Prompt-cache affinity** | Pins a conversation to one account so its cache stays warm (0.025–0.1x reads, not 1.25x writes) |
 | **Automatic failover** | 429/5xx/transport errors retry on the next account; 401/403 disables the key |
 | **Self-healing** | Background probes return recovered accounts to rotation without operator action |
 | **Model-aware routing** | Skips accounts whose org cannot serve the requested model |
 | **Live configuration** | Change strategy, stickiness, and probe intervals from the dashboard — no restart |
 | **Dashboard auth** | Password + optional TOTP, with a loopback/bootstrap-token first run |
 | **Scoped client keys** | Issue `clb_…` keys with per-window request, token, and USD budgets |
-| **Usage + cost tracking** | Per request, account, model, and key — including cache-read/write pricing |
+| **Usage + cost tracking** | Per request, account, model, and key — cache reads and 5-minute / 1-hour writes priced per model |
+| **Cache savings** | Cache hit rate and the dollars prompt caching saved, per model and account |
 | **Trends that outlive logs** | Daily rollups keep a 28-day chart even with short log retention |
 | **Prometheus metrics** | `/metrics` exposes per-account health, headroom, tokens, and spend |
 | **Audit log** | Append-only record of every management change and sign-in |
@@ -88,6 +118,12 @@ const client = new Anthropic({ baseURL: "http://127.0.0.1:2456", apiKey: "clb_..
 ```
 
 **Claude Code / Agent SDK**
+
+```bash
+claude-lb setup claude-code     # issues a key, prints the env vars and a settings.json block
+```
+
+or by hand:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:2456
@@ -174,7 +210,7 @@ bearer accounts route side by side in one pool.
 
 Anthropic prompt caches are scoped to the credential that created them, so spreading
 one conversation across the pool throws the cache away on every turn — each account
-pays the ~1.25x cache-write premium instead of the 0.1x read. claude-lb keys each
+pays the ~1.25x cache-write premium instead of the 0.025–0.1x read. claude-lb keys each
 request on its *cacheable prefix* (`system` + `tools` + the first user turn), which is
 exactly the part Anthropic hashes and exactly the part that stays byte-identical as a
 conversation grows, and pins that key to one account.
@@ -291,6 +327,8 @@ Contains `claude-lb.db` (SQLite) and `secret.key`. Back up both.
 
 ```
 claude-lb serve                    Start the proxy and dashboard
+claude-lb demo                     Try it with a simulated upstream — no API key needed
+claude-lb setup claude-code        Issue a key and print the Claude Code settings for it
 claude-lb config                   Show the resolved configuration
 claude-lb account add <name>       Add an upstream Anthropic API key
 claude-lb account login <name>     Add an account by signing in through a browser (PKCE)

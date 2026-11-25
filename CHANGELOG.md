@@ -5,6 +5,14 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 
 ## [Unreleased]
 
+### Added
+- **`claude-lb demo`**: the real server, a simulated upstream, and live synthetic traffic.
+  It needs no API key, runs on a throwaway data directory, and sends nothing off the machine.
+- **Cache savings**: the usage summary and dashboard show the cache hit rate and the dollars
+  prompt caching saved, priced per model, overall and by model and account.
+- **`claude-lb setup claude-code`**: issues a key and prints the environment variables and the
+  `settings.json` block that route Claude Code through claude-lb.
+
 ### Fixed — correctness
 - **Connection-pool deadlock.** Key auth held a request-scoped DB connection for the whole
   response while the proxy opened more. About 15 concurrent requests exhausted the pool, and all
