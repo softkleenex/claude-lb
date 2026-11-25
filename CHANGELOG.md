@@ -16,10 +16,61 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - **Per-account spend cap** (`spend_cap_usd`): stop routing to an account once its estimated spend reaches the cap. `claude-lb account add --spend-cap-usd`, `claude-lb account set-spend-cap <name> [usd]`, and `spend_cap_usd` on the accounts API.
 - **`claude-lb account add-subscription <name>`**: one command to add a Claude subscription. It runs Claude Code's own `claude setup-token` in a throwaway config directory (existing logins and sessions are untouched), reads the token from its output, verifies it with one tiny request, and shows current 5h/7d usage.
 - **Per-model routing for subscriptions**: when a subscription refuses a model (a `429` without `anthropic-ratelimit-unified-*` headers), only that model is routed elsewhere for 12 hours; the account keeps serving the models it can. Shown in `account list` and as `blocked_models` on the accounts API; `POST /api/accounts/{id}/reset-quota` clears it.
+- **New dashboard** (React + Vite, derived from the codex-lb frontend, MIT © 2025 Soju06 — see
+  `frontend/LICENSE`). Replaces the single-file dashboard. The build is committed under
+  `claude_lb/modules/dashboard/static/`, so running claude-lb still needs no Node; any non-API GET
+  falls back to the SPA so client routes survive a reload. English and Korean (Simplified Chinese
+  partial), light/dark, phone width. Pages: Dashboard (metrics with deltas and sparklines, 5h/7d
+  capacity donuts, weekly pace, API-key spend, account cards, usage by model, cost trend, request
+  log with filters and details, conversations view), Reports, Accounts, APIs, Settings, and under
+  Advanced: Audit log, Model catalog, Sticky sessions, Automations.
+- **Dashboard APIs**: `GET /api/dashboard/overview` and `/projections` (capacity, safe line, burn
+  rate, weekly pace); `GET /api/request-logs` (+ `/options`, `/{id}` with cost breakdown);
+  `GET /api/conversations` (+ `/{session_key}`); `GET /api/reports` (+ `/options`; previous-period
+  comparison, median TTFT/TPS, user-agent distribution); `GET /api/audit/events` (+ `/actions`);
+  `GET /api/health/catalog` (models with prices and active refusals); `/api/sticky-sessions`
+  (browse, delete, purge); `GET /health/ready`; `auth_enabled` on `/api/auth/status`.
+- **Request log columns** `ttft_ms`, `session_key` (the prompt-cache conversation key), `user_agent`
+  and `client_ip`, added to existing databases on startup.
+- **Accounts**: pause/resume (`PATCH enabled`, kept across health probes), rename, probe one account
+  (`POST /api/accounts/{id}/probe`), clear model refusals (`DELETE /api/accounts/{id}/model-blocks`),
+  hourly 5h/7d and daily usage trends (`GET /api/accounts/{id}/trends`), delete with history.
+- **API key rules**: model allowlist (403 `permission_error` for other models), enforced model
+  (rewrites `model`), assigned accounts (routes only to those, never spills), and any number of
+  limit rules — requests, total / input / output tokens or USD over 5h, 7d, daily, weekly,
+  monthly (UTC) or custom rolling windows, optionally per model — answered with 429 and
+  `retry-after`. Existing single budgets keep working and show up as rules. Plus expiry,
+  `POST /api/keys/{id}/regenerate`, `GET /api/keys/overview`, `GET /api/keys/{id}/trends`, and a
+  partial-update `PATCH /api/keys/{id}` with a JSON body.
+- **Reports**: multi-value account / API key / model / user-agent filters and `user_agent` grouping
+  on `/api/usage/report(.csv)`; the CSV gains `cache_savings_usd` (before `cost_usd`); ranges are
+  capped at 366 days.
+- **IP firewall** for the proxy (`/api/firewall`): allow-all or allowlist of addresses / CIDR
+  ranges. Proxy only — the dashboard and `/api` are never firewalled; no loopback exemption;
+  `X-Forwarded-For` is ignored.
+- **Read-only guest role**: optional guest sign-in (with its own optional password) that can read
+  every page but change nothing (403 on writes) and never sees client IP addresses.
+- **Automations**: scheduled prompts per account (weekdays, time, IANA timezone, random spread,
+  model, prompt, `max_tokens` ≤ 1024), e.g. to start a 5-hour window before work. Each slot fires
+  once (idempotent across restarts and workers) within 15 minutes of its time; "Run now" with a
+  5-minute cooldown; run history per cycle; requests carry the user agent
+  `claude-lb-automation/<version>` and are accounted like any other.
 
 ### Fixed
 - A Console `400` "credit balance is too low" / "reached your specified API usage limits" now disables that account and fails over, instead of being returned to the caller.
 - Sticky-session fresh picks now respect `routing_policy` tiers. Previously a new conversation could land on a `preserve` account while a `burn_first` one still had room.
+- Disabling an account from the dashboard no longer undoes itself: the background health probe
+  used to re-enable any disabled account whose probe passed. Operator pauses are now left alone.
+- Request-log pruning used the environment default instead of the retention set in the dashboard,
+  and ran only at startup. It now uses the runtime setting and runs every 6 hours.
+- In `claude-lb demo`, the simulated upstream's `GET /v1/models` was answered by the dashboard's
+  SPA fallback, so model sync and probes found no models.
+
+### Changed
+- The legacy single-file dashboard (`modules/dashboard/index.html`) is gone. Without a frontend
+  build, `/` answers 503 with the build command (`cd frontend && npm ci && npm run build`).
+- `POST /api/settings/reset` resets only runtime settings; it no longer touches the firewall mode
+  or guest access.
 
 ## [0.6.1] — 2026-11-25
 

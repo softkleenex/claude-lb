@@ -25,7 +25,7 @@ Subscription accounts do not use per-minute RPM/TPM limits alone; Anthropic repo
 - **`rate_limited`**: 5-hour window reached `100%` (or `rejected`), cooling down until `primary_reset_at`.
 - **`quota_exceeded`**: 7-day window reached `100%`, cooling down until `secondary_reset_at`.
 - **Automatic recovery**: Once `primary_reset_at` or `secondary_reset_at` passes, `is_available()` and the background health scheduler automatically return the account to rotation without manual intervention.
-- **Manual reset**: `POST /api/accounts/{id}/reset-quota` clears stored quota blocks immediately.
+- **Manual reset**: `POST /api/accounts/{id}/reset-quota` (dashboard: Accounts → account → *Reset quota state*) clears stored quota blocks immediately.
 
 ---
 
@@ -125,7 +125,10 @@ curl -X POST http://127.0.0.1:2456/api/accounts/import \
   - `claude_lb_account_primary_used_percent`
   - `claude_lb_account_secondary_used_percent`
   - `claude_lb_account_capacity_credits`
-- **Dashboard**: Displays plan badges, inline `routing_policy` selectors, 5h/7d quota utilization with reset times, depletion risk pills, and overall pool remaining percentage.
+- **Dashboard**:
+  - *Dashboard* page: 5h / 7d capacity donuts over the enabled subscription accounts (one segment per account, remaining in the centre, a safe-pace tick, risk badge, burn rate and projected run-out), a weekly pace forecast (`GET /api/dashboard/projections`), and API-key spend against caps.
+  - *Accounts* page: plan / policy / depletion-risk badges, 5h / 7d bars with absolute reset times and countdowns, unified / overage status, an hourly 5h / 7d chart from `QuotaHistory`, per-model refusals with *Try again*, spend-cap progress, and the plan / policy / weight / priority / cap editors.
+  - *Automations* page (Advanced): schedule a tiny prompt per account, e.g. weekdays 07:00 in your timezone, so a 5-hour window starts before you do.
 
 ## Spend-capped API key in front of subscriptions
 
@@ -143,6 +146,8 @@ claude-lb account set-spend-cap console-first 2    # raise later; omit the amoun
 - If the Console runs out of credit anyway, the `400 credit balance is too low` reply
   disables the account and the request fails over. Re-enable it after topping up.
 - A capped account is not disabled; raising the cap puts it straight back in rotation.
+- In the dashboard: Accounts → *Add account* → API key, then set the plan, policy and spend cap
+  on the account's settings card. The Dashboard page's *API key spend* card shows spend vs cap.
 
 ## Adding a subscription account
 
@@ -156,6 +161,9 @@ directory, so the Claude Code login you are using right now is not touched. It t
 sends one tiny Haiku request to confirm the token and prints the current 5h/7d usage.
 Requires Claude Code (`claude`) on `PATH`.
 
+The dashboard (Accounts → *Add account* → Subscription) shows the exact command for the plan
+and policy you pick, and also accepts a pasted `sk-ant-oat…` token or a credential file.
+
 claude-lb ships no OAuth client id and does not present itself as Claude Code.
 
 ## Models a subscription refuses
@@ -168,5 +176,7 @@ rejection, which always carries those headers:
 - The account is **not** cooled down; it keeps serving models it can.
 - That model is routed to other accounts for 12 hours, then tried again.
 - `claude-lb account list` shows `alice: refuses claude-sonnet-5-5 — those requests go to other accounts.`
+- The dashboard shows it on the account (Accounts page) and in the *Refused by subscriptions* list
+  on the Model catalog page; *Try again* clears it early (`DELETE /api/accounts/{id}/model-blocks?model=…`).
 
 Keep at least one API-key account in the pool for the models subscriptions refuse.

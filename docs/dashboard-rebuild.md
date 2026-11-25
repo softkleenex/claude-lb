@@ -28,7 +28,7 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
   - [x] G1. conversations, audit log page, model catalog page, sticky sessions browser
   - [x] G2. firewall, guest role, automations
-- [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
+- [x] H. Remove old index.html, docs/README/CHANGELOG, final full verification
 
 ## Log
 
@@ -781,3 +781,100 @@ shows all firewall/guest/automation events (guest login with actor `guest`). 390
   legacy MSW handlers (unused by any page) — remove in H.
 - README/CHANGELOG should document: firewall semantics (proxy-only, no loopback exemption, no X-Forwarded-For),
   guest role, automations (UA `claude-lb-automation`, grace/idempotency, 5-min cooldown, `max_tokens` ≤ 1024).
+
+
+### 2026-11-26 — Step H (cleanup, guest privacy, docs, final verification)
+**Done**
+- **Legacy dashboard removed**: `claude_lb/modules/dashboard/index.html` and its fallback are gone. Without
+  `static/index.html`, `/` and client routes answer **503** with a short HTML page giving the build command
+  (`cd frontend && npm ci && npm run build`); `/health`, `/api` unaffected. `tests/test_dashboard_spa.py` checks it.
+  `tests/test_dashboard_contract.py` (which parsed the old HTML) is replaced by: every `/api/...` literal in
+  `frontend/src` must be a prefix of a route in the app's OpenAPI schema, and the committed build's `index.html`
+  must reference only files that exist. `test_auth` expects `<title>Claude LB</title>` only.
+- **Codex leftovers removed**: `features/quota-planner/` (+ MSW handlers/factories, coverage entries, the camelCase
+  `legacyJson`/`legacyRequestUrl`/`parseJsonBody` helpers), `utils/account-status.ts`, `utils/account-identifiers.ts`,
+  `components/{mini-quota-bar,blur-email}.tsx`, codex constants (`STATUS_LABELS`, `ERROR_LABELS`, `ROUTING_LABELS`,
+  `KNOWN_PLAN_TYPES`, `MESSAGE_TONE_META`) and formatters (token labels, reset-credit countdown, `formatSlug`) with
+  their tests; `SettingsSkeleton` redrawn for the three server-backed cards (no telemetry/API-key placeholders).
+  **i18n**: 449 unused keys removed per locale (en 1803→1354, ko 1746→1297, zh-CN 798→349). Script (scratchpad, not
+  committed) treats a key as used if its literal appears in `src` or it matches a template literal that starts with a
+  dotted prefix (`` `accounts.plans.${x}` `` — single-segment wildcard); `audit.action.*` keys contain dots and are
+  matched by the full action list. Korean leftovers translated (`Credits` → 크레딧 on the donuts, `Reset`, formatter
+  strings). Missing-key check: every `t("…")` literal exists in en and every en key exists in ko.
+- **Guest privacy**: `require_management_auth` stores the role on `request.state`; `auth.dependencies.is_guest()`.
+  For guests, `client_ip` is `null` in `GET /api/request-logs`, `/api/request-logs/{id}`, the conversation timeline,
+  and `""` in `GET /api/audit/events` and `/api/audit`; searches skip the IP column (`LogFilters.search_client_ip`,
+  `conversations.list_page(search_client_ip=)`, `audit.page(search_client_ip=)`) so an address cannot be confirmed by
+  probing. User agents stay. Tests: `TestGuestPrivacy` in `tests/test_guest_role.py` (admin sees IP + IP search hits;
+  guest gets the IP nowhere and every IP search returns 0).
+- **Docs**: README (feature rows, new **Dashboard** section with a per-page table, guest + automations notes, firewall
+  and guest bullets in Security, retention env note, management API rows for the new endpoints, frontend dev commands,
+  codex-lb MIT attribution under License), ARCHITECTURE.md (proxy flow with firewall/key rules, module table, in-memory
+  state rows, new "Dashboard (frontend)" section: layout, wire format, SPA serving, auth, contract test),
+  CHANGELOG [Unreleased] (Added: dashboard, APIs, RequestLog columns, accounts, API-key rules, reports, firewall, guest,
+  automations; Fixed: pause undone by the probe, retention prune, demo `/v1/models` shadowed; Changed: legacy page gone,
+  settings reset scope), `docs/subscription-pooling.md` (dashboard pointers), `frontend/README.md` (dev workflow with a
+  demo/serve backend on 2456, build committed, tests/mocks/i18n conventions).
+- **Hygiene**: `ruff format` on 7 legacy files in a separate `style: ruff format` commit (13+/22− lines). `npm run lint`
+  clean.
+
+**Results**
+- `ruff check` clean, `ruff format --check` clean (103 files); `pytest` **564 passed** (588 in G2 − 28 tests of the old
+  HTML contract file + 2 new contract + 2 guest-privacy tests).
+- `npm test` **74 files / 414 tests** pass; `npm run lint` clean; `npm run build` OK (only the inherited >600 kB
+  recharts chunk warning).
+- `uv build`: wheel has 146 files, 67 under `claude_lb/modules/dashboard/static/`, `static/index.html` present, every
+  asset it references present, legacy `index.html` absent; sdist has no `node_modules`.
+- **Upgrade path on a copy of the real DB** (`~/.claude-lb/claude-lb.db*` + `secret.key` copied to a scratch dir;
+  the original's mtimes unchanged afterwards): before starting, `health_probe_enabled`/`model_sync_enabled` were set to
+  `false` in the **copy's** `settings` table so nothing called upstream; served with
+  `CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false` on :2461. Startup log: `schema upgraded: added dashboard_sessions.role,
+  api_keys.allowed_models_json, api_keys.enforced_model, api_keys.assigned_account_ids_json, request_logs.ttft_ms,
+  request_logs.session_key, request_logs.user_agent, request_logs.client_ip, request_logs:ix_request_logs_session_created`;
+  new tables `api_key_limit_rules`, `firewall_entries`, `automation_jobs`, `automation_runs` created. 25 GET endpoints
+  the pages use all 200. In the browser every page rendered with that data (console-first API key with its $1 cap at
+  $0.424, sub-backup Max 5x preserve with 7d 53% used, 11 old request rows with "—" TTFT, 2 keys, catalog) — no schema
+  mismatch, no console errors. No proxy traffic sent. Copy trashed.
+- **Demo walkthrough** (fresh data dir, :2461): all 10 views (Dashboard, Conversations, Reports, Accounts, APIs,
+  Settings, Audit log, Model catalog, Sticky sessions, Automations) in Korean light, Korean dark and English dark at
+  1440 px, and Korean dark at 390 px: no raw i18n keys, no Hangul in English, no English UI strings left in Korean
+  (only data: model ids, error text from upstream, names), page `scrollWidth` = viewport everywhere (wide tables scroll
+  inside their cards), no console errors or warnings. Screenshots in the session scratchpad `screens/`.
+
+**Known issues / not done**
+- `docs/dashboard-light.png` / `docs/dashboard-dark.png` (README hero image) still show the **old** dashboard.
+- Guests still see firewall entries (networks) and masked credential/key hints; only client IPs are hidden.
+- zh-CN covers only the strings that survived from codex-lb (349 keys); everything new falls back to English.
+- Inherited from earlier steps: Postgres SQL paths (bucketing, `count(distinct)`) untested locally; limits and
+  conversations are retention-bounded; sticky map / firewall cache / automations scheduler are per process; backend
+  error messages are English; recharts chunk > 600 kB; `npm audit` moderate advisories in dev deps not reviewed;
+  `claude-lb demo` leaves a `claude-lb-demo-*` dir in `$TMPDIR`.
+
+### 아침 요약 (Morning summary)
+**만든 것** — 예전 단일 HTML 대시보드를 codex-lb 기반 React 대시보드로 완전히 교체했습니다(A–H, 커밋 13개, push 안 함).
+- 페이지: 대시보드(지표·추이·5h/7d 용량 도넛·주간 속도·API 키 지출·계정 카드·모델별 사용량·요청 로그/대화 보기),
+  리포트(기간·필터·이전 기간 비교·CSV), 계정(일시 중지/점검/이름 변경/한도·정책·지출 한도/모델 거부 해제/추이),
+  API(키 규칙: 허용 모델·강제 모델·배정 계정·여러 사용량 한도, 재발급, 추이), 설정(라우팅·백그라운드 작업·보존 기간·
+  비밀번호·TOTP·게스트·IP 방화벽), 고급 메뉴의 감사 로그·모델 카탈로그·세션 고정·자동화(예약 프롬프트).
+- 백엔드: 새 API 다수, RequestLog 컬럼(ttft/session/UA/IP), API 키 규칙, 방화벽, 게스트(읽기 전용, IP 숨김), 자동화.
+- 덤으로 잡은 버그: 일시 중지가 헬스 프로브에 의해 풀리던 문제, 보존 기간 정리가 대시보드 설정을 무시하던 문제,
+  데모의 `/v1/models`가 대시보드 HTML에 가려지던 문제.
+
+**실행 방법**
+- 그대로 쓰기: `uv run claude-lb serve` → http://127.0.0.1:2456 (빌드 결과물이 커밋돼 있어 Node 불필요).
+- 둘러보기: `CLAUDE_LB_DATA_DIR=$(mktemp -d) uv run claude-lb demo --port 2461`.
+- 프론트 개발: 백엔드를 2456에 띄우고 `cd frontend && npm ci && npm run dev` (5173). 수정 후 `npm run build` 결과를 커밋.
+- 실제 DB 사본으로 업그레이드 확인 완료: 시작 시 스키마가 자동으로 추가되고 모든 페이지가 기존 데이터로 정상 표시.
+
+**알아둘 한계**
+- README 상단 스크린샷(docs/dashboard-*.png)은 아직 예전 대시보드 — 새 스크린샷으로 바꿔야 합니다.
+- 중국어(zh-CN)는 일부만 번역(나머지는 영어로 표시). 서버 오류 메시지는 영어.
+- Postgres 경로 미검증, 일부 수치(한도·대화)는 요청 로그 보존 기간에 묶임, 세션 고정·방화벽 캐시·자동화 스케줄러는
+  프로세스별(워커 1개 권장).
+
+**다음 단계 제안**
+1. 새 스크린샷으로 README 이미지 교체 → 릴리스(0.7.0) 준비.
+2. Postgres로 통합 테스트 한 번(대시보드 집계 SQL).
+3. 게스트에게 방화벽 항목도 숨길지 결정, 백엔드 오류 메시지 i18n(오류 코드 반환) 검토.
+4. recharts 청크 분리, `npm audit` 정리.
+

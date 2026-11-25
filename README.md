@@ -64,7 +64,11 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 | **Audit log** | Append-only record of every management change and sign-in |
 | **Cost reports** | Date-range breakdown by day, account, key, or model, with CSV export |
 | **Streaming passthrough** | SSE bytes are relayed unmodified; usage is sniffed out of the stream |
-| **Dashboard** | Single page, no build step, light/dark |
+| **Scoped key rules** | Per-key model allowlist, enforced model, assigned accounts, and several limit rules (requests, tokens, USD) over 5h / 7d / daily / weekly / monthly / custom windows |
+| **IP firewall** | Optional allowlist of addresses / CIDR ranges for the proxy |
+| **Guest role** | Read-only dashboard access with its own optional password |
+| **Automations** | Scheduled tiny prompts per account, e.g. to start a 5-hour window before work |
+| **Dashboard** | React app (light/dark, English / 한국어 / 简体中文, mobile), shipped prebuilt — no Node needed to run it |
 
 ## Quick start
 
@@ -141,6 +145,37 @@ curl http://127.0.0.1:2456/v1/messages \
 ```
 
 Every response carries `x-claude-lb-account`, naming the upstream account that served it.
+
+## Dashboard
+
+Open the server's root URL (<http://127.0.0.1:2456> by default). The dashboard is a React
+app whose build is committed under `claude_lb/modules/dashboard/static/`, so a plain
+install serves it without Node. The UI is available in English and Korean (Simplified
+Chinese is partial and falls back to English), in light and dark themes, and down to
+phone width.
+
+| Page | What it does |
+|---|---|
+| **Dashboard** | Requests, tokens, cost, cache savings, error rate and conversations for 1h / 24h / 7d / 30d with sparklines and deltas against the previous window; 5h / 7d subscription capacity donuts with a safe-pace line, weekly pace forecast, API-key spend vs caps; account cards with pause / probe; usage by model; 28-day cost chart; the request log (search, filters, column chooser, per-request details with cost breakdown) and a **Conversations** view grouped by prompt-cache session |
+| **Reports** | Cost and usage over any UTC date range (≤ 366 days) with account / API key / model / user-agent filters, comparison with the previous period, cost / token / request / TTFT / TPS charts, model and user-agent distributions, and a breakdown by day, account, key, model or user agent with CSV export |
+| **Accounts** | Every upstream account with status, 5h / 7d bars and reset countdowns, spend-cap progress, per-model refusals, hourly quota and daily usage charts; pause / resume, probe now, rename, plan / policy / weight / priority / cap, reset quota state, delete (optionally with history); add an API key, paste a subscription token, or import a credential file |
+| **APIs** | Client (`clb_…`) keys: create with expiry, allowed models, enforced model, assigned accounts and limit rules; usage per rule with reset times; regenerate, disable, delete; 7-day trends by account and model; a ready-to-paste Claude Code snippet |
+| **Settings** | Routing strategy (with a guide to all nine), retries, prompt-cache affinity, background jobs, log retention, dashboard password, TOTP, guest access, IP firewall, reset to defaults |
+| **Audit log** *(Advanced)* | Every management change and sign-in, searchable and filterable by action, target, result and time |
+| **Model catalog** *(Advanced)* | The synced model catalog with built-in prices (incl. long-context tiers), per-account availability, active per-model refusals with "try again", sync and probe buttons |
+| **Sticky sessions** *(Advanced)* | The in-memory conversation → account map: filter by account, delete entries, purge expired |
+| **Automations** *(Advanced)* | Scheduled prompts per account (weekdays, time, IANA timezone, random spread), cost estimate, run now, and a run history per cycle |
+
+**Guest access.** With a dashboard password set, Settings → Guest access lets people sign
+in read-only ("Continue as guest", optionally behind a separate guest password). Guests
+see everything an admin sees except client IP addresses, and every write returns 403.
+
+**Automations** send a normal request through the chosen account (user agent
+`claude-lb-automation/<version>`, `max_tokens` ≤ 1024), so spend and quota are tracked
+like any other request. A slot fires at most once (idempotent across restarts and
+workers), only within 15 minutes of its time, and "Run now" has a 5-minute cooldown.
+
+To work on the dashboard itself, see [frontend/README.md](frontend/README.md).
 
 ## Routing strategies
 
@@ -298,7 +333,7 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
 | `CLAUDE_LB_DASHBOARD_AUTH_ENABLED` | `true` | Set `false` only behind a proxy that authenticates for it |
 | `CLAUDE_LB_UPSTREAM_BASE_URL` | `https://api.anthropic.com` | Per-account override also available |
 | `CLAUDE_LB_SECRET_KEY` | generated | Fernet key for credentials at rest; see below |
-| `CLAUDE_LB_REQUEST_LOG_RETENTION_DAYS` | `30` | Pruned at startup |
+| `CLAUDE_LB_REQUEST_LOG_RETENTION_DAYS` | `30` | Default for the runtime setting; logs are pruned every 6 h |
 | `CLAUDE_LB_DASHBOARD_ENABLED` | `true` | |
 | `CLAUDE_LB_LOG_LEVEL` | `INFO` | |
 
@@ -328,6 +363,14 @@ Environment variables use the `CLAUDE_LB_` prefix; `.env` and `.env.local` are r
   loopback access also requires a loopback `Host` (defeating DNS rebinding), and any
   state-changing `/api` request a browser sends cross-site is rejected.
 - **Sign-in is throttled** (5 failures per client per 5 minutes) and TOTP codes are single-use.
+- **Guests are read-only.** A guest session gets 403 on every non-GET management route and
+  never sees client IP addresses. Disabling guest access or changing its password ends
+  every guest session.
+- **The IP firewall guards the proxy only** (`/v1/*`). In allowlist mode a client whose
+  TCP peer address is not covered gets a 403 `permission_error`; the dashboard and `/api`
+  are never firewalled, so a bad entry cannot lock you out. There is no loopback
+  exemption and `X-Forwarded-For` is ignored: behind a reverse proxy every client is the
+  proxy's address. An empty allowlist refuses every proxy request.
 
 ## Upgrading
 
@@ -384,6 +427,18 @@ claude-lb key list                 List issued keys
 | `POST` | `/api/health/sync-models` | Refresh the model catalog now |
 | `GET` | `/api/health/models` | Merged model catalog |
 | `GET` | `/api/audit` | Management audit log |
+| `GET` | `/api/dashboard/overview?timeframe=24h` · `/projections` | Dashboard metrics, deltas, buckets; 5h/7d capacity and weekly pace |
+| `GET` | `/api/request-logs` · `/options` · `/{id}` | Paged, filtered request log; filter options; one request with cost breakdown |
+| `GET` | `/api/conversations` · `/{session_key}` | Request logs grouped by conversation |
+| `GET` | `/api/reports` · `/options` | Date-range report with comparison, medians, distributions |
+| `GET` / `POST` | `/api/accounts/{id}/probe` · `/trends` · `/model-blocks` | Per-account probe, trends, clear refusals |
+| `GET` / `POST` | `/api/keys/{id}/trends` · `/regenerate`, `/api/keys/overview` | Key trends, new secret, totals |
+| `GET` | `/api/audit/events` · `/actions` | Filtered, paged audit log |
+| `GET` | `/api/health/catalog` | Model catalog with prices and refusals |
+| `GET` / `POST` / `DELETE` | `/api/sticky-sessions` … | Browse and delete sticky-session entries |
+| `GET` / `PUT` / `POST` / `PATCH` / `DELETE` | `/api/firewall` … | IP allowlist mode and entries |
+| `GET` / `PATCH` / `POST` | `/api/auth/guest`, `/api/auth/guest/login` | Guest access config and sign-in |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/automations` … | Scheduled prompts, run now, run history |
 | `POST` | `/api/auth/login` · `/logout` · `/password` | Session management |
 | `POST` | `/api/auth/totp/enroll` · `/confirm` | TOTP setup |
 | `GET` | `/health` | Liveness (open) |
@@ -398,6 +453,10 @@ uv sync
 uv run pytest
 uv run ruff check .
 uv run claude-lb serve --reload
+
+# dashboard (Node 20+): dev server on :5173 proxying to the backend on :2456
+cd frontend && npm ci && npm run dev
+npm test && npm run lint && npm run build   # build output is committed
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md). Security reports:
@@ -405,4 +464,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md). S
 
 ## License
 
-MIT
+MIT. The dashboard in `frontend/` is derived from the
+[codex-lb](https://github.com/Soju06/codex-lb) frontend, MIT License © 2025 Soju06 — see
+[frontend/LICENSE](frontend/LICENSE).
