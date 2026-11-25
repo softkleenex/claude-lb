@@ -1,399 +1,234 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { Info, RefreshCw } from "lucide-react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
-import { listAccounts } from "@/features/accounts/api";
-import { getRequestLogOptions } from "@/features/dashboard/api";
-import { useReports } from "@/features/reports/hooks/use-reports";
-import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
+import { formatMs, formatUsd } from "@/features/dashboard/utils";
+import { useChartColors } from "@/hooks/use-chart-colors";
+import { formatCompactNumber } from "@/utils/formatters";
 import { getErrorMessageOrNull } from "@/utils/errors";
-import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
+
+import { reportCsvUrl } from "../api";
+import { useReportChartVisibility } from "../hooks/use-report-chart-visibility";
+import { reportFiltersOf, useReport, useReportOptions, useReportState } from "../hooks/use-reports";
+import { BreakdownTable } from "./breakdown-table";
+import { DailyTrendChart } from "./daily-trend-chart";
+import { DistributionDonut } from "./distribution-donut";
+import { formatGroupLabel } from "./group-label";
+import { ReportsFilters } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
-import type { CostPerDayChartProps } from "./cost-per-day-chart";
-import type { TokensPerDayChartProps } from "./tokens-per-day-chart";
-import type { TimeToFirstTokenChartProps } from "./time-to-first-token-chart";
-import type { TokensPerSecondChartProps } from "./tokens-per-second-chart";
-import type { QueueWaitChartProps } from "./queue-wait-chart";
-import type { ModelDistributionDonutProps } from "./model-distribution-donut";
-import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
-import { DailyDetailTable } from "./daily-detail-table";
-import {
-  daysAgoLocalISO,
-  getBrowserReportsTimeZone,
-  isReportDateRangeValid,
-  localDateISO,
-} from "../date";
 
-const CostPerDayChart = lazy(() =>
-  import("./cost-per-day-chart").then((module) => ({
-    default: (props: CostPerDayChartProps) => <module.CostPerDayChart {...props} />,
-  })),
-);
-const TokensPerDayChart = lazy(() =>
-  import("./tokens-per-day-chart").then((module) => ({
-    default: (props: TokensPerDayChartProps) => <module.TokensPerDayChart {...props} />,
-  })),
-);
-const TimeToFirstTokenChart = lazy(() =>
-  import("./time-to-first-token-chart").then((module) => ({
-    default: (props: TimeToFirstTokenChartProps) => <module.TimeToFirstTokenChart {...props} />,
-  })),
-);
-const TokensPerSecondChart = lazy(() =>
-  import("./tokens-per-second-chart").then((module) => ({
-    default: (props: TokensPerSecondChartProps) => <module.TokensPerSecondChart {...props} />,
-  })),
-);
-const QueueWaitChart = lazy(() =>
-  import("./queue-wait-chart").then((module) => ({
-    default: (props: QueueWaitChartProps) => <module.QueueWaitChart {...props} />,
-  })),
-);
-const ModelDistributionDonut = lazy(() =>
-  import("./model-distribution-donut").then((module) => ({
-    default: (props: ModelDistributionDonutProps) => <module.ModelDistributionDonut {...props} />,
-  })),
-);
-const UseragentDistributionDonut = lazy(() =>
-  import("./useragent-distribution-donut").then((module) => ({
-    default: (props: UseragentDistributionDonutProps) => (
-      <module.UseragentDistributionDonut {...props} />
-    ),
-  })),
-);
+const ERROR_COLOR = "#ef4444";
 
-const REPORTS_TIMEZONE_REFRESH_INTERVAL_MS = 60_000;
-const DEFAULT_PRESET_DAYS = 7;
-
-const createDefaultFilters = (): ReportsFiltersState => ({
-  startDate: daysAgoLocalISO(6),
-  endDate: localDateISO(),
-  accountId: [],
-  apiKeyId: [],
-  model: "",
-  useragent: "",
-});
-
-export type ReportsPageProps = {
-  initialFilters?: Partial<ReportsFiltersState>;
-};
-
-export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
+export function ReportsPage() {
   const { t } = useTranslation();
-  const [filters, setFilters] = useState<ReportsFiltersState>(() => ({
-    ...createDefaultFilters(),
-    ...initialFilters,
-  }));
-  const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(
-    DEFAULT_PRESET_DAYS,
-  );
-  const [reportsTimeZone, setReportsTimeZone] = useState<string | undefined>(() =>
-    getBrowserReportsTimeZone(),
-  );
+  const colors = useChartColors();
+  const { state, update, selectPreset, setRange } = useReportState();
   const { visibleChartIds, setVisibleChartIds } = useReportChartVisibility();
+  const reportQuery = useReport(state);
+  const optionsQuery = useReportOptions(state.start, state.end);
+  const report = reportQuery.data;
+  const visible = new Set(visibleChartIds);
 
-  useEffect(() => {
-    const refreshReportsTimeZone = () => {
-      setReportsTimeZone((currentTimeZone) => {
-        const nextTimeZone = getBrowserReportsTimeZone();
-        return currentTimeZone === nextTimeZone ? currentTimeZone : nextTimeZone;
-      });
-    };
-
-    const intervalId = window.setInterval(
-      refreshReportsTimeZone,
-      REPORTS_TIMEZONE_REFRESH_INTERVAL_MS,
-    );
-
-    window.addEventListener("focus", refreshReportsTimeZone);
-    document.addEventListener("visibilitychange", refreshReportsTimeZone);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener("focus", refreshReportsTimeZone);
-      document.removeEventListener("visibilitychange", refreshReportsTimeZone);
-    };
-  }, []);
-
-  const reportsQuery = useReports(filters, reportsTimeZone);
-  const filterCatalogFilters = useMemo(
-    () => ({ ...filters, model: "", useragent: "" }),
-    [filters],
-  );
-  const filterCatalogQuery = useReports(filterCatalogFilters, reportsTimeZone);
-  const {
-    data: accountsData,
-    error: accountsError,
-    refetch: refetchAccounts,
-  } = useQuery({
-    queryKey: ["accounts", "reports-filter"],
-    queryFn: listAccounts,
-  });
-  const {
-    data: apiKeysOptionsData,
-    error: apiKeysError,
-    refetch: refetchApiKeys,
-  } = useQuery({
-    queryKey: ["request-log-options", "reports-filter"],
-    queryFn: () => getRequestLogOptions(),
-  });
-
+  const options = optionsQuery.data;
   const accountOptions = useMemo(
-    () =>
-      (accountsData ?? []).map((account) => ({
-        value: account.id,
-        label: account.name,
-        isEmail: false,
-      })),
-    [accountsData],
+    () => (options?.accounts ?? []).map((account) => ({ value: account.id, label: formatGroupLabel(t, account.name) })),
+    [options, t],
   );
-
   const apiKeyOptions = useMemo(
     () =>
-      (apiKeysOptionsData?.apiKeys ?? []).map((key) => ({
+      (options?.apiKeys ?? []).map((key) => ({
         value: key.id,
-        label: key.keyHint ? `${key.name} · ${key.keyHint}` : key.name,
+        label: key.keyHint ? `${formatGroupLabel(t, key.name)} · ${key.keyHint}` : formatGroupLabel(t, key.name),
       })),
-    [apiKeysOptionsData],
+    [options, t],
+  );
+  const modelOptions = useMemo(() => (options?.models ?? []).map((m) => ({ value: m, label: m })), [options]);
+  const userAgentOptions = useMemo(
+    () => (options?.userAgents ?? []).map((ua) => ({ value: ua, label: formatGroupLabel(t, ua) })),
+    [options, t],
   );
 
-  const modelOptions = useMemo(
-    () =>
-      (filterCatalogQuery.data?.byModel ?? []).map((entry) => ({
-        value: entry.model,
-        label: entry.model,
-      })),
-    [filterCatalogQuery.data],
-  );
-
-  const useragentOptions = useMemo(
-    () =>
-      (filterCatalogQuery.data?.byUseragent ?? []).map((entry) => ({
-        value: entry.useragent,
-        label: entry.useragent,
-      })),
-    [filterCatalogQuery.data],
-  );
-
-  const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
-  const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
-  const accountOptionsError = getErrorMessageOrNull(accountsError);
-  const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
-
-  const hasAnyError = Boolean(
-    mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
-  );
-
-  const handleRetry = async () => {
-    if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
-      await Promise.allSettled([refetchAccounts(), refetchApiKeys()]);
-      return;
-    }
-
-    await Promise.allSettled([
-      reportsQuery.refetch(),
-      filterCatalogQuery.refetch(),
-      refetchAccounts(),
-      refetchApiKeys(),
-    ]);
-  };
-
-  const handlePresetSelect = (days: number) => {
-    setSelectedPresetDays(days);
-    setFilters((current) => ({
-      ...current,
-      startDate: daysAgoLocalISO(days - 1),
-      endDate: localDateISO(),
-    }));
-  };
-
-  const handleFiltersChange = (nextFilters: ReportsFiltersState) => {
-    if (
-      nextFilters.startDate !== filters.startDate ||
-      nextFilters.endDate !== filters.endDate
-    ) {
-      setSelectedPresetDays(null);
-    }
-    setFilters(nextFilters);
-  };
+  const error = getErrorMessageOrNull(reportQuery.error) ?? getErrorMessageOrNull(optionsQuery.error);
+  const logNote =
+    report && report.coverage.logsTruncated && report.source === "rollups"
+      ? t("reports.coverage.chartNote", { date: report.coverage.logsFrom })
+      : undefined;
 
   return (
-    <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-6 px-4 py-8 sm:px-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          {t("reports.page.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("reports.page.subtitle")}
-        </p>
+    <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-5 px-4 py-8 sm:px-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold tracking-tight">{t("reports.page.title")}</h1>
+          <p className="text-sm text-muted-foreground">{t("reports.page.subtitle")}</p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          disabled={reportQuery.isFetching}
+          onClick={() => {
+            void reportQuery.refetch();
+            void optionsQuery.refetch();
+          }}
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${reportQuery.isFetching ? "animate-spin" : ""}`} aria-hidden />
+          {t("reports.page.refresh")}
+        </Button>
       </div>
 
       <ReportsFilters
-        filters={filters}
-        selectedPresetDays={selectedPresetDays}
+        state={state}
         accountOptions={accountOptions}
         apiKeyOptions={apiKeyOptions}
         modelOptions={modelOptions}
-        useragentOptions={useragentOptions}
+        userAgentOptions={userAgentOptions}
         visibleChartIds={visibleChartIds}
-        onPresetSelect={handlePresetSelect}
-        onFiltersChange={handleFiltersChange}
+        onPresetSelect={selectPreset}
+        onRangeChange={setRange}
+        onChange={update}
         onVisibleChartIdsChange={setVisibleChartIds}
       />
 
-      {mainReportsError ? (
-        <AlertMessage variant="error">
-          {t("reports.errors.data", { error: mainReportsError })}
-        </AlertMessage>
-      ) : null}
-      {sharedOptionsError ? (
-        <div className="flex items-center justify-between gap-2">
+      {error ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <AlertMessage variant="error" className="flex-1">
-            {t("reports.errors.options", { error: sharedOptionsError })}
+            {t("reports.errors.data", { error })}
           </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
-            {t("common.actions.retry")}
-          </Button>
-        </div>
-      ) : null}
-      {accountOptionsError ? (
-        <div className="flex items-center justify-between gap-2">
-          <AlertMessage variant="error" className="flex-1">
-            {t("reports.errors.accounts", { error: accountOptionsError })}
-          </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
-            {t("common.actions.retry")}
-          </Button>
-        </div>
-      ) : null}
-      {apiKeyOptionsError ? (
-        <div className="flex items-center justify-between gap-2">
-          <AlertMessage variant="error" className="flex-1">
-            {t("reports.errors.apiKeys", { error: apiKeyOptionsError })}
-          </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={() => void reportQuery.refetch()}>
             {t("common.actions.retry")}
           </Button>
         </div>
       ) : null}
 
-      {reportsQuery.isLoading ? (
-        <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
-          {t("common.loading")}
-        </div>
-      ) : reportsQuery.data ? (
+      {report ? (
         <>
-          <ReportsSummaryCards
-            summary={reportsQuery.data.summary}
-            comparison={reportsQuery.data.comparison}
-          />
+          {report.source === "request_logs" ? (
+            <Notice testId="report-source-notice">
+              {t("reports.coverage.logsOnly", { days: report.coverage.retentionDays })}
+            </Notice>
+          ) : report.coverage.logsTruncated ? (
+            <Notice testId="report-coverage-notice">
+              {t("reports.coverage.truncated", { date: report.coverage.logsFrom, days: report.coverage.retentionDays })}
+            </Notice>
+          ) : null}
+
+          <ReportsSummaryCards summary={report.summary} previous={report.previous} />
+
           {visibleChartIds.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {visibleChartIds.includes("costByDay") ? (
-                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-                  <CostPerDayChart
-                    startDate={filters.startDate}
-                    endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
-                  />
-                </Suspense>
+              {visible.has("costByDay") ? (
+                <DailyTrendChart
+                  id="costByDay"
+                  title={t("reports.charts.costByDay")}
+                  subtitle={t("reports.charts.costSubtitle", { cost: formatUsd(report.summary.totalCostUsd) })}
+                  daily={report.daily}
+                  series={[
+                    { key: "costUsd", label: t("reports.charts.cost"), color: colors[0] },
+                    { key: "cacheSavingsUsd", label: t("reports.charts.saved"), color: colors[2] },
+                  ]}
+                  formatValue={formatUsd}
+                  formatAxis={(value) => `$${formatCompactNumber(value)}`}
+                />
               ) : null}
-              {visibleChartIds.includes("tokensByDay") ? (
-                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-                  <TokensPerDayChart
-                    startDate={filters.startDate}
-                    endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
-                  />
-                </Suspense>
+              {visible.has("tokensByDay") ? (
+                <DailyTrendChart
+                  id="tokensByDay"
+                  title={t("reports.charts.tokensByDay")}
+                  daily={report.daily}
+                  stacked
+                  series={[
+                    { key: "inputTokens", label: t("reports.charts.input"), color: colors[1] },
+                    { key: "cacheReadInputTokens", label: t("reports.charts.cacheRead"), color: colors[2] },
+                    { key: "cacheCreationInputTokens", label: t("reports.charts.cacheWrite"), color: colors[3] },
+                    { key: "outputTokens", label: t("reports.charts.output"), color: colors[4] },
+                  ]}
+                  formatValue={formatCompactNumber}
+                />
               ) : null}
-              {visibleChartIds.includes("timeToFirstToken") ? (
-                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-                  <TimeToFirstTokenChart
-                    startDate={filters.startDate}
-                    endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
-                  />
-                </Suspense>
+              {visible.has("requestsByDay") ? (
+                <DailyTrendChart
+                  id="requestsByDay"
+                  title={t("reports.charts.requestsByDay")}
+                  daily={report.daily}
+                  series={[
+                    { key: "requests", label: t("reports.charts.requests"), color: colors[0] },
+                    { key: "errors", label: t("reports.charts.errors"), color: ERROR_COLOR },
+                  ]}
+                  formatValue={formatCompactNumber}
+                />
               ) : null}
-              {visibleChartIds.includes("tokensPerSecond") ? (
-                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-                  <TokensPerSecondChart
-                    startDate={filters.startDate}
-                    endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
-                  />
-                </Suspense>
+              {visible.has("timeToFirstToken") ? (
+                <DailyTrendChart
+                  id="timeToFirstToken"
+                  title={t("reports.charts.timeToFirstToken")}
+                  subtitle={t("reports.charts.ttftSubtitle", { value: formatMs(report.summary.medianTtftMs) })}
+                  note={logNote}
+                  daily={report.daily}
+                  series={[{ key: "medianTtftMs", label: t("reports.charts.medianTtft"), color: colors[3], kind: "line" }]}
+                  formatValue={formatMs}
+                  formatAxis={(value) => `${(value / 1000).toFixed(1)}s`}
+                />
               ) : null}
-              {visibleChartIds.includes("queueWait") ? (
-                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-                  <QueueWaitChart
-                    startDate={filters.startDate}
-                    endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
-                  />
-                </Suspense>
+              {visible.has("tokensPerSecond") ? (
+                <DailyTrendChart
+                  id="tokensPerSecond"
+                  title={t("reports.charts.tokensPerSecond")}
+                  subtitle={t("reports.charts.tpsSubtitle", {
+                    value: report.summary.medianTps == null ? "—" : report.summary.medianTps.toFixed(1),
+                  })}
+                  note={logNote}
+                  daily={report.daily}
+                  series={[{ key: "medianTps", label: t("reports.charts.medianTps"), color: colors[1], kind: "line" }]}
+                  formatValue={(value) => t("reports.charts.tpsValue", { value: value.toFixed(1) })}
+                  formatAxis={(value) => value.toFixed(0)}
+                />
+              ) : null}
+              {visible.has("modelDistribution") ? (
+                <DistributionDonut
+                  id="modelDistribution"
+                  title={t("reports.distribution.byModel")}
+                  entries={report.byModel}
+                  formatLabel={(entry) => formatGroupLabel(t, entry.label)}
+                />
+              ) : null}
+              {visible.has("userAgentDistribution") ? (
+                <DistributionDonut
+                  id="userAgentDistribution"
+                  title={t("reports.distribution.byUserAgent")}
+                  note={logNote}
+                  entries={report.byUserAgent}
+                  formatLabel={(entry) => formatGroupLabel(t, entry.label)}
+                />
               ) : null}
             </div>
           ) : null}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="space-y-4 lg:col-span-1">
-              <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>
-                <ModelDistributionDonut data={reportsQuery.data.byModel} />
-              </Suspense>
-              <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>
-                <UseragentDistributionDonut data={reportsQuery.data.byUseragent} />
-              </Suspense>
-            </div>
-            <div className="lg:col-span-2">
-              <DailyDetailTable
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </div>
-          </div>
+
+          <BreakdownTable
+            groupBy={report.groupBy}
+            rows={report.breakdown}
+            total={report.breakdownTotal}
+            csvUrl={reportCsvUrl(reportFiltersOf(state))}
+          />
         </>
-      ) : hasAnyError ? (
-        <div className="space-y-3 rounded-xl border bg-card p-4">
-          <AlertMessage variant="warning">
-            {t("reports.errors.partial")}
-          </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
-            {t("common.actions.retry")}
-          </Button>
-        </div>
+      ) : reportQuery.isLoading ? (
+        <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">{t("common.loading")}</div>
       ) : null}
+    </div>
+  );
+}
+
+function Notice({ children, testId }: { children: string; testId: string }) {
+  return (
+    <div
+      className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+      data-testid={testId}
+      role="note"
+    >
+      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span>{children}</span>
     </div>
   );
 }

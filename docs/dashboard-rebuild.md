@@ -23,7 +23,7 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] B. Auth gate + shell (nav, status bar, theme, i18n ko/en, privacy blur) + Settings page
 - [x] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
 - [x] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
-- [ ] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
+- [x] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
 - [ ] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
 - [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
 - [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
@@ -366,4 +366,78 @@ scroll (scrollWidth 390); no console errors or warnings.
 - Frontend: `getRequestLogOptions` (dashboard api) now returns `{accounts, apiKeys{id,name,keyHint}, models, statuses}`;
   `MultiSelectFilter`, `PaginationControls`, `TimeframeSelect`, `CostTrendChart`, `UsageByModelTable`,
   `RequestStatusBadge`, `formatUsd`/`formatMs` are reusable. Reports page still calls codex-lb `/api/reports*`.
+
+
+### 2026-11-27 — Step E (reports page)
+**Done**
+- **Backend**
+  - `modules/usage/reports.py` rebuilt on "facts" (aggregated day x account x key x model [x UA family] cells):
+    `ReportFilters` (multi-value accounts / API keys / models / user-agent families), `load_facts` (rollups, or request
+    logs when a UA filter/grouping needs them — day bucket via Step D `_bucket_index`, portable), `group_facts`,
+    `user_agent_family` (product token before the first `/`, `(unknown)` for none) + its SQL twin
+    `user_agent_condition`, `log_conditions`, `day_bounds`. Groupings: day / account / api_key / model / **user_agent**.
+    Range validation adds a **366-day maximum**. Rows carry `total_tokens` and `cache_savings_usd` (priced per model).
+  - `GET /api/usage/report` and `/api/usage/report.csv` accept `account_id*`, `api_key_id*`, `model*`, `user_agent*`;
+    JSON gained `source`; CSV gained `cache_savings_usd` **before** `cost_usd` (cost stays last for existing sheets).
+    Existing tests/behaviour unchanged.
+  - New `modules/reports/{service,api}.py`: **`GET /api/reports?start&end&group_by&account_id*&api_key_id*&model*&user_agent*`**
+    → `{start, end, days, group_by, source, coverage{retention_days, logs_from, logs_truncated}, summary{total cost,
+    avg/day, requests, avg/day, errors, error_rate, aborted, accounts_used, conversations, input/output/cache read/
+    cache write/total tokens, cache_savings_usd, cache_hit_rate, median_ttft_ms, median_tps}, previous{same-length
+    preceding window: cost, requests, tokens, errors, savings, can_compare}, daily[zero-filled: totals + aborted,
+    conversations, median_ttft_ms, median_tps], by_model, by_user_agent, breakdown, breakdown_total}`.
+    Spend/tokens/requests/errors come from rollups (not truncated by retention); aborted, conversations, TTFT/TPS
+    medians and UA distribution come from request logs (medians computed in Python over the window's streamed rows;
+    TPS = output / ((duration − ttft)/1000)). A UA filter moves the whole report to logs (`source=request_logs`).
+    `logs_from` = day after the retention cutoff (or `start`), `logs_truncated` when the range starts on/before the cutoff.
+    **`GET /api/reports/options?start&end`** → all live accounts/keys plus deleted ones seen in rollups, models in range,
+    UA families in range. Both are management-guarded; bad input → 422.
+  - Tests: new `tests/test_reports_page.py` (21).
+- **Frontend `features/reports`** rewritten on these shapes: `schemas.ts`, `api.ts` (`reportQuery` shared by JSON and
+  the CSV URL `reportCsvUrl`), `date.ts` (UTC days — rollups are UTC; `dateRangeProblem` → invalid/reversed/tooLong),
+  `compare.ts`, `hooks/use-reports.ts` (URL state: `preset` (7/30/90, default 30 = no param) or fixed `start`+`end`,
+  `groupBy`, repeated `accountId`/`apiKeyId`/`model`/`userAgent`; 60 s refetch paused in background; options query),
+  `hooks/use-report-chart-visibility.ts` (7 charts, key `claude-lb-reports-visible-charts:v2`). Components:
+  `ReportsFilters` (presets, two UTC date inputs with inline error, 4 multi-selects, clear, group-by select, chart
+  chooser), `ReportsSummaryCards` (cost, requests + accounts used, tokens in/out/cache, cache savings + hit rate,
+  errors + error rate + aborted, conversations; ▲/▼ vs previous window), generic `DailyTrendChart` (areas for sums,
+  lines with gaps for medians) used for cost+savings, tokens (stacked in/cache read/cache write/out), requests+errors,
+  median TTFT, median TPS; `DistributionDonut` (model / user agent, cost/tokens/requests toggle, stacks on mobile);
+  `BreakdownTable` (sortable, totals footer, savings + hit rate, "Export CSV" = server CSV with the same filters);
+  retention notice (+ per-chart note) and a "user-agent filter reads logs" notice; `group-label.ts` translates
+  `(unattributed)` / `(deleted: …)` / `(unknown)`.
+- **Removed**: codex reports leftovers — timezone handling, `daily-series.ts`, queue-wait chart, reasoning tokens,
+  `daily-detail-table` (client CSV), per-file chart components, model/useragent donuts, `distribution-metric-format`,
+  their tests and `__integration__/reports-date-range-flow.test.tsx`.
+- **i18n**: all `reports.*` keys replaced — en 91, ko 89 (no `_one`), 61 old keys removed per locale; zh-CN keeps 11
+  still-valid translations (rest falls back to English).
+- **MSW**: `createReportWire({start,end,groupBy}, overrides)`, `createReportOptionsWire()`, handlers for `/api/reports`
+  (422s mirror `normalize_range`/group_by) and `/api/reports/options`, `setMockReport(overrides)`; coverage test updated.
+
+**Results**: `pytest` 517 passed (+21); `ruff` clean; `npm test` 82 files / 494 tests pass (reports: 7 files / 31 tests —
+`reports-page.test.tsx` 9, `breakdown-table.test.tsx` 3, `date`, `compare`, `api`, `use-reports`, chart visibility);
+`npm run lint` clean; `npm run build` OK. Browser (demo on :2461, fresh data dir, Korean UI): 90d preset → 6 cards,
+cost/tokens/requests area charts with data from 10-27 on, TTFT/TPS lines on the 2 days that have streamed logs,
+both donuts, 28-row day breakdown + totals, retention notice ("2026-10-27부터"); group by API key → 4 rows incl.
+"(귀속 없음)", URL `?preset=90&groupBy=api_key`; CSV link fetch → 200, `attachment; filename="claude-lb-api_key-…csv"`,
+TOTAL row; UA filter `claude-cli` → logs-only notice, totals $8.01; `?start=2026-11-20&end=2026-11-10` → inline error,
+no `/api/reports` request; editing the start date → fixed range in the URL, preset un-pressed; dark + 390 px: no
+horizontal scroll (scrollWidth 390), donut legends readable; no console messages.
+
+**Known issues**
+- Dates are UTC days (rollups are keyed by UTC date); the UI says "UTC 기준/UTC days". No per-browser timezone like codex-lb.
+- A UA filter or UA grouping makes totals retention-limited (notice shown). Postgres paths (`_bucket_index` day buckets,
+  `count(distinct)`) untested locally, same as Step D.
+- Medians load every streamed row in the window into Python (bounded by retention); fine for demo scale, could be heavy
+  for very busy instances with long retention.
+- `breakdown_total` for non-UA groupings equals the summary; log-based error counts can differ slightly from rollup
+  errors for the same window (different sources).
+- The CSV link stays enabled while the date range is invalid (the server would answer 422).
+- zh-CN lacks most new report strings.
+
+**Notes for next agents**
+- Reuse `usage.reports.ReportFilters`/`load_facts`/`group_facts` for any per-key/per-account rollup aggregation
+  (Step F API-key trends can use `load_facts(..., ReportFilters(api_key_ids=[id]))`).
+- `/api/reports/options` lists all live accounts/keys; `MultiSelectFilter` already shows stale selected values.
+- `DailyTrendChart` takes any `DailyPoint` keys; `ReportChartCard` has `note`, `legend`, `autoHeight`.
 

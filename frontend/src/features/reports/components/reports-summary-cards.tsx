@@ -1,143 +1,110 @@
 import { useTranslation } from "react-i18next";
 
+import { formatRatio, formatUsd } from "@/features/dashboard/utils";
 import { cn } from "@/lib/utils";
+import { formatCompactNumber, formatNumber } from "@/utils/formatters";
 
-import type { ReportComparison, ReportSummary } from "../schemas";
+import { compareToPrevious, type Tone } from "../compare";
+import type { ReportPrevious, ReportSummary } from "../schemas";
 
-const COMPARISON_STYLES = {
-  positive: "text-emerald-600 dark:text-emerald-400",
-  negative: "text-red-600 dark:text-red-400",
-} as const;
+const TONE_CLASS: Record<Tone, string> = {
+  up: "text-emerald-600 dark:text-emerald-400",
+  down: "text-red-600 dark:text-red-400",
+};
 
 export type ReportsSummaryCardsProps = {
   summary: ReportSummary;
-  comparison: ReportComparison;
+  previous: ReportPrevious;
 };
 
-export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCardsProps) {
+export function ReportsSummaryCards({ summary, previous }: ReportsSummaryCardsProps) {
   const { t } = useTranslation();
   const cards = [
     {
-      id: "total-cost",
+      id: "cost",
       label: t("reports.summary.totalCost"),
-      value: `$${summary.totalCostUsd.toFixed(2)}`,
-      sub: t("reports.summary.avgCostPerDay", { cost: `$${summary.avgCostPerDay.toFixed(2)}` }),
-      comparison: buildComparison(summary.totalCostUsd, comparison.previous.totalCostUsd, comparison.canCompare),
-    },
-    {
-      id: "tokens",
-      label: t("reports.summary.tokens"),
-      value: formatNumber(summary.totalInputTokens + summary.totalOutputTokens),
-      sub: t("reports.summary.tokensSub", {
-        input: formatNumber(summary.totalInputTokens),
-        cache: formatNumber(summary.totalCachedTokens),
-        output: formatNumber(summary.totalOutputTokens),
-      }),
-      secondarySub:
-        summary.totalRequests > 0
-          ? t("reports.summary.reasoningSub", {
-              reasoning: formatNumber(summary.totalReasoningTokens),
-              known: summary.reasoningUsageKnownRequests,
-              total: summary.totalRequests,
-            })
-          : undefined,
-      comparison: buildComparison(
-        summary.totalInputTokens + summary.totalOutputTokens,
-        comparison.previous.totalTokens,
-        comparison.canCompare,
-      ),
+      value: formatUsd(summary.totalCostUsd),
+      lines: [t("reports.summary.avgCostPerDay", { cost: formatUsd(summary.avgCostPerDay) })],
+      delta: compareToPrevious(summary.totalCostUsd, previous.totalCostUsd, previous.canCompare),
     },
     {
       id: "requests",
       label: t("reports.summary.requests"),
-      value: formatNumber(summary.totalRequests),
-      sub: t("reports.summary.requestsSub", {
-        requests: summary.avgRequestsPerDay.toFixed(0),
-        accounts: summary.activeAccounts,
-      }),
-      comparison: buildComparison(summary.totalRequests, comparison.previous.totalRequests, comparison.canCompare),
+      value: formatNumber(summary.requests),
+      lines: [
+        t("reports.summary.avgRequestsPerDay", { requests: formatNumber(Math.round(summary.avgRequestsPerDay)) }),
+        t("reports.summary.accountsUsed", { count: summary.accountsUsed }),
+      ],
+      delta: compareToPrevious(summary.requests, previous.requests, previous.canCompare),
     },
     {
-      id: "conversations",
-      label: t("reports.summary.conversations"),
-      value: formatNumber(summary.totalConversations),
+      id: "tokens",
+      label: t("reports.summary.tokens"),
+      value: formatCompactNumber(summary.totalTokens),
+      lines: [
+        t("reports.summary.tokensInput", {
+          input: formatCompactNumber(summary.inputTokens),
+          output: formatCompactNumber(summary.outputTokens),
+        }),
+        t("reports.summary.tokensCache", {
+          read: formatCompactNumber(summary.cacheReadInputTokens),
+          write: formatCompactNumber(summary.cacheCreationInputTokens),
+        }),
+      ],
+      delta: compareToPrevious(summary.totalTokens, previous.totalTokens, previous.canCompare),
     },
     {
-      id: "cancelled",
-      label: t("reports.summary.cancelled"),
-      value: formatNumber(summary.totalCancelled),
+      id: "savings",
+      label: t("reports.summary.cacheSavings"),
+      value: formatUsd(summary.cacheSavingsUsd),
+      valueClass: "text-emerald-600 dark:text-emerald-400",
+      lines: [t("reports.summary.cacheHitRate", { rate: formatRatio(summary.cacheHitRate) })],
+      delta: null,
     },
     {
       id: "errors",
       label: t("reports.summary.errors"),
-      value: formatNumber(summary.totalErrors),
+      value: formatNumber(summary.errors),
+      lines: [
+        t("reports.summary.errorRate", { rate: formatRatio(summary.errorRate) }),
+        t("reports.summary.aborted", { count: summary.aborted }),
+      ],
+      delta: null,
+    },
+    {
+      id: "conversations",
+      label: t("reports.summary.conversations"),
+      value: formatNumber(summary.conversations),
+      lines: [t("reports.summary.conversationsSub")],
+      delta: null,
     },
   ];
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
       {cards.map((card) => (
-        <div
-          key={card.id}
-          data-testid={`report-summary-card-${card.id}`}
-          className="rounded-xl border bg-card p-4"
-        >
-          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            {card.label}
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <div className="text-[1.625rem] font-semibold tracking-[-0.02em] text-foreground">
+        <div key={card.id} data-testid={`report-summary-${card.id}`} className="min-w-0 rounded-xl border bg-card p-4">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{card.label}</div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
+            <div className={cn("text-[1.5rem] font-semibold tracking-[-0.02em] tabular-nums", card.valueClass)}>
               {card.value}
             </div>
-            {card.comparison ? (
-              <div className={cn("text-xs font-medium", COMPARISON_STYLES[card.comparison.tone])}>
-                {card.comparison.text}
+            {card.delta ? (
+              <div
+                className={cn("text-xs font-medium", TONE_CLASS[card.delta.tone])}
+                title={t("reports.summary.vsPrevious", { start: previous.start, end: previous.end })}
+              >
+                {card.delta.text}
               </div>
             ) : null}
           </div>
-          {card.sub ? <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div> : null}
-          {"secondarySub" in card && card.secondarySub ? (
-            <div className="text-xs text-muted-foreground">{card.secondarySub}</div>
-          ) : null}
+          {card.lines.map((line) => (
+            <div key={line} className="mt-0.5 text-xs text-muted-foreground">
+              {line}
+            </div>
+          ))}
         </div>
       ))}
     </div>
   );
-}
-
-function formatNumber(n: number): string {
-  if (n >= 1_000_000_000) return formatCompactNumber(n / 1_000_000_000, "B");
-  if (n >= 1_000_000) return formatCompactNumber(n / 1_000_000, "M");
-  if (n >= 1_000) return formatCompactNumber(n / 1_000, "K");
-  return String(n);
-}
-
-function formatCompactNumber(value: number, suffix: "B" | "M" | "K"): string {
-  if (suffix === "M" && value >= 100 && Number.isInteger(value)) {
-    return `${value.toFixed(0)}${suffix}`;
-  }
-
-  return `${value.toFixed(1)}${suffix}`;
-}
-
-function buildComparison(
-  current: number,
-  previous: number,
-  canCompare: boolean,
-): { text: string; tone: keyof typeof COMPARISON_STYLES } | undefined {
-  if (!canCompare || previous <= 0) {
-    return undefined;
-  }
-
-  const deltaPercent = ((current - previous) / previous) * 100;
-  const roundedPercent = Math.round(Math.abs(deltaPercent));
-
-  if (roundedPercent === 0) {
-    return undefined;
-  }
-  if (deltaPercent > 0) {
-    return { text: `▲ ${roundedPercent}%`, tone: "positive" };
-  }
-
-  return { text: `▼ ${roundedPercent}%`, tone: "negative" };
 }

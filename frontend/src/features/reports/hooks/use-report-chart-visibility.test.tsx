@@ -15,7 +15,7 @@ describe("useReportChartVisibility", () => {
     localStorage.clear();
   });
 
-  it("defaults to all five charts and writes the default", () => {
+  it("defaults to every chart and writes the default", () => {
     const { result } = renderHook(() => useReportChartVisibility());
 
     expect(result.current.visibleChartIds).toEqual(ALL_IDS);
@@ -25,12 +25,12 @@ describe("useReportChartVisibility", () => {
   it("restores known IDs in canonical order and removes duplicates", () => {
     localStorage.setItem(
       KEY,
-      JSON.stringify(["queueWait", "costByDay", "costByDay"]),
+      JSON.stringify(["requestsByDay", "costByDay", "costByDay"]),
     );
 
     const { result } = renderHook(() => useReportChartVisibility());
 
-    expect(result.current.visibleChartIds).toEqual(["costByDay", "queueWait"]);
+    expect(result.current.visibleChartIds).toEqual(["costByDay", "requestsByDay"]);
   });
 
   it("discards unknown IDs and preserves an empty array", () => {
@@ -87,9 +87,9 @@ describe("useReportChartVisibility", () => {
       },
     );
 
-    act(() => result.current.setVisibleChartIds(["queueWait"]));
+    act(() => result.current.setVisibleChartIds(["requestsByDay"]));
 
-    expect(result.current.visibleChartIds).toEqual(["queueWait"]);
+    expect(result.current.visibleChartIds).toEqual(["requestsByDay"]);
     setItem.mockRestore();
   });
 });

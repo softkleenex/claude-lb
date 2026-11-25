@@ -25,6 +25,9 @@ import {
   createDashboardProjectionsWire,
   createDefaultRequestLogWires,
   createUsageTrendWire,
+  createReportWire,
+  createReportOptionsWire,
+  type ReportWire,
   type RequestLogWire,
   createDefaultApiKeys,
   createQuotaPlannerDecision,
@@ -156,6 +159,7 @@ type MockState = {
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
+  reportOverrides: Partial<ReportWire>;
   stickySessions: Array<{
     key: string;
     displayName: string;
@@ -182,6 +186,7 @@ function createInitialState(): MockState {
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
     firewallEntries: [],
+    reportOverrides: {},
     stickySessions: [],
   };
 }
@@ -205,6 +210,26 @@ export function getMockSettings(): RuntimeSettingsWire {
 
 export function resetMockState(): void {
   state = createInitialState();
+}
+
+/** Overrides merged into every `/api/reports` response (e.g. `{ coverage: {...} }`). */
+export function setMockReport(overrides: Partial<ReportWire>): void {
+  state.reportOverrides = overrides;
+}
+
+const REPORT_GROUPINGS_WIRE = ["day", "account", "api_key", "model", "user_agent"] as const;
+
+/** Mirrors `usage.reports.normalize_range`: 422 with the backend's messages. */
+function reportRangeError(url: URL): Response | null {
+  const start = url.searchParams.get("start");
+  const end = url.searchParams.get("end");
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if ((start && !iso.test(start)) || (end && !iso.test(end))) return detail(422, "dates must be ISO YYYY-MM-DD");
+  if (start && end && start > end) return detail(422, "start must not be after end");
+  if (start && end && (Date.parse(end) - Date.parse(start)) / 86_400_000 + 1 > 366) {
+    return detail(422, "the range must be 366 days or less");
+  }
+  return null;
 }
 
 export function setMockRequestLogs(rows: RequestLogWire[]): void {
@@ -738,6 +763,36 @@ export const handlers = [
       models: [...new Set(rows.map((row) => row.model).filter((m): m is string => !!m))].sort(),
       statuses: REQUEST_STATUS_ORDER.filter((status) => present.has(status)),
     });
+  }),
+
+  http.get("/api/reports", ({ request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const url = new URL(request.url);
+    const rangeError = reportRangeError(url);
+    if (rangeError) return rangeError;
+    const groupBy = url.searchParams.get("group_by") ?? "day";
+    if (!(REPORT_GROUPINGS_WIRE as readonly string[]).includes(groupBy)) {
+      return detail(422, `group_by must be one of ${REPORT_GROUPINGS_WIRE.join(", ")}`);
+    }
+    const report = createReportWire(
+      {
+        start: url.searchParams.get("start") ?? undefined,
+        end: url.searchParams.get("end") ?? undefined,
+        groupBy: groupBy as ReportWire["group_by"],
+      },
+      state.reportOverrides,
+    );
+    if (url.searchParams.getAll("user_agent").length > 0) report.source = "request_logs";
+    return HttpResponse.json(report);
+  }),
+
+  http.get("/api/reports/options", ({ request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const rangeError = reportRangeError(new URL(request.url));
+    if (rangeError) return rangeError;
+    return HttpResponse.json(createReportOptionsWire());
   }),
 
   http.get("/api/request-logs/:requestId", ({ params }) => {

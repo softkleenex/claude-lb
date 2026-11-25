@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from claude_lb.db.models import Account, QuotaHistory, RequestLog
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.proxy import load_balancer as lb
 from claude_lb.modules.proxy import quota as quota_mod
+from claude_lb.modules.reports.api import report_filters
 from claude_lb.modules.settings import service as settings_service
 from claude_lb.modules.usage import reports, rollup
 
@@ -223,13 +225,16 @@ class ReportRowOut(BaseModel):
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+    total_tokens: int
     cost_usd: float
+    cache_savings_usd: float
 
 
 class ReportOut(BaseModel):
     group_by: str
     start: str
     end: str
+    source: str
     total_requests: int
     total_cost_usd: float
     rows: list[ReportRowOut]
@@ -238,22 +243,29 @@ class ReportOut(BaseModel):
 @router.get("/report", response_model=ReportOut)
 async def cost_report(
     session: SessionDep,
-    group_by: str = Query(default="day", description="day | account | api_key | model"),
+    group_by: str = Query(default="day", description=" | ".join(reports.GROUPINGS)),
     start: str | None = Query(default=None, description="Inclusive ISO date. Defaults to 30 days ago."),
     end: str | None = Query(default=None, description="Inclusive ISO date. Defaults to today."),
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[list[str] | None, Query()] = None,
+    user_agent: Annotated[list[str] | None, Query(description="User-agent family")] = None,
 ) -> ReportOut:
     """Cost broken down over a date range, for chargeback.
 
-    Backed by rollups, so the range is not limited by request-log retention.
+    Backed by rollups, so the range is not limited by request-log retention — except
+    when grouping or filtering by user agent, which only request logs record.
     """
+    filters = report_filters(account_id, api_key_id, model, user_agent)
     try:
-        report = await reports.build(session, group_by=group_by, start=start, end=end)
+        report = await reports.build(session, group_by=group_by, start=start, end=end, filters=filters)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return ReportOut(
         group_by=report.group_by,
         start=report.start,
         end=report.end,
+        source=report.source,
         total_requests=report.total_requests,
         total_cost_usd=report.total_cost_usd,
         rows=[ReportRowOut(**row.as_dict()) for row in report.rows],
@@ -266,10 +278,15 @@ async def cost_report_csv(
     group_by: str = Query(default="day"),
     start: str | None = None,
     end: str | None = None,
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[list[str] | None, Query()] = None,
+    user_agent: Annotated[list[str] | None, Query()] = None,
 ) -> Response:
     """The same report as a CSV download, with a TOTAL row."""
+    filters = report_filters(account_id, api_key_id, model, user_agent)
     try:
-        report = await reports.build(session, group_by=group_by, start=start, end=end)
+        report = await reports.build(session, group_by=group_by, start=start, end=end, filters=filters)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return Response(

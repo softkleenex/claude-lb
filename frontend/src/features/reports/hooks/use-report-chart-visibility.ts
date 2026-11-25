@@ -3,15 +3,17 @@ import { useEffect, useState } from "react";
 export const REPORT_CHART_DEFINITIONS = [
   { id: "costByDay", labelKey: "reports.charts.costByDay" },
   { id: "tokensByDay", labelKey: "reports.charts.tokensByDay" },
+  { id: "requestsByDay", labelKey: "reports.charts.requestsByDay" },
   { id: "timeToFirstToken", labelKey: "reports.charts.timeToFirstToken" },
   { id: "tokensPerSecond", labelKey: "reports.charts.tokensPerSecond" },
-  { id: "queueWait", labelKey: "reports.charts.queueWait" },
+  { id: "modelDistribution", labelKey: "reports.distribution.byModel" },
+  { id: "userAgentDistribution", labelKey: "reports.distribution.byUserAgent" },
 ] as const;
 
 export type ReportChartId = (typeof REPORT_CHART_DEFINITIONS)[number]["id"];
 
 export const REPORT_CHART_VISIBILITY_STORAGE_KEY =
-  "claude-lb-reports-visible-charts";
+  "claude-lb-reports-visible-charts:v2";
 
 const REPORT_CHART_IDS = REPORT_CHART_DEFINITIONS.map(({ id }) => id);
 

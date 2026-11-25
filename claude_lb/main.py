@@ -27,6 +27,7 @@ from claude_lb.modules.dashboard.data_api import router as dashboard_data_router
 from claude_lb.modules.health.api import router as health_router
 from claude_lb.modules.health.service import Scheduler
 from claude_lb.modules.proxy.api import router as proxy_router
+from claude_lb.modules.reports.api import router as reports_router
 from claude_lb.modules.request_logs.api import router as request_logs_router
 from claude_lb.modules.settings.api import router as settings_router
 from claude_lb.modules.usage import metrics as usage_metrics
@@ -136,6 +137,7 @@ def create_app() -> FastAPI:
         usage_router,
         dashboard_data_router,
         request_logs_router,
+        reports_router,
         settings_router,
         audit_router,
         health_router,

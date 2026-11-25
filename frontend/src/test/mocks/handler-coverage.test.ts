@@ -30,6 +30,9 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
 	"GET /api/request-logs/:requestId",
+	// reports
+	"GET /api/reports",
+	"GET /api/reports/options",
 	// accounts (claude-lb)
 	"GET /api/accounts",
 	"POST /api/accounts",

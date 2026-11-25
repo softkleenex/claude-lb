@@ -852,3 +852,210 @@ export function createDefaultRequestLogWires(): RequestLogWire[] {
 		}),
 	];
 }
+
+// ── Reports (claude-lb `/api/reports`) ──
+
+export type ReportTotalsWire = {
+	requests: number;
+	errors: number;
+	input_tokens: number;
+	output_tokens: number;
+	cache_creation_input_tokens: number;
+	cache_read_input_tokens: number;
+	total_tokens: number;
+	cost_usd: number;
+	cache_savings_usd: number;
+};
+
+export type ReportDistributionWire = {
+	key: string | null;
+	label: string;
+	cost_usd: number;
+	total_tokens: number;
+	requests: number;
+};
+
+export type ReportBreakdownRowWire = ReportTotalsWire & { key: string | null; label: string; cache_hit_rate: number };
+
+export type ReportWire = {
+	start: string;
+	end: string;
+	days: number;
+	group_by: "day" | "account" | "api_key" | "model" | "user_agent";
+	source: "rollups" | "request_logs";
+	coverage: { retention_days: number; logs_from: string; logs_truncated: boolean };
+	summary: {
+		total_cost_usd: number;
+		avg_cost_per_day: number;
+		requests: number;
+		avg_requests_per_day: number;
+		errors: number;
+		error_rate: number;
+		aborted: number;
+		accounts_used: number;
+		conversations: number;
+		input_tokens: number;
+		output_tokens: number;
+		cache_read_input_tokens: number;
+		cache_creation_input_tokens: number;
+		total_tokens: number;
+		cache_savings_usd: number;
+		cache_hit_rate: number;
+		median_ttft_ms: number | null;
+		median_tps: number | null;
+	};
+	previous: {
+		start: string;
+		end: string;
+		can_compare: boolean;
+		total_cost_usd: number;
+		requests: number;
+		total_tokens: number;
+		errors: number;
+		cache_savings_usd: number;
+	};
+	daily: Array<
+		ReportTotalsWire & {
+			day: string;
+			aborted: number;
+			conversations: number;
+			median_ttft_ms: number | null;
+			median_tps: number | null;
+		}
+	>;
+	by_model: ReportDistributionWire[];
+	by_user_agent: ReportDistributionWire[];
+	breakdown: ReportBreakdownRowWire[];
+	breakdown_total: ReportTotalsWire & { cache_hit_rate: number };
+};
+
+function isoDay(day: string, offset: number): string {
+	const date = new Date(`${day}T00:00:00Z`);
+	date.setUTCDate(date.getUTCDate() + offset);
+	return date.toISOString().slice(0, 10);
+}
+
+function totals(scale: number): ReportTotalsWire {
+	return {
+		requests: 100 * scale,
+		errors: 2 * scale,
+		input_tokens: 40_000 * scale,
+		output_tokens: 80_000 * scale,
+		cache_creation_input_tokens: 10_000 * scale,
+		cache_read_input_tokens: 900_000 * scale,
+		total_tokens: 1_030_000 * scale,
+		cost_usd: 5 * scale,
+		cache_savings_usd: 2.43 * scale,
+	};
+}
+
+const REPORT_GROUP_ROWS: Record<ReportWire["group_by"], Array<[string | null, string]>> = {
+	day: [],
+	account: [
+		["acc_alice", "alice-max"],
+		["acc_console", "console-key"],
+	],
+	api_key: [
+		["key_team", "claude-code-team"],
+		[null, "(unattributed)"],
+	],
+	model: [
+		["claude-opus-5-5", "claude-opus-5-5"],
+		["claude-sonnet-4-5", "claude-sonnet-4-5"],
+	],
+	user_agent: [
+		["claude-cli", "claude-cli"],
+		["(unknown)", "(unknown)"],
+	],
+};
+
+/** A report shaped like the backend's, for `start..end` (inclusive) grouped by `groupBy`. */
+export function createReportWire(
+	options: { start?: string; end?: string; groupBy?: ReportWire["group_by"] } = {},
+	overrides: Partial<ReportWire> = {},
+): ReportWire {
+	const end = options.end ?? "2026-01-07";
+	const start = options.start ?? isoDay(end, -6);
+	const groupBy = options.groupBy ?? "day";
+	const days = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000) + 1;
+	const daily = Array.from({ length: days }, (_, i) => ({
+		...totals(1),
+		day: isoDay(start, i),
+		aborted: 1,
+		conversations: 12,
+		median_ttft_ms: 480 + i * 10,
+		median_tps: 62.5,
+	}));
+	const sum = totals(days);
+	const breakdown: ReportBreakdownRowWire[] =
+		groupBy === "day"
+			? daily.map((point) => ({ ...totals(1), key: point.day, label: point.day, cache_hit_rate: 0.9524 }))
+			: REPORT_GROUP_ROWS[groupBy].map(([key, label], index) => ({
+					...totals(days * (index === 0 ? 0.75 : 0.25)),
+					key,
+					label,
+					cache_hit_rate: 0.9524,
+				}));
+	return {
+		start,
+		end,
+		days,
+		group_by: groupBy,
+		source: "rollups",
+		coverage: { retention_days: 30, logs_from: start, logs_truncated: false },
+		summary: {
+			total_cost_usd: sum.cost_usd,
+			avg_cost_per_day: 5,
+			requests: sum.requests,
+			avg_requests_per_day: 100,
+			errors: sum.errors,
+			error_rate: 0.02,
+			aborted: days,
+			accounts_used: 2,
+			conversations: 12 * days,
+			input_tokens: sum.input_tokens,
+			output_tokens: sum.output_tokens,
+			cache_read_input_tokens: sum.cache_read_input_tokens,
+			cache_creation_input_tokens: sum.cache_creation_input_tokens,
+			total_tokens: sum.total_tokens,
+			cache_savings_usd: sum.cache_savings_usd,
+			cache_hit_rate: 0.9524,
+			median_ttft_ms: 510,
+			median_tps: 62.5,
+		},
+		previous: {
+			start: isoDay(start, -days),
+			end: isoDay(start, -1),
+			can_compare: true,
+			total_cost_usd: sum.cost_usd / 2,
+			requests: sum.requests,
+			total_tokens: sum.total_tokens * 2,
+			errors: 0,
+			cache_savings_usd: 0,
+		},
+		daily,
+		by_model: [
+			{ key: "claude-opus-5-5", label: "claude-opus-5-5", cost_usd: sum.cost_usd * 0.8, total_tokens: 600_000, requests: 40 },
+			{ key: "claude-sonnet-4-5", label: "claude-sonnet-4-5", cost_usd: sum.cost_usd * 0.2, total_tokens: 900_000, requests: 160 },
+		],
+		by_user_agent: [
+			{ key: "claude-cli", label: "claude-cli", cost_usd: sum.cost_usd * 0.9, total_tokens: 1_000_000, requests: 180 },
+			{ key: "(unknown)", label: "(unknown)", cost_usd: sum.cost_usd * 0.1, total_tokens: 30_000, requests: 20 },
+		],
+		breakdown,
+		breakdown_total: { ...sum, cache_hit_rate: 0.9524 },
+		...overrides,
+	};
+}
+
+export function createReportOptionsWire() {
+	return {
+		accounts: [
+			{ id: "acc_alice", name: "alice-max" },
+			{ id: "acc_console", name: "console-key" },
+		],
+		api_keys: [{ id: "key_team", name: "claude-code-team", key_hint: "clb-…team" }],
+		models: ["claude-opus-5-5", "claude-sonnet-4-5"],
+		user_agents: ["(unknown)", "claude-cli"],
+	};
+}

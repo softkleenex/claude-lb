@@ -1,206 +1,34 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import {
-  daysAgoLocalISO,
-  formatReportBucketDate,
-  getBrowserReportsTimeZone,
-  localDateISO,
-} from "./date";
+import { MAX_REPORT_DAYS, dateRangeProblem, daysAgoUtcISO, isISODate, rangeDays, utcDateISO } from "./date";
 
-const REPORTS_TIMEZONE_STORAGE_KEY = "claude-lb-reports-timezone";
-const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+describe("report dates (UTC)", () => {
+  const now = new Date("2026-03-01T23:30:00-05:00"); // 2026-03-02 04:30 UTC
 
-describe("reports date helpers", () => {
-  beforeEach(() => {
-    if (originalLocalStorageDescriptor) {
-      Object.defineProperty(window, "localStorage", originalLocalStorageDescriptor);
-    }
-    window.localStorage.clear();
+  it("uses the UTC calendar day", () => {
+    expect(utcDateISO(now)).toBe("2026-03-02");
+    expect(daysAgoUtcISO(6, now)).toBe("2026-02-24");
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-    if (originalLocalStorageDescriptor) {
-      Object.defineProperty(window, "localStorage", originalLocalStorageDescriptor);
-      window.localStorage.clear();
-    }
+  it("validates ISO dates strictly", () => {
+    expect(isISODate("2026-02-28")).toBe(true);
+    expect(isISODate("2026-02-30")).toBe(false);
+    expect(isISODate("")).toBe(false);
+    expect(isISODate("03/01/2026")).toBe(false);
   });
 
-  function createBlockedLocalStorage(): Storage {
-    return {
-      get length() {
-        return 0;
-      },
-      clear() {},
-      getItem() {
-        return null;
-      },
-      key() {
-        return null;
-      },
-      removeItem() {},
-      setItem() {
-        throw new DOMException("blocked", "SecurityError");
-      },
-    };
-  }
-
-  function createReadBlockedLocalStorage(): Storage {
-    return {
-      get length() {
-        return 0;
-      },
-      clear() {},
-      getItem() {
-        throw new DOMException("blocked", "SecurityError");
-      },
-      key() {
-        return null;
-      },
-      removeItem() {},
-      setItem() {},
-    };
-  }
-
-  it("formats a local calendar date without shifting it to the UTC day", () => {
-    const localLateEvening = new Date("2026-06-02T02:30:00.000Z");
-    vi.spyOn(localLateEvening, "getTimezoneOffset").mockReturnValue(300);
-
-    expect(localDateISO(localLateEvening)).toBe("2026-06-01");
+  it("counts days inclusively", () => {
+    expect(rangeDays("2026-01-01", "2026-01-01")).toBe(1);
+    expect(rangeDays("2026-01-01", "2026-01-31")).toBe(31);
+    expect(rangeDays("", "2026-01-31")).toBeNull();
   });
 
-  it("shifts the local calendar date back by the requested number of days", () => {
-    const localNoon = new Date(2026, 5, 2, 12, 0, 0);
-
-    expect(daysAgoLocalISO(1, localNoon)).toBe("2026-06-01");
+  it("names the problem with a range", () => {
+    expect(dateRangeProblem("2026-01-01", "2026-01-07")).toBeNull();
+    expect(dateRangeProblem("2026-01-08", "2026-01-07")).toBe("reversed");
+    expect(dateRangeProblem("", "2026-01-07")).toBe("invalid");
+    expect(dateRangeProblem("2024-01-01", "2026-01-07")).toBe("tooLong");
+    expect(rangeDays("2025-01-01", "2026-01-01")).toBe(MAX_REPORT_DAYS);
+    expect(dateRangeProblem("2025-01-01", "2026-01-01")).toBeNull();
   });
-
-  it("formats report bucket strings for the selected display format without a UTC shift", () => {
-    expect(formatReportBucketDate("2026-06-01", "default")).toBe("06/01/2026");
-    expect(formatReportBucketDate("2026-06-01", "iso8601")).toBe("2026-06-01");
-  });
-
-  it("returns the live browser timezone and refreshes the cached value", () => {
-    window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "UTC");
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: "America/Los_Angeles",
-    });
-
-    expect(getBrowserReportsTimeZone()).toBe("America/Los_Angeles");
-    expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBe(
-      "America/Los_Angeles",
-    );
-  });
-
-  it("returns the live browser timezone when localStorage writes are blocked", () => {
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: "America/Los_Angeles",
-    });
-    Object.defineProperty(window, "localStorage", {
-      configurable: true,
-      value: createBlockedLocalStorage(),
-    });
-
-    expect(getBrowserReportsTimeZone()).toBe("America/Los_Angeles");
-    expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBeNull();
-  });
-
-  it("validates the live browser timezone when supportedValuesOf is unavailable", () => {
-    const originalSupportedValuesOf = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf");
-    Object.defineProperty(Intl, "supportedValuesOf", {
-      configurable: true,
-      value: undefined,
-    });
-    try {
-      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-        locale: "en-US",
-        calendar: "gregory",
-        numberingSystem: "latn",
-        timeZone: "Europe/Paris",
-      });
-
-      expect(getBrowserReportsTimeZone()).toBe("Europe/Paris");
-      expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBe("Europe/Paris");
-    } finally {
-      if (originalSupportedValuesOf) {
-        Object.defineProperty(Intl, "supportedValuesOf", originalSupportedValuesOf);
-      } else {
-        delete (Intl as { supportedValuesOf?: unknown }).supportedValuesOf;
-      }
-    }
-  });
-
-  it("reuses the cached timezone when the live browser timezone is invalid", () => {
-    window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "Europe/Paris");
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: "Mars/Olympus",
-    });
-
-    expect(getBrowserReportsTimeZone()).toBe("Europe/Paris");
-    expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBe("Europe/Paris");
-  });
-
-  it("reuses the cached timezone when live browser detection is unavailable", () => {
-    window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "Europe/Paris");
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: undefined as unknown as string,
-    });
-
-    expect(getBrowserReportsTimeZone()).toBe("Europe/Paris");
-    expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBe("Europe/Paris");
-  });
-
-  it("returns undefined when neither the live nor cached timezone is valid", () => {
-    window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "Moon/BaseAlpha");
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: "Mars/Olympus",
-    });
-
-    expect(getBrowserReportsTimeZone()).toBeUndefined();
-  });
-
-  it("returns undefined when the live timezone is invalid and no cached timezone exists", () => {
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      locale: "en-US",
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone: "Mars/Olympus",
-    });
-
-    expect(getBrowserReportsTimeZone()).toBeUndefined();
-    expect(window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY)).toBeNull();
-  });
-
-  it.each(["Mars/Olympus", undefined])(
-    "returns undefined when cached timezone reads are blocked and live detection is %s",
-    (timeZone) => {
-      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-        locale: "en-US",
-        calendar: "gregory",
-        numberingSystem: "latn",
-        timeZone: timeZone as unknown as string,
-      });
-      Object.defineProperty(window, "localStorage", {
-        configurable: true,
-        value: createReadBlockedLocalStorage(),
-      });
-
-      expect(getBrowserReportsTimeZone()).toBeUndefined();
-    },
-  );
 });

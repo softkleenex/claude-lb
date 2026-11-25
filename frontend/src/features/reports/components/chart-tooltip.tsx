@@ -3,6 +3,8 @@ import type { TooltipContentProps } from "recharts";
 export type ChartTooltipProps = Partial<TooltipContentProps<number, string>> & {
   formatValue?: (value: number, dataKey: string) => string;
   names?: Record<string, string>;
+  /** Shown for a series without a value on that day (e.g. no latency samples). */
+  emptyLabel?: string;
 };
 
 export function ChartTooltip({
@@ -11,14 +13,17 @@ export function ChartTooltip({
   label,
   formatValue,
   names,
+  emptyLabel = "—",
 }: ChartTooltipProps) {
   if (!active || !payload?.length) return null;
+  const fullDay = (payload[0]?.payload as { fullDay?: string } | undefined)?.fullDay;
+  const shownLabel = fullDay ?? label;
 
   return (
     <div className="rounded-xl border border-border bg-popover p-2.5 shadow-md">
-      {label != null && (
+      {shownLabel != null && (
         <p className="mb-1.5 px-2 text-[11px] font-medium text-muted-foreground">
-          {label}
+          {shownLabel}
         </p>
       )}
       <div className="space-y-1">
@@ -31,7 +36,9 @@ export function ChartTooltip({
               ? formatValue
                 ? formatValue(entry.value, String(entry.dataKey))
                 : String(entry.value)
-              : String(entry.value);
+              : entry.value == null
+                ? emptyLabel
+                : String(entry.value);
 
           return (
             <div

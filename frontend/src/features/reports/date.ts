@@ -1,73 +1,43 @@
-import type { DateDisplayFormat } from "@/hooks/use-date-format";
-import { formatTimeLong } from "@/utils/formatters";
+/**
+ * Report days are UTC calendar days: the server's daily rollups are keyed by UTC date,
+ * so presets and the date pickers work in UTC too.
+ */
 
-const REPORTS_TIMEZONE_STORAGE_KEY = "claude-lb-reports-timezone";
+export const MAX_REPORT_DAYS = 366;
 
-function isValidTimeZone(timeZone: string | undefined): timeZone is string {
-  if (!timeZone) {
-    return false;
-  }
-
-  if (typeof Intl.supportedValuesOf === "function") {
-    return timeZone === "UTC" || Intl.supportedValuesOf("timeZone").includes(timeZone);
-  }
-
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone });
-    return true;
-  } catch {
-    return false;
-  }
+export function utcDateISO(date: Date = new Date()): string {
+  return date.toISOString().slice(0, 10);
 }
 
-export function getBrowserReportsTimeZone(): string | undefined {
-  const detectedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (isValidTimeZone(detectedTimeZone)) {
-    try {
-      window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, detectedTimeZone);
-    } catch {
-      // Some browser contexts block storage access; detection still succeeded.
-    }
-    return detectedTimeZone;
-  }
-
-  try {
-    const cachedTimeZone = window.localStorage.getItem(REPORTS_TIMEZONE_STORAGE_KEY) ?? undefined;
-    if (isValidTimeZone(cachedTimeZone)) {
-      return cachedTimeZone;
-    }
-  } catch {
-    // Some browser contexts block storage access; fall through and omit timezone.
-  }
-
-  return undefined;
+export function daysAgoUtcISO(days: number, date: Date = new Date()): string {
+  const shifted = new Date(date.getTime());
+  shifted.setUTCDate(shifted.getUTCDate() - days);
+  return utcDateISO(shifted);
 }
 
-export function localDateISO(date: Date = new Date()): string {
-  const localTime = date.getTime() - date.getTimezoneOffset() * 60_000;
-  return new Date(localTime).toISOString().slice(0, 10);
+export function isISODate(value: string | undefined): value is string {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-export function daysAgoLocalISO(days: number, date: Date = new Date()): string {
-  const shifted = new Date(date);
-  shifted.setDate(shifted.getDate() - days);
-  return localDateISO(shifted);
+/** Inclusive day count, or null when either end is not a valid date. */
+export function rangeDays(start: string, end: string): number | null {
+  if (!isISODate(start) || !isISODate(end)) return null;
+  return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000) + 1;
 }
 
-export function isReportDateRangeValid(
-  startDate: string | undefined,
-  endDate: string | undefined,
-): boolean {
-  return !startDate || !endDate || startDate <= endDate;
+export type DateRangeProblem = "invalid" | "reversed" | "tooLong" | null;
+
+export function dateRangeProblem(start: string, end: string): DateRangeProblem {
+  const days = rangeDays(start, end);
+  if (days === null) return "invalid";
+  if (days < 1) return "reversed";
+  if (days > MAX_REPORT_DAYS) return "tooLong";
+  return null;
 }
 
-export function formatReportBucketDate(
-  date: string,
-  displayFormat: DateDisplayFormat,
-): string {
-  const [year, month, day] = date.split("-");
-  if (!year || !month || !day) {
-    return date;
-  }
-  return formatTimeLong(`${year}-${month}-${day}T00:00:00`, displayFormat).date;
+/** "11-26" for chart axes. */
+export function shortDay(day: string): string {
+  return day.slice(5);
 }
