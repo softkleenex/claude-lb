@@ -29,10 +29,12 @@
   .sub { color: var(--muted); font-size: 13px; }
   main { padding: 24px; display: grid; gap: 20px; max-width: 1200px; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 12px; }
   .tile { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
   .tile .label { color: var(--muted); font-size: 12px; }
   .tile .value { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tile.savings { border-color: var(--ok); }
+  .tile.savings .value { color: var(--ok); }
   .scroll { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -321,11 +323,12 @@ $("#signout").addEventListener("click", async () => {
 // ---------------------------------------------------------------- rendering
 
 const TOTAL_TILES = [
+  ["cache_savings_usd", "Saved by prompt cache", (v) => "$" + v.toFixed(2), "savings"],
   ["requests", "Requests", fmt.format],
   ["errors", "Errors", fmt.format],
   ["input_tokens", "Input tokens", fmt.format],
   ["output_tokens", "Output tokens", fmt.format],
-  ["cache_read_input_tokens", "Cache reads", fmt.format],
+  ["cache_hit_rate", "Cache hit rate", (v) => (v * 100).toFixed(1) + "%"],
   ["cost_usd", "Cost", (v) => "$" + v.toFixed(4)],
 ];
 
@@ -481,8 +484,8 @@ async function refresh() {
     `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`
     + ` · ${settings.settings.routing_strategy}`;
 
-  $("#totals").innerHTML = TOTAL_TILES.map(([key, label, format]) =>
-    `<div class="tile"><div class="label">${label}</div><div class="value">${format(summary.totals[key])}</div></div>`
+  $("#totals").innerHTML = TOTAL_TILES.map(([key, label, format, cls]) =>
+    `<div class="tile ${cls || ""}"><div class="label">${label}</div><div class="value">${format(summary.totals[key])}</div></div>`
   ).join("");
 
   const usageByAccount = Object.fromEntries(summary.by_account.map((r) => [r.account_id, r]));
@@ -533,10 +536,13 @@ async function refresh() {
     </tr>`);
 
   table($("#models"),
-    [{label:"Model"},{label:"Requests",num:true},{label:"Input",num:true},{label:"Output",num:true},{label:"Cost",num:true}],
+    [{label:"Model"},{label:"Requests",num:true},{label:"Input",num:true},{label:"Output",num:true},
+     {label:"Cache hit",num:true},{label:"Saved",num:true},{label:"Cost",num:true}],
     summary.by_model,
     (m) => `<tr><td>${esc(m.model ?? "(unknown)")}</td><td class="num">${fmt.format(m.requests)}</td>
       <td class="num">${fmt.format(m.input_tokens)}</td><td class="num">${fmt.format(m.output_tokens)}</td>
+      <td class="num">${(m.cache_hit_rate * 100).toFixed(1)}%</td>
+      <td class="num ok">${usd(m.cache_savings_usd)}</td>
       <td class="num">${usd(m.cost_usd)}</td></tr>`);
 
   table($("#keys"),

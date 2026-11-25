@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, delete, func, select
 
 from claude_lb.core.config import get_settings
+from claude_lb.core.pricing import cache_read_savings_usd
 from claude_lb.db.models import Account, RequestLog
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.usage import reports, rollup
@@ -22,6 +23,10 @@ class UsageTotals(BaseModel):
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cost_usd: float = 0.0
+    cache_hit_rate: float = 0.0
+    """Share of prompt tokens served from cache: reads / (input + cache writes + reads)."""
+    cache_savings_usd: float = 0.0
+    """What the cache reads would have cost as uncached input, minus what they cost."""
 
 
 class AccountUsage(UsageTotals):
@@ -69,9 +74,12 @@ _SUM_COLUMNS = (
 )
 
 
-def _totals(row) -> dict:
+def _totals(row, savings: float = 0.0) -> dict:
     requests, errors, inp, out, cache_read, cache_write, cost = row
+    prompt = inp + cache_read + cache_write
     return {
+        "cache_hit_rate": round(cache_read / prompt, 4) if prompt else 0.0,
+        "cache_savings_usd": round(savings, 6),
         "requests": requests,
         "errors": errors,
         "input_tokens": inp,
@@ -98,22 +106,48 @@ async def usage_summary(
         .group_by(RequestLog.account_id, Account.name)
         .order_by(func.sum(RequestLog.cost_usd).desc())
     )
-    per_model = await session.execute(
-        select(RequestLog.model, *_SUM_COLUMNS)
-        .where(RequestLog.created_at >= since)
-        .group_by(RequestLog.model)
-        .order_by(func.sum(RequestLog.cost_usd).desc())
+    per_model = list(
+        await session.execute(
+            select(RequestLog.model, *_SUM_COLUMNS)
+            .where(RequestLog.created_at >= since)
+            .group_by(RequestLog.model)
+            .order_by(func.sum(RequestLog.cost_usd).desc())
+        )
     )
+
+    # Savings are priced per model, so an account's figure needs its per-model split.
+    cache_reads = await session.execute(
+        select(
+            RequestLog.account_id,
+            RequestLog.model,
+            func.coalesce(func.sum(RequestLog.cache_read_input_tokens), 0),
+        )
+        .where(RequestLog.created_at >= since, RequestLog.cache_read_input_tokens > 0)
+        .group_by(RequestLog.account_id, RequestLog.model)
+    )
+    savings_by_account: dict[str | None, float] = {}
+    savings_by_model: dict[str | None, float] = {}
+    for account_id, model, tokens in cache_reads:
+        saved = cache_read_savings_usd(model, tokens)
+        savings_by_account[account_id] = savings_by_account.get(account_id, 0.0) + saved
+        savings_by_model[model] = savings_by_model.get(model, 0.0) + saved
 
     return UsageSummary(
         window_hours=window_hours,
         since=since,
-        totals=UsageTotals(**_totals(overall)),
+        totals=UsageTotals(**_totals(overall, sum(savings_by_model.values()))),
         by_account=[
-            AccountUsage(account_id=row[0], account_name=row[1] or "(deleted)", **_totals(row[2:]))
+            AccountUsage(
+                account_id=row[0],
+                account_name=row[1] or "(deleted)",
+                **_totals(row[2:], savings_by_account.get(row[0], 0.0)),
+            )
             for row in per_account
         ],
-        by_model=[ModelUsage(model=row[0], **_totals(row[1:])) for row in per_model],
+        by_model=[
+            ModelUsage(model=row[0], **_totals(row[1:], savings_by_model.get(row[0], 0.0)))
+            for row in per_model
+        ],
     )
 
 
