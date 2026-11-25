@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { addDays, format } from "date-fns";
+import { addDays, differenceInCalendarDays, format } from "date-fns";
 import { CalendarIcon, ChevronDown, Infinity as InfinityIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -188,9 +188,8 @@ function OptionItem({
 
 function getActivePreset(value: Date | null): number | null {
   if (!value) return null;
-  const now = new Date();
-  const diffMs = value.getTime() - now.getTime();
-  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+  // Presets end at 23:59:59 local time, so compare calendar days, not elapsed time.
+  const diffDays = differenceInCalendarDays(value, new Date());
   for (const preset of PRESETS) {
     if (Math.abs(diffDays - preset.days) <= 0) {
       return preset.days;

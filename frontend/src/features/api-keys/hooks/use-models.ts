@@ -1,14 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { listModels } from "@/features/api-keys/api";
+import { listCatalogModels } from "@/features/api-keys/api";
 
-export type { ModelItem } from "@/features/api-keys/schemas";
-
+/** Model ids from every account's synced catalog (may be empty before the first sync). */
 export function useModels() {
   return useQuery({
-    queryKey: ["models"],
-    queryFn: listModels,
+    queryKey: ["models", "catalog"],
+    queryFn: listCatalogModels,
     staleTime: 5 * 60 * 1000,
-    select: (data) => data.models,
+    select: (models) => models.map((model) => model.modelId),
   });
 }

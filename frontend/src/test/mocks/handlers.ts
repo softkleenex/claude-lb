@@ -4,16 +4,15 @@ import { z } from "zod";
 import { camelizeKeys, snakeToCamel } from "@/lib/casing";
 
 import {
-  LIMIT_TYPES,
-  LIMIT_WINDOWS,
-  TRAFFIC_CLASSES,
-} from "@/features/api-keys/schemas";
-import {
-  type ApiKey,
-  createApiKey,
-  createApiKeyCreateResponse,
-  createApiKeyTrends,
-  createApiKeyUsage7Day,
+  type ApiKeyWire,
+  type LimitUsageWire,
+  createApiKeyWire,
+  createCatalogModelWires,
+  createDefaultApiKeyWires,
+  createKeyTrendsWire,
+  createKeysOverviewWire,
+  createLimitUsageWire,
+  MOCK_WINDOW_SECONDS,
   createAuthStatus,
   createRuntimeSettings,
   createDefaultAccountWires,
@@ -29,7 +28,6 @@ import {
   createReportOptionsWire,
   type ReportWire,
   type RequestLogWire,
-  createDefaultApiKeys,
   createQuotaPlannerDecision,
   createQuotaPlannerForecast,
   createQuotaPlannerSettings,
@@ -57,37 +55,8 @@ const REQUEST_STATUS_ORDER = [
 
 // ── Zod schemas for mock request bodies ──
 
-const ApiKeyCreatePayloadSchema = z.looseObject({
-  name: z.string().optional(),
-  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
-  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
-  assignedAccountIds: z.array(z.string()).optional(),
-  assignedSourceIds: z.array(z.string()).optional(),
-});
-
 const FirewallIpCreatePayloadSchema = z.looseObject({
   ipAddress: z.string().optional(),
-});
-
-const ApiKeyUpdatePayloadSchema = z.looseObject({
-  name: z.string().optional(),
-  allowedModels: z.array(z.string()).nullable().optional(),
-  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
-  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
-  isActive: z.boolean().optional(),
-  assignedAccountIds: z.array(z.string()).optional(),
-  assignedSourceIds: z.array(z.string()).optional(),
-  resetUsage: z.boolean().optional(),
-  limits: z
-    .array(
-      z.object({
-        limitType: z.enum(LIMIT_TYPES),
-        limitWindow: z.enum(LIMIT_WINDOWS),
-        maxValue: z.number(),
-        modelFilter: z.string().nullable().optional(),
-      }),
-    )
-    .optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -157,7 +126,7 @@ type MockState = {
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
   quotaPlannerForecast: QuotaPlannerForecast;
-  apiKeys: ApiKey[];
+  apiKeys: ApiKeyWire[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   reportOverrides: Partial<ReportWire>;
   stickySessions: Array<{
@@ -184,7 +153,7 @@ function createInitialState(): MockState {
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     quotaPlannerForecast: createQuotaPlannerForecast(),
-    apiKeys: createDefaultApiKeys(),
+    apiKeys: createDefaultApiKeyWires(),
     firewallEntries: [],
     reportOverrides: {},
     stickySessions: [],
@@ -276,7 +245,7 @@ function filterRequestLogWires(url: URL): RequestLogWire[] {
   });
 }
 
-function findApiKey(keyId: string): ApiKey | undefined {
+function findApiKey(keyId: string): ApiKeyWire | undefined {
   return state.apiKeys.find((item) => item.id === keyId);
 }
 
@@ -555,6 +524,206 @@ export function getMockAccounts(): AccountWire[] {
   return state.accounts;
 }
 
+// ── API keys (mirror claude_lb/modules/api_keys/api.py) ──
+
+const LIMIT_METRICS_WIRE = ["requests", "total_tokens", "input_tokens", "output_tokens", "cost_usd"];
+const LIMIT_WINDOWS_WIRE = ["5h", "7d", "daily", "weekly", "monthly", "custom"];
+let keySequence = 100;
+
+/** Validates a `limits` array like `LimitRuleIn`; returns rows with zero usage, or an error message. */
+function parseLimitRules(raw: unknown): LimitUsageWire[] | string {
+  if (!Array.isArray(raw)) return "limits must be a list";
+  const rows: LimitUsageWire[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (typeof item !== "object" || item === null) return `limits.${index}: invalid`;
+    const rule = item as Record<string, unknown>;
+    if (!LIMIT_METRICS_WIRE.includes(String(rule.metric))) return `limits.${index}.metric: invalid`;
+    if (!LIMIT_WINDOWS_WIRE.includes(String(rule.window))) return `limits.${index}.window: invalid`;
+    if (typeof rule.max_value !== "number" || rule.max_value <= 0) return `limits.${index}.max_value: must be > 0`;
+    const window = rule.window as LimitUsageWire["window"];
+    let windowSeconds = MOCK_WINDOW_SECONDS[window];
+    if (window === "custom") {
+      if (typeof rule.window_seconds !== "number" || rule.window_seconds < 60) {
+        return "a custom window needs window_seconds";
+      }
+      windowSeconds = rule.window_seconds;
+    }
+    const filter = typeof rule.model_filter === "string" ? rule.model_filter.trim() : "";
+    rows.push(
+      createLimitUsageWire({
+        id: `rule_${keySequence++}`,
+        metric: rule.metric as LimitUsageWire["metric"],
+        window,
+        window_seconds: windowSeconds,
+        max_value: rule.max_value,
+        model_filter: filter || null,
+        current_value: 0,
+        resets_at: ["daily", "weekly", "monthly"].includes(window) ? new Date(Date.now() + 3_600_000).toISOString() : null,
+      }),
+    );
+  }
+  return rows;
+}
+
+function cleanList(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const values = [...new Set(raw.map((v) => String(v).trim()).filter(Boolean))];
+  return values.length > 0 ? values : null;
+}
+
+function keyStatus(key: ApiKeyWire): ApiKeyWire["status"] {
+  if (!key.enabled) return "disabled";
+  if (key.expires_at && new Date(key.expires_at).getTime() <= Date.now()) return "expired";
+  return "active";
+}
+
+function unknownAccounts(ids: string[] | null): string[] {
+  return (ids ?? []).filter((id) => !state.accounts.some((account) => account.id === id));
+}
+
+function newSecret(): string {
+  return `clb_mock${String(keySequence++).padStart(6, "0")}secret`;
+}
+
+const apiKeyHandlers = [
+  http.get("/api/keys", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json([...state.apiKeys].sort((a, b) => a.name.localeCompare(b.name)));
+  }),
+
+  http.get("/api/keys/overview", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json(createKeysOverviewWire(state.apiKeys));
+  }),
+
+  http.post("/api/keys", async ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return detail(422, [{ loc: ["body", "name"], msg: "String should have at least 1 character" }]);
+    if (state.apiKeys.some((key) => key.name === name)) return detail(409, `a key named '${name}' already exists`);
+    const assigned = cleanList(body.assigned_account_ids);
+    const missing = unknownAccounts(assigned);
+    if (missing.length > 0) return detail(422, `unknown account id(s): ${missing.join(", ")}`);
+    const limits = body.limits === undefined || body.limits === null ? [] : parseLimitRules(body.limits);
+    if (typeof limits === "string") return detail(422, limits);
+    const secret = newSecret();
+    const key = createApiKeyWire({
+      id: `key_${keySequence++}`,
+      name,
+      key_hint: secret.slice(-6),
+      expires_at: typeof body.expires_at === "string" ? body.expires_at : null,
+      allowed_models: cleanList(body.allowed_models),
+      enforced_model: typeof body.enforced_model === "string" && body.enforced_model.trim() ? body.enforced_model.trim() : null,
+      assigned_account_ids: assigned,
+      limits,
+      total_requests: 0,
+      total_cost_usd: 0,
+      total_tokens: 0,
+      lifetime_requests: 0,
+      lifetime_cost_usd: 0,
+      last_used_at: null,
+      created_at: new Date().toISOString(),
+    });
+    key.status = keyStatus(key);
+    state.apiKeys = [...state.apiKeys, key];
+    return HttpResponse.json({ ...key, api_key: secret }, { status: 201 });
+  }),
+
+  http.get("/api/keys/:keyId", ({ params }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const key = findApiKey(String(params.keyId));
+    return key ? HttpResponse.json(key) : detail(404, "API key not found");
+  }),
+
+  http.patch("/api/keys/:keyId", async ({ params, request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const existing = findApiKey(String(params.keyId));
+    if (!existing) return detail(404, "API key not found");
+    const body = await readJsonObject(request);
+    const queryEnabled = new URL(request.url).searchParams.get("enabled");
+    if (queryEnabled !== null && !("enabled" in body)) body.enabled = queryEnabled === "true";
+    if (Object.keys(body).length === 0) return detail(422, "nothing to update");
+    const next: ApiKeyWire = { ...existing };
+    if (typeof body.name === "string" && body.name !== existing.name) {
+      if (state.apiKeys.some((key) => key.name === body.name)) return detail(409, `a key named '${body.name}' already exists`);
+      next.name = body.name;
+    }
+    if ("enabled" in body) next.enabled = body.enabled === true;
+    if ("expires_at" in body) next.expires_at = typeof body.expires_at === "string" ? body.expires_at : null;
+    if ("allowed_models" in body) next.allowed_models = cleanList(body.allowed_models);
+    if ("enforced_model" in body) {
+      next.enforced_model = typeof body.enforced_model === "string" && body.enforced_model.trim() ? body.enforced_model.trim() : null;
+    }
+    if ("assigned_account_ids" in body) {
+      const assigned = cleanList(body.assigned_account_ids);
+      const missing = unknownAccounts(assigned);
+      if (missing.length > 0) return detail(422, `unknown account id(s): ${missing.join(", ")}`);
+      next.assigned_account_ids = assigned;
+    }
+    if ("pinned_account_id" in body) next.pinned_account_id = typeof body.pinned_account_id === "string" ? body.pinned_account_id : null;
+    if ("limits" in body) {
+      const limits = parseLimitRules(body.limits ?? []);
+      if (typeof limits === "string") return detail(422, limits);
+      next.limits = limits;
+      next.max_requests_per_window = null;
+      next.max_tokens_per_window = null;
+      next.max_cost_usd_per_window = null;
+    }
+    next.status = keyStatus(next);
+    state.apiKeys = state.apiKeys.map((key) => (key.id === next.id ? next : key));
+    return HttpResponse.json(next);
+  }),
+
+  http.delete("/api/keys/:keyId", ({ params }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    if (!findApiKey(String(params.keyId))) return detail(404, "API key not found");
+    state.apiKeys = state.apiKeys.filter((key) => key.id !== params.keyId);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/keys/:keyId/regenerate", ({ params }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const existing = findApiKey(String(params.keyId));
+    if (!existing) return detail(404, "API key not found");
+    const secret = newSecret();
+    const next = { ...existing, key_hint: secret.slice(-6) };
+    state.apiKeys = state.apiKeys.map((key) => (key.id === next.id ? next : key));
+    return HttpResponse.json({ ...next, api_key: secret });
+  }),
+
+  http.get("/api/keys/:keyId/trends", ({ params, request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    if (!findApiKey(String(params.keyId))) return detail(404, "API key not found");
+    const days = Number(new URL(request.url).searchParams.get("days") ?? "7");
+    if (!Number.isInteger(days) || days < 1 || days > 90) return detail(422, "days must be between 1 and 90");
+    return HttpResponse.json(createKeyTrendsWire(String(params.keyId), days));
+  }),
+
+  http.get("/api/health/models", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json(createCatalogModelWires());
+  }),
+];
+
+/** Replaces the API key rows for a test (wire shape). */
+export function setMockApiKeys(keys: ApiKeyWire[]): void {
+  state.apiKeys = keys.map((key) => ({ ...key }));
+}
+
+export function getMockApiKeys(): ApiKeyWire[] {
+  return state.apiKeys;
+}
+
 const claudeLbHandlers = [
   http.get("/health", () => HttpResponse.json({ status: "ok", version: "0.6.1" })),
 
@@ -698,6 +867,7 @@ const claudeLbHandlers = [
 export const handlers = [
   ...claudeLbHandlers,
   ...accountHandlers,
+  ...apiKeyHandlers,
 
   http.get("/api/dashboard/overview", ({ request }) => {
     const authError = managementAuthError();
@@ -1110,159 +1280,4 @@ export const handlers = [
     return HttpResponse.json({ deletedCount });
   }),
 
-  http.get("/api/models", () => {
-    return HttpResponse.json({
-      models: [
-        { id: "gpt-5.1", name: "GPT 5.1" },
-        { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
-        { id: "gpt-4o-mini", name: "GPT 4o Mini" },
-      ],
-    });
-  }),
-
-  http.get("/api/api-keys/", () => {
-    return HttpResponse.json(state.apiKeys);
-  }),
-
-  http.post("/api/api-keys/", async ({ request }) => {
-    const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
-    const sequence = state.apiKeys.length + 1;
-    const created = createApiKeyCreateResponse({
-      ...createApiKey({
-        id: `key_${sequence}`,
-        name: payload?.name ?? `API Key ${sequence}`,
-        accountAssignmentScopeEnabled:
-          (payload?.assignedAccountIds?.length ?? 0) > 0,
-        sourceAssignmentScopeEnabled:
-          (payload?.assignedSourceIds?.length ?? 0) > 0,
-        assignedAccountIds: payload?.assignedAccountIds ?? [],
-        assignedSourceIds: payload?.assignedSourceIds ?? [],
-        trafficClass: payload?.trafficClass ?? "foreground",
-      }),
-      key: `sk-test-generated-${sequence}`,
-    });
-    state.apiKeys = [...state.apiKeys, createApiKey(created)];
-    return HttpResponse.json(created);
-  }),
-
-  http.patch("/api/api-keys/:keyId", async ({ params, request }) => {
-    const keyId = String(params.keyId);
-    const existing = findApiKey(keyId);
-    if (!existing) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "API key not found" } },
-        { status: 404 },
-      );
-    }
-    const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(existing);
-    }
-
-    // Build override with converted limits (create format → response format)
-    const overrides: Partial<ApiKey> = {
-      ...(payload.name !== undefined ? { name: payload.name } : {}),
-      ...(payload.allowedModels !== undefined
-        ? { allowedModels: payload.allowedModels }
-        : {}),
-      ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
-      ...(payload.trafficClass !== undefined
-        ? { trafficClass: payload.trafficClass }
-        : {}),
-      ...(payload.assignedAccountIds !== undefined
-        ? {
-            accountAssignmentScopeEnabled:
-              payload.assignedAccountIds.length > 0,
-          }
-        : {}),
-      ...(payload.assignedAccountIds !== undefined
-        ? { assignedAccountIds: payload.assignedAccountIds }
-        : {}),
-      ...(payload.assignedSourceIds !== undefined
-        ? {
-            sourceAssignmentScopeEnabled:
-              payload.assignedSourceIds.length > 0,
-            assignedSourceIds: payload.assignedSourceIds,
-          }
-        : {}),
-    };
-
-    if (payload.limits) {
-      overrides.limits = payload.limits.map((l, idx) => ({
-        id: idx + 100,
-        limitType: l.limitType,
-        limitWindow: l.limitWindow,
-        maxValue: l.maxValue,
-        currentValue: 0,
-        modelFilter: l.modelFilter ?? null,
-        resetAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      }));
-    }
-
-    const updated = createApiKey({
-      ...existing,
-      ...overrides,
-      id: keyId,
-    });
-    state.apiKeys = state.apiKeys.map((item) =>
-      item.id === keyId ? updated : item,
-    );
-    return HttpResponse.json(updated);
-  }),
-
-  http.delete("/api/api-keys/:keyId", ({ params }) => {
-    const keyId = String(params.keyId);
-    const exists = state.apiKeys.some((item) => item.id === keyId);
-    if (!exists) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "API key not found" } },
-        { status: 404 },
-      );
-    }
-    state.apiKeys = state.apiKeys.filter((item) => item.id !== keyId);
-    return new HttpResponse(null, { status: 204 });
-  }),
-
-  http.post("/api/api-keys/:keyId/regenerate", ({ params }) => {
-    const keyId = String(params.keyId);
-    const existing = findApiKey(keyId);
-    if (!existing) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "API key not found" } },
-        { status: 404 },
-      );
-    }
-    const regenerated = createApiKeyCreateResponse({
-      ...existing,
-      key: `sk-test-regenerated-${keyId}`,
-    });
-    state.apiKeys = state.apiKeys.map((item) =>
-      item.id === keyId ? createApiKey(regenerated) : item,
-    );
-    return HttpResponse.json(regenerated);
-  }),
-
-  http.get("/api/api-keys/:keyId/trends", ({ params }) => {
-    const keyId = String(params.keyId);
-    const existing = findApiKey(keyId);
-    if (!existing) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "API key not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json(createApiKeyTrends({ keyId }));
-  }),
-
-  http.get("/api/api-keys/:keyId/usage-7d", ({ params }) => {
-    const keyId = String(params.keyId);
-    const existing = findApiKey(keyId);
-    if (!existing) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "API key not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json(createApiKeyUsage7Day({ keyId }));
-  }),
 ];

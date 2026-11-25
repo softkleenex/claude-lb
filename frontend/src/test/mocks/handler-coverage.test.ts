@@ -72,16 +72,16 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/firewall/ips",
 	"POST /api/firewall/ips",
 	"DELETE /api/firewall/ips/:ipAddress",
-	// models
-	"GET /api/models",
-	// api-keys
-	"GET /api/api-keys/",
-	"POST /api/api-keys/",
-	"PATCH /api/api-keys/:keyId",
-	"DELETE /api/api-keys/:keyId",
-	"POST /api/api-keys/:keyId/regenerate",
-	"GET /api/api-keys/:keyId/trends",
-	"GET /api/api-keys/:keyId/usage-7d",
+	// api keys (claude-lb)
+	"GET /api/keys",
+	"GET /api/keys/overview",
+	"POST /api/keys",
+	"GET /api/keys/:keyId",
+	"PATCH /api/keys/:keyId",
+	"DELETE /api/keys/:keyId",
+	"POST /api/keys/:keyId/regenerate",
+	"GET /api/keys/:keyId/trends",
+	"GET /api/health/models",
 ];
 
 describe("MSW handler coverage", () => {

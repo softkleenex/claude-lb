@@ -62,19 +62,19 @@ async def require_api_key(request: Request) -> Admission | None:
             },
         )
 
+    # Starlette caches the body on the request, so the proxy route reads it again for free.
+    model, _ = ProxyService._peek_request(await request.body())  # noqa: SLF001 - same app
     try:
         async with session_scope() as session:
-            return await admit(session, presented)
+            return await admit(session, presented, model)
     except AuthError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={
                 "type": "error",
-                "error": {
-                    "type": "rate_limit_error" if exc.status_code == 429 else "authentication_error",
-                    "message": exc.message,
-                },
+                "error": {"type": exc.error_type, "message": exc.message},
             },
+            headers={"retry-after": str(exc.retry_after)} if exc.retry_after is not None else None,
         ) from exc
 
 

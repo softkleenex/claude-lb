@@ -59,15 +59,15 @@ describe("ExpiryPicker", () => {
     expect(screen.getByText("30 days")).toBeInTheDocument();
     expect(screen.getByText("90 days")).toBeInTheDocument();
     expect(screen.getByText("1 year")).toBeInTheDocument();
-    expect(screen.getByText("Custom date...")).toBeInTheDocument();
+    expect(screen.getByText("Custom date…")).toBeInTheDocument();
   });
 
-  it("shows calendar when 'Custom date...' is clicked", async () => {
+  it("shows calendar when 'Custom date…' is clicked", async () => {
     const user = userEvent.setup();
     render(<ExpiryPicker value={null} onChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button"));
-    await user.click(await screen.findByText("Custom date..."));
+    await user.click(await screen.findByText("Custom date…"));
 
     expect(await screen.findByText(/Back to presets/)).toBeInTheDocument();
   });
@@ -77,7 +77,7 @@ describe("ExpiryPicker", () => {
     render(<ExpiryPicker value={null} onChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button"));
-    await user.click(await screen.findByText("Custom date..."));
+    await user.click(await screen.findByText("Custom date…"));
     await user.click(await screen.findByText(/Back to presets/));
 
     expect(await screen.findByText("1 day")).toBeInTheDocument();

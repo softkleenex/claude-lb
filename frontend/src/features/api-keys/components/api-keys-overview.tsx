@@ -1,41 +1,11 @@
 import { useTranslation } from "react-i18next";
 
-import type { ApiKey } from "@/features/api-keys/schemas";
+import type { KeysOverview, KeyUsageRow } from "@/features/api-keys/schemas";
 import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
 
-type UsageMetric = "requests" | "tokens" | "cost";
+type RankMetric = "cost" | "tokens";
 
-type OverviewStatProps = {
-  label: string;
-  value: string;
-  meta?: string | null;
-};
-
-type BreakdownRow = {
-  id: string;
-  label: string;
-  labelSuffix: string;
-  value: number;
-  share: number;
-};
-
-function isExpired(apiKey: ApiKey): boolean {
-  if (!apiKey.expiresAt) return false;
-  return new Date(apiKey.expiresAt).getTime() < Date.now();
-}
-
-function formatSharePercent(share: number): string {
-  if (!Number.isFinite(share) || share <= 0) {
-    return "0%";
-  }
-
-  const percent = share * 100;
-  const maximumFractionDigits = percent < 10 ? 1 : 0;
-  return `${percent.toLocaleString(undefined, { maximumFractionDigits })}%`;
-}
-
-function OverviewStat({ label, value, meta }: OverviewStatProps) {
-  const testId = `api-keys-overview-stat-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+function Stat({ label, value, meta, testId }: { label: string; value: string; meta?: string; testId: string }) {
   return (
     <div className="rounded-xl border bg-card p-4" data-testid={testId}>
       <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
@@ -45,153 +15,103 @@ function OverviewStat({ label, value, meta }: OverviewStatProps) {
   );
 }
 
-function formatMetricValue(metric: UsageMetric, value: number): string {
-  if (metric === "cost") {
-    return formatCurrency(value);
-  }
-  return formatCompactNumber(value);
+function sharePercent(share: number): string {
+  const percent = share * 100;
+  return `${percent.toLocaleString(undefined, { maximumFractionDigits: percent < 10 ? 1 : 0 })}%`;
 }
 
-function buildBreakdownRows(apiKeys: ApiKey[], metric: UsageMetric): BreakdownRow[] {
-  const rows = apiKeys.reduce<Array<Omit<BreakdownRow, "share">>>((nextRows, apiKey) => {
-    const usage = apiKey.usageSummary;
-    const value =
-      metric === "cost"
-        ? usage?.totalCostUsd ?? 0
-        : metric === "tokens"
-          ? usage?.totalTokens ?? 0
-          : usage?.requestCount ?? 0;
-
-    if (value > 0) {
-      nextRows.push({
-        id: apiKey.id,
-        label: apiKey.name,
-        labelSuffix: apiKey.keyPrefix ? ` · ${apiKey.keyPrefix}` : "",
-        value,
-      });
-    }
-    return nextRows;
-  }, [])
-    .sort((a, b) => b.value - a.value);
-
-  const total = rows.reduce((sum, row) => sum + row.value, 0);
-  if (total <= 0) {
-    return [];
-  }
-
-  return rows.map((row) => ({
-    ...row,
-    share: row.value / total,
-  }));
-}
-
-function BreakdownPanel({
-  title,
-  subtitle,
-  metric,
-  apiKeys,
-}: {
-  title: string;
-  subtitle: string;
-  metric: UsageMetric;
-  apiKeys: ApiKey[];
-}) {
+function Ranking({ title, subtitle, metric, rows }: { title: string; subtitle: string; metric: RankMetric; rows: KeyUsageRow[] }) {
   const { t } = useTranslation();
-  const rows = buildBreakdownRows(apiKeys, metric);
-  const hasRows = rows.length > 0;
+  const valueOf = (row: KeyUsageRow) => (metric === "cost" ? row.costUsd : row.totalTokens);
+  const ranked = rows.filter((row) => valueOf(row) > 0).sort((a, b) => valueOf(b) - valueOf(a));
+  const total = ranked.reduce((sum, row) => sum + valueOf(row), 0);
 
   return (
-    <div className="rounded-xl border bg-card p-4" data-testid={`api-keys-overview-${metric}-panel`}>
+    <div className="rounded-xl border bg-card p-4" data-testid={`api-keys-ranking-${metric}`}>
       <div className="mb-3">
         <h3 className="text-sm font-semibold">{title}</h3>
         <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
       </div>
-
-      {!hasRows ? (
-        <div className="flex h-[12rem] items-center justify-center rounded-lg border border-dashed bg-muted/10 px-4 text-sm text-muted-foreground">
+      {ranked.length === 0 ? (
+        <div className="flex h-24 items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
           {t("apiKeys.overview.noUsage")}
         </div>
       ) : (
-        <div
-          className="space-y-3 overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          style={{ maxHeight: "18rem" }}
-        >
-          {rows.map((row, index) => (
-            <div
-              key={row.id}
-              className="animate-fade-in-up space-y-1.5"
-              style={{ animationDelay: `${index * 50}ms` }}
-            >
-              <div className="flex items-center justify-between gap-3 text-xs">
-                <span className="min-w-0 truncate font-medium">
-                  {row.label}
-                  <span className="text-muted-foreground">{row.labelSuffix}</span>
-                </span>
-                <span className="shrink-0 tabular-nums text-muted-foreground">
-                  {formatMetricValue(metric, row.value)} · {formatSharePercent(row.share)}
-                </span>
-              </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-primary transition-[width] duration-500 ease-out"
-                  style={{ width: `${Math.max(row.share * 100, 1)}%` }}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
+        <ol className="max-h-72 space-y-3 overflow-y-auto pr-1">
+          {ranked.map((row) => {
+            const share = valueOf(row) / total;
+            return (
+              <li key={row.id} className="space-y-1.5">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className="min-w-0 truncate font-medium">
+                    {row.name}
+                    <span className="ml-1 font-mono text-muted-foreground">…{row.keyHint}</span>
+                  </span>
+                  <span className="shrink-0 tabular-nums text-muted-foreground">
+                    {metric === "cost" ? formatCurrency(row.costUsd) : formatCompactNumber(row.totalTokens)} ·{" "}
+                    {sharePercent(share)}
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(share * 100, 1)}%` }} />
+                </div>
+              </li>
+            );
+          })}
+        </ol>
       )}
     </div>
   );
 }
 
-export type ApiKeysOverviewProps = {
-  apiKeys: ApiKey[];
-};
-
-export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
+export function ApiKeysOverview({ overview }: { overview: KeysOverview }) {
   const { t } = useTranslation();
-  const totalKeys = apiKeys.length;
-  const activeKeys = apiKeys.filter((apiKey) => apiKey.isActive && !isExpired(apiKey)).length;
-  const expiredKeys = apiKeys.filter((apiKey) => isExpired(apiKey)).length;
-  const usedKeys = apiKeys.filter((apiKey) => (apiKey.usageSummary?.requestCount ?? 0) > 0).length;
-  const totalRequests = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.requestCount ?? 0), 0);
-  const totalTokens = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.totalTokens ?? 0), 0);
-  const totalCostUsd = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.totalCostUsd ?? 0), 0);
-  const inactiveKeys = totalKeys - activeKeys;
-  const idleKeys = totalKeys - usedKeys;
-
   return (
-    <section className="space-y-4">
-      <div className="flex items-center gap-3">
-        <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("apiKeys.overview.title")}</h2>
-        <div className="h-px flex-1 bg-border" />
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <OverviewStat label={t("apiKeys.overview.apiKeys")} value={formatCompactNumber(totalKeys)} meta={t("apiKeys.overview.expiredMeta", { count: formatCompactNumber(expiredKeys) })} />
-        <OverviewStat label={t("apiKeys.overview.activeKeys")} value={formatCompactNumber(activeKeys)} meta={t("apiKeys.overview.inactiveMeta", { count: formatCompactNumber(inactiveKeys) })} />
-        <OverviewStat label={t("apiKeys.overview.usedKeys")} value={formatCompactNumber(usedKeys)} meta={t("apiKeys.overview.idleMeta", { count: formatCompactNumber(idleKeys) })} />
-        <OverviewStat
+    <section className="space-y-4" aria-label={t("apiKeys.overview.title")}>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <Stat
+          testId="api-keys-stat-total"
+          label={t("apiKeys.overview.total")}
+          value={formatCompactNumber(overview.total)}
+          meta={t("apiKeys.overview.totalMeta", { disabled: overview.disabled, expired: overview.expired })}
+        />
+        <Stat
+          testId="api-keys-stat-active"
+          label={t("apiKeys.overview.active")}
+          value={formatCompactNumber(overview.active)}
+          meta={t("apiKeys.overview.activeMeta", { count: overview.usedLast7d })}
+        />
+        <Stat
+          testId="api-keys-stat-idle"
+          label={t("apiKeys.overview.idle")}
+          value={formatCompactNumber(overview.idle)}
+          meta={t("apiKeys.overview.idleMeta")}
+        />
+        <Stat
+          testId="api-keys-stat-requests"
           label={t("apiKeys.overview.lifetimeRequests")}
-          value={formatCompactNumber(totalRequests)}
-          meta={t("apiKeys.overview.tokensMeta", { count: formatCompactNumber(totalTokens) })}
+          value={formatCompactNumber(overview.lifetimeRequests)}
+          meta={t("apiKeys.overview.tokensMeta", { tokens: formatCompactNumber(overview.lifetimeTokens) })}
         />
-        <OverviewStat label={t("apiKeys.overview.lifetimeCost")} value={formatCurrency(totalCostUsd)} meta={t("apiKeys.overview.lifetimeCostMeta")} />
+        <Stat
+          testId="api-keys-stat-cost"
+          label={t("apiKeys.overview.lifetimeCost")}
+          value={formatCurrency(overview.lifetimeCostUsd)}
+          meta={t("apiKeys.overview.lifetimeCostMeta")}
+        />
       </div>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        <BreakdownPanel
-          title={t("apiKeys.overview.costByKey")}
-          subtitle={t("apiKeys.overview.costByKeySubtitle")}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Ranking
           metric="cost"
-          apiKeys={apiKeys}
+          title={t("apiKeys.overview.costByKey")}
+          subtitle={t("apiKeys.overview.rankingSubtitle")}
+          rows={overview.byKey}
         />
-        <BreakdownPanel
-          title={t("apiKeys.overview.tokensByKey")}
-          subtitle={t("apiKeys.overview.tokensByKeySubtitle")}
+        <Ranking
           metric="tokens"
-          apiKeys={apiKeys}
+          title={t("apiKeys.overview.tokensByKey")}
+          subtitle={t("apiKeys.overview.rankingSubtitle")}
+          rows={overview.byKey}
         />
       </div>
     </section>

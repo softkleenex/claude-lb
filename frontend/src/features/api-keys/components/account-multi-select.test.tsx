@@ -39,7 +39,7 @@ describe("AccountMultiSelect", () => {
   it("pluralizes the selected account count", async () => {
     renderWithProviders(<AccountMultiSelect value={["acc_console", "acc_max"]} onChange={vi.fn()} />);
 
-    expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "2 accounts" })).toBeInTheDocument();
   });
 
   it("hides disabled accounts and shows paused ones only when allowed", async () => {

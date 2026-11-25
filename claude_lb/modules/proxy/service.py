@@ -212,6 +212,8 @@ class ProxyService:
             if runtime.sticky_sessions_enabled
             else None
         )
+        assigned_ids = api_key.assigned_account_ids if api_key else None
+        assigned = set(assigned_ids) if assigned_ids is not None else None
         tried: list[str] = []
         reauthed: dict[str, bool] = {}
         last_error: str = "no upstream attempt was made"
@@ -221,6 +223,13 @@ class ProxyService:
         for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
                 all_accounts = await self._load_accounts(session)
+                if assigned is not None:
+                    # A key restricted to some accounts never spills onto the rest.
+                    all_accounts = [a for a in all_accounts if a.id in assigned]
+                    if not all_accounts:
+                        raise UpstreamExhausted(
+                            "none of the accounts assigned to this API key exist any more", status_code=503
+                        )
                 accounts = await self._filter_by_model(
                     session, all_accounts, model, keep_id=api_key.pinned_account_id if api_key else None
                 )

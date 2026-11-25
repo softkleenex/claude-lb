@@ -138,6 +138,13 @@ export function AccountMultiSelect({
     [accounts, value],
   );
 
+  // Ids of accounts deleted since they were assigned. Shown so they can be removed:
+  // a key whose assigned accounts are all gone is refused rather than opened up.
+  const missingIds = useMemo(
+    () => (accountsQuery.data ? value.filter((id) => !accounts.some((account) => account.id === id)) : []),
+    [accounts, accountsQuery.data, value],
+  );
+
   const toggle = useCallback(
     (accountId: string) => {
       if (selectedSet.has(accountId)) {
@@ -185,6 +192,8 @@ export function AccountMultiSelect({
         <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-64">
           <div className="px-2 py-1.5">
             <Input
+              name="account-search"
+              aria-label={t("accounts.list.searchPlaceholder")}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder={t("accounts.list.searchPlaceholder")}
@@ -219,14 +228,28 @@ export function AccountMultiSelect({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {selectedAccounts.length > 0 ? (
+      {selectedAccounts.length > 0 || missingIds.length > 0 ? (
         <div className="flex flex-wrap gap-1">
+          {missingIds.map((accountId) => (
+            <Badge key={accountId} variant="outline" className="gap-1 text-xs text-muted-foreground">
+              {t("apiKeys.accountSelect.deleted")}
+              <button
+                type="button"
+                className="ml-0.5 hover:text-foreground"
+                aria-label={t("apiKeys.accountSelect.remove", { name: t("apiKeys.accountSelect.deleted") })}
+                onClick={() => remove(accountId)}
+              >
+                <X className="size-3" />
+              </button>
+            </Badge>
+          ))}
           {selectedAccounts.map((account) => (
             <Badge key={account.id} variant="secondary" className="gap-1 text-xs">
               {account.name}
               <button
                 type="button"
                 className="ml-0.5 hover:text-foreground"
+                aria-label={t("apiKeys.accountSelect.remove", { name: account.name })}
                 onClick={() => remove(account.id)}
               >
                 <X className="size-3" />

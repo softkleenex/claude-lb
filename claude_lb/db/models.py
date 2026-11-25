@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -142,11 +143,80 @@ class ApiKey(Base):
         String(32), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
 
+    allowed_models_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """JSON list of model ids (or family prefixes) this key may call. Null = any model."""
+    enforced_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Every request's ``model`` is rewritten to this. Null = leave the request alone."""
+    assigned_account_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """JSON list of account ids this key may be routed to. Null = the whole pool."""
+
     total_requests: Mapped[int] = mapped_column(BigInteger, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    limit_rules: Mapped[list[ApiKeyLimitRule]] = relationship(
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ApiKeyLimitRule.position",
+    )
+
+    @property
+    def allowed_models(self) -> list[str] | None:
+        return _json_list(self.allowed_models_json)
+
+    @allowed_models.setter
+    def allowed_models(self, value: list[str] | None) -> None:
+        self.allowed_models_json = None if value is None else json.dumps(value)
+
+    @property
+    def assigned_account_ids(self) -> list[str] | None:
+        return _json_list(self.assigned_account_ids_json)
+
+    @assigned_account_ids.setter
+    def assigned_account_ids(self, value: list[str] | None) -> None:
+        self.assigned_account_ids_json = None if value is None else json.dumps(value)
+
+
+def _json_list(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        # Unreadable restriction: fail closed rather than silently opening the key up.
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
+class ApiKeyLimitRule(Base):
+    """One usage limit on an API key. All of a key's rules must pass (AND).
+
+    Counted from request logs over the rule's window, so a window longer than the log
+    retention can only see what is still retained.
+    """
+
+    __tablename__ = "api_key_limit_rules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    api_key_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("api_keys.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    metric: Mapped[str] = mapped_column(String(16))
+    """requests | total_tokens | input_tokens | output_tokens | cost_usd"""
+    window: Mapped[str] = mapped_column(String(16))
+    """5h | 7d (rolling) · daily | weekly | monthly (UTC calendar) · custom (rolling)"""
+    window_seconds: Mapped[int] = mapped_column(Integer)
+    """Length of a rolling window; for calendar windows, informational only."""
+    max_value: Mapped[float] = mapped_column(Float)
+    model_filter: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Only requests for this model (exact id, or a family prefix) count and are limited."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    api_key: Mapped[ApiKey] = relationship(back_populates="limit_rules")
 
 
 class RequestLog(Base):

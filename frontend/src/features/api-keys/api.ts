@@ -2,45 +2,49 @@ import { del, get, patch, post } from "@/lib/api-client";
 
 import {
   ApiKeyCreateRequestSchema,
-  ApiKeyCreateResponseSchema,
+  ApiKeyCreatedSchema,
   ApiKeyListSchema,
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
-  ModelsResponseSchema,
+  CatalogModelListSchema,
+  KeysOverviewSchema,
+  KeyTrendsSchema,
 } from "@/features/api-keys/schemas";
 
-export const API_KEYS_BASE_PATH = "/api/api-keys";
-const MODELS_PATH = "/api/models";
+export const API_KEYS_BASE_PATH = "/api/keys";
+
+function keyPath(keyId: string): string {
+  return `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}`;
+}
 
 export function listApiKeys() {
-  return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema);
+  return get(API_KEYS_BASE_PATH, ApiKeyListSchema);
+}
+
+export function getKeysOverview() {
+  return get(`${API_KEYS_BASE_PATH}/overview`, KeysOverviewSchema);
 }
 
 export function createApiKey(payload: unknown) {
-  const validated = ApiKeyCreateRequestSchema.parse(payload);
-  return post(`${API_KEYS_BASE_PATH}/`, ApiKeyCreateResponseSchema, {
-    body: validated,
-  });
+  return post(API_KEYS_BASE_PATH, ApiKeyCreatedSchema, { body: ApiKeyCreateRequestSchema.parse(payload) });
 }
 
 export function updateApiKey(keyId: string, payload: unknown) {
-  const validated = ApiKeyUpdateRequestSchema.parse(payload);
-  return patch(`${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}`, ApiKeySchema, {
-    body: validated,
-  });
+  return patch(keyPath(keyId), ApiKeySchema, { body: ApiKeyUpdateRequestSchema.parse(payload) });
 }
 
 export function deleteApiKey(keyId: string) {
-  return del(`${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}`);
+  return del(keyPath(keyId));
 }
 
 export function regenerateApiKey(keyId: string) {
-  return post(
-    `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/regenerate`,
-    ApiKeyCreateResponseSchema,
-  );
+  return post(`${keyPath(keyId)}/regenerate`, ApiKeyCreatedSchema);
 }
 
-export function listModels() {
-  return get(MODELS_PATH, ModelsResponseSchema);
+export function getApiKeyTrends(keyId: string, days = 7) {
+  return get(`${keyPath(keyId)}/trends?days=${days}`, KeyTrendsSchema);
+}
+
+export function listCatalogModels() {
+  return get("/api/health/models", CatalogModelListSchema);
 }

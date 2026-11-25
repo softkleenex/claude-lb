@@ -24,7 +24,7 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
 - [x] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
 - [x] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
-- [ ] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
+- [x] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
 - [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
 - [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
 
@@ -441,3 +441,122 @@ horizontal scroll (scrollWidth 390), donut legends readable; no console messages
 - `/api/reports/options` lists all live accounts/keys; `MultiSelectFilter` already shows stale selected values.
 - `DailyTrendChart` takes any `DailyPoint` keys; `ReportChartCard` has `note`, `legend`, `autoHeight`.
 
+
+
+### 2026-11-27 — Step F (API keys page)
+**Done**
+- **Backend** (`modules/api_keys/{api,service,limits}.py`, `db/models.py`, `dependencies.py`, `proxy/{api,service}.py`):
+  - `ApiKey` gained nullable `allowed_models_json`, `enforced_model`, `assigned_account_ids_json` (added to old DBs by
+    the schema reconcile; `allowed_models` / `assigned_account_ids` properties parse them, unreadable JSON fails
+    *closed* as `[]`). New table `api_key_limit_rules` (`metric`, `window`, `window_seconds`, `max_value`,
+    `model_filter`, `position`), `ApiKey.limit_rules` relationship (selectin, delete-orphan, so deleting a key removes
+    its rules on SQLite too).
+  - **Limit rules** (`limits.py`): metrics `requests | total_tokens | input_tokens | output_tokens | cost_usd` (input =
+    input + cache read + cache write, total = input + output — same counting as the original budget); windows `5h`,
+    `7d`, `custom` (rolling, `window_seconds` 60 s … 366 d) and `daily | weekly | monthly` (UTC calendar, week starts
+    Monday). Optional `model_filter` = exact id or family prefix (`claude-sonnet-4-5` matches
+    `claude-sonnet-4-5-20250929`; same matching as the allowlist). Usage is counted from request logs, one SQL query per
+    distinct (window start, model filter). `resets_at`: calendar → next boundary; rolling → oldest counted request +
+    window ("frees up at"), null when nothing is counted. The **original single budget** (`max_*_per_window` +
+    `window_seconds`) is kept and evaluated as up to three `legacy` rules (`id: legacy-<metric>`, window `5h`/`7d` when
+    the seconds match, else `custom`); `PATCH {limits: [...]}` replaces all rules **and clears the legacy fields** (the
+    UI loads legacy rules into the editor, so nothing is lost). CLI `key create` / `setup claude-code` still write the
+    legacy fields.
+  - **Admission** (`service.admit(session, key, model)`): the dependency now peeks the body's `model` (Starlette caches
+    the body). Effective model = enforced model (if the request names a model) else requested; allowlist → 403
+    `permission_error` "this API key is not allowed to use model 'x' (allowed: …)" (requests without a model —
+    `/v1/models`, files — pass); then only the rules whose filter matches the model are checked under the per-key lock;
+    request rules count in-flight slots (slots now remember their model so filtered request rules count only matching
+    in-flight requests), token/cost rules count logged usage only (unchanged trade-off). 429 `rate_limit_error`
+    "limit reached for this key: 40 output tokens per UTC day; usage frees up at …" + `retry-after` seconds.
+    `AuthError` gained `error_type` and `retry_after`; disabled/expired keys keep `authentication_error`.
+  - **Enforced model**: `proxy/api.py::_enforce_model` rewrites `model` in a JSON-object body (content-length is
+    already stripped and recomputed); other bodies are relayed untouched.
+  - **Assigned accounts**: `ProxyService.forward` restricts the candidate pool to the key's assigned accounts before
+    model filtering / sticky / strategy; never spills to the rest; none left (all deleted) → 503 "none of the accounts
+    assigned to this API key exist any more"; all paused/cooling → the usual 503. `pinned_account_id` still works as
+    before (the UI shows a pinned key as assigned to that account and clears the pin when assignments change).
+  - **API**: `GET /api/keys` / `GET /api/keys/{id}` → `ApiKeyOut` + `status` (active/disabled/expired),
+    `allowed_models`, `enforced_model`, `assigned_account_ids`, `limits[]` (`id, source, metric, window,
+    window_seconds, max_value, model_filter, current_value, remaining, used_percent, window_start, resets_at`),
+    `total_tokens`, `lifetime_requests`, `lifetime_cost_usd` (rollups; `total_requests`/`total_cost_usd` stay the key's
+    own counters, which miss seeded/imported history). `POST /api/keys` accepts the new fields + `limits`;
+    `PATCH /api/keys/{id}` accepts a JSON body with any of name / enabled / expires_at (null clears) / allowed_models
+    ([] or null = unrestricted) / enforced_model / assigned_account_ids (unknown id → 422) / pinned_account_id /
+    limits / legacy budget fields — only sent fields change; the legacy `?enabled=` query form still works; empty →
+    422; duplicate name → 409; audited as `api_key.updated` (detail lists the fields) and `api_key.enabled/disabled`.
+    `POST /api/keys/{id}/regenerate` → new secret, same record (`api_key.regenerated` audit). `GET /api/keys/overview`
+    → total/active/disabled/expired/idle (active, no use in 7 d)/used_last_7d, lifetime requests/cost/tokens and
+    `by_key` (rollups, live keys). `GET /api/keys/{id}/trends?days=7` (1–90) → zero-filled daily usage, totals,
+    `by_account` (name, plan, deleted flag) and `by_model`, from `UsageDaily`.
+  - Demo: `support-agent` now has three rules (5h requests, monthly cost, daily Opus output tokens).
+  - Tests: new `tests/test_api_keys.py` (20): management round trips/validation/partial PATCH/legacy query form/
+    regenerate (old secret 401, new 200)/legacy → rules conversion/delete cascade, usage per rule and model filter,
+    trends + overview, **proxy-level**: disallowed model 403 (never reaches upstream), enforced model rewrite,
+    assigned-account routing (only that account's credential is used; paused → 503, no spill), deleted assignment
+    fails closed, multi-rule 429 with `retry-after`, model-filtered rule only limits that model, request rule holds a
+    concurrent burst (2 of 8) and releases every slot; calendar bounds, model matching, corrupt JSON fails closed,
+    and an old-shaped `api_keys` table upgrades and keeps its budget.
+- **Frontend**
+  - `features/api-keys`: `schemas.ts` (claude-lb shapes; cost in USD, no micro-dollars), `api.ts` (`/api/keys*`,
+    catalog from `/api/health/models`), `lib.ts` (labels, `formatLimitValue`, `tightestLimit`, `normalizeRules`,
+    `rulesChanged`, `ruleProblem`, `claudeCodeEnv`), `hooks/use-models.ts`. Components: `api-key-form-dialog.tsx` (one
+    dialog for create and edit: name, expiry presets 1d/7d/30d/90d/1y/custom/none, enabled switch on edit, allowed
+    models multi-select from the catalog **plus free text**, enforced model input with catalog datalist + warning
+    when it is outside the allowlist, assigned accounts multi-select with plan + 5h/7d left chips and a "deleted
+    account" chip for stale ids, limit-rules editor; edit sends only changed fields), `limit-rules-editor.tsx` /
+    `limit-rule-card.tsx` (measure, window, amount, custom hours, model filter), `api-key-created-dialog.tsx` (show
+    once + copy, plus the Claude Code snippet exactly as `claude-lb setup claude-code` prints: `export
+    ANTHROPIC_BASE_URL=<origin>` / `export ANTHROPIC_API_KEY=…` and the `~/.claude/settings.json` `{"env": …}` form;
+    "regenerated" wording variant), `api-keys-overview.tsx` (5 stat cards + cost/token rankings), `expiry-picker`
+    (preset detection fixed to compare calendar days), `account-multi-select`, `model-multi-select`.
+  - `features/apis`: `apis-page.tsx` (master/detail, `?selected=`, regenerate and delete confirmations, created dialog),
+    `api-list(-item).tsx` (search over name/hint/models, status filter, status badge, last used, tightest-limit bar),
+    `api-detail.tsx` (actions Edit / Enable·Disable / Regenerate / Delete; key info; limits; 7-day totals; cost-by-
+    account donut; 7-day token+cost chart with cumulative toggle), `api-key-info.tsx`, `api-key-limits.tsx` (per rule:
+    label, legacy badge, used / max, progress bar, "resets in" for calendar / "frees up in" for rolling windows),
+    `key-status-badge.tsx`, `hooks/use-apis.ts` (30 s refresh; delete drops the key's cached trends first so nothing
+    refetches into a 404).
+  - **Removed** (codex-only / Step A leftovers): create + edit dialogs with `selectedSourceIds`/`clearSourceScope`,
+    reasoning-effort / service-tier / traffic-class / transport-policy / apply-to-codex-model / usage-sections
+    controls, `api-keys-section`, `api-key-table`, auth & quota-privacy toggles, `use-api-keys` hook, `limit-rules-utils`,
+    `features/apis/{api,schemas}.ts`, credits metric, `/api/api-keys/*` + `/api/models` MSW handlers and factories.
+  - **i18n**: all `apiKeys.*` / `apis.*` keys rewritten (en 171, ko 167 — no `_one`); zh-CN keeps 73 translations whose
+    key and placeholders still match; 15 codex-only `common.reasoning/serviceTier/traffic.*` keys removed from all
+    locales.
+  - **MSW**: `apiKeyHandlers` mirror the backend (list/overview/create/get/patch incl. `?enabled=`/delete/regenerate/
+    trends/`/api/health/models`, 409/422/404 like FastAPI); wire factories `createApiKeyWire`, `createLimitUsageWire`,
+    `createDefaultApiKeyWires` (key_1 with allowlist + assigned `acc_max` + 2 rules, key_2 disabled with a legacy
+    budget), `createKeyTrendsWire`, `createKeysOverviewWire`, `createCatalogModelWires`; `setMockApiKeys` /
+    `getMockApiKeys`; coverage test updated.
+  - Tests: `lib.test.ts` 6, `api.test.ts` 5, `api-key-form-dialog.test.tsx` 7, `api-key-created-dialog.test.tsx` 2,
+    `model-multi-select.test.tsx` 2, `apis-page.test.tsx` 9, `__integration__/apis-page-flow.test.tsx` 1 (create →
+    show once → edit through `App`); expiry-picker / account-multi-select tests updated.
+
+**Results**: `pytest` 537 passed (+20); `ruff` clean; `npm test` 70 files / 384 tests pass (the drop from 82/494 is the
+deleted codex api-key tests); `npm run lint` clean; `npm run build` OK. Browser (demo on :2461, Korean UI, dark,
+fresh data dir): overview 5 cards + rankings; created `browser-test` with 7-day expiry, allowed `claude-haiku-5-5`
+(typed, the demo catalog is empty), assigned `prod-us`, rules $5/day + 2 requests/5 h → show-once dialog with env
+snippet, Copy → "복사됨" + toast; detail shows both rules with bars and reset/free-up times, 7-day totals, donut and
+chart. **curl against the demo proxy with that key**: `claude-opus-5-5` → 403 `permission_error`; haiku → 200, 200
+(both `x-claude-lb-account: prod-us`), then 429 `rate_limit_error` "2 requests per rolling 5h; usage frees up at …"
+with `retry-after: 18000`. Edit (rename) sent only `name` (audit `api_key.updated: name`); Regenerate (confirm) →
+new secret dialog, old secret 401, new secret 429 (limits kept); Disable → proxy 403 "API key is disabled"; Delete
+(confirm) → list/selection update. 390 px: page and dialog scrollWidth 390. Console: no errors (one Chrome "form field
+should have an id or name" issue, count 2).
+
+**Known issues**
+- Limits are counted from request logs: a window longer than `request_log_retention_days` (default 30) only sees what
+  is retained — a `monthly` rule with a shorter retention undercounts. Token/cost rules can be overshot by requests in
+  flight (same as the original budget). Enforcement is per process.
+- Allowed models do not filter `GET /v1/models` responses; they only refuse model requests.
+- Calendar windows are UTC (consistent with reports), not the operator's timezone.
+- On mobile the detail panel sits below the list; selecting a key does not scroll to it.
+- Server messages (409 duplicate name, 422) are shown in English. zh-CN lacks most new strings.
+- The demo model catalog is empty, so the model pickers offer free text only there.
+
+**Notes for next agents**
+- Rule evaluation lives in `modules/api_keys/limits.py` (`key_rules`, `measure`, `describe`); reuse `measure()` for
+  any "usage vs limit" display. `service.check_model_allowed` / `effective_model` are the model policy.
+- Frontend: `ApiKeyFormDialog` takes `apiKey: null` for create; `useApiKeys()` mutations invalidate the whole
+  `["api-keys"]` prefix. Wire factories for keys are in `test/mocks/factories.ts` (snake_case).

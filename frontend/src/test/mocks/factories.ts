@@ -1,17 +1,4 @@
 import type { z } from "zod";
-import type { ApiKey, ApiKeyCreateResponse } from "@/features/api-keys/schemas";
-import {
-	ApiKeyCreateResponseSchema,
-	ApiKeySchema,
-} from "@/features/api-keys/schemas";
-import type {
-	ApiKeyTrendsResponse,
-	ApiKeyUsage7DayResponse,
-} from "@/features/apis/schemas";
-import {
-	ApiKeyTrendsResponseSchema,
-	ApiKeyUsage7DayResponseSchema,
-} from "@/features/apis/schemas";
 import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
@@ -26,13 +13,6 @@ import {
 
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
-
-export type {
-	ApiKey,
-	ApiKeyCreateResponse,
-	ApiKeyTrendsResponse,
-	ApiKeyUsage7DayResponse,
-};
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
 
@@ -114,109 +94,6 @@ export function createQuotaPlannerWarmupActionResponse(
 		reason: "synthetic_traffic_disabled",
 		requestId: null,
 		executedAt: null,
-		...overrides,
-	});
-}
-
-export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
-	return ApiKeySchema.parse({
-		id: "key_1",
-		name: "Default key",
-		keyPrefix: "sk-test",
-		allowedModels: ["gpt-5.1"],
-		applyToCodexModel: false,
-		transportPolicyOverride: null,
-		expiresAt: null,
-		isActive: true,
-		accountAssignmentScopeEnabled: false,
-		sourceAssignmentScopeEnabled: false,
-		assignedAccountIds: [],
-		assignedSourceIds: [],
-		createdAt: offsetIso(-60),
-		lastUsedAt: offsetIso(-5),
-		usageSummary: {
-			requestCount: 150,
-			totalTokens: 50_000,
-			cachedInputTokens: 10_000,
-			totalCostUsd: 1.23,
-		},
-		limits: [
-			{
-				id: 1,
-				limitType: "total_tokens",
-				limitWindow: "weekly",
-				maxValue: 1_000_000,
-				currentValue: 125_000,
-				modelFilter: null,
-				resetAt: offsetIso(7 * 24 * 60),
-			},
-		],
-		...overrides,
-	});
-}
-
-export function createApiKeyCreateResponse(
-	overrides: Partial<ApiKeyCreateResponse> = {},
-): ApiKeyCreateResponse {
-	return ApiKeyCreateResponseSchema.parse({
-		...createApiKey(),
-		key: "sk-test-generated-secret",
-		...overrides,
-	});
-}
-
-export function createDefaultApiKeys(): ApiKey[] {
-	return [
-		createApiKey(),
-		createApiKey({
-			id: "key_2",
-			name: "Read only key",
-			keyPrefix: "sk-second",
-			allowedModels: ["gpt-4o-mini"],
-			isActive: false,
-			expiresAt: null,
-			lastUsedAt: null,
-			usageSummary: {
-				requestCount: 42,
-				totalTokens: 12_500,
-				cachedInputTokens: 2_200,
-				totalCostUsd: 0.42,
-			},
-			limits: [],
-		}),
-	];
-}
-
-function createApiKeyTrendPoints(count = 28): Array<{ t: string; v: number }> {
-	return Array.from({ length: count }, (_, i) => ({
-		t: new Date(BASE_TIME.getTime() - (count - i) * 6 * 3600_000).toISOString(),
-		v: 10_000 + Math.round(Math.sin(i) * 5_000),
-	}));
-}
-
-export function createApiKeyTrends(
-	overrides: Partial<ApiKeyTrendsResponse> = {},
-): ApiKeyTrendsResponse {
-	return ApiKeyTrendsResponseSchema.parse({
-		keyId: "key_1",
-		cost: createApiKeyTrendPoints().map((p) => ({
-			...p,
-			v: +(p.v * 0.001).toFixed(4),
-		})),
-		tokens: createApiKeyTrendPoints(),
-		...overrides,
-	});
-}
-
-export function createApiKeyUsage7Day(
-	overrides: Partial<ApiKeyUsage7DayResponse> = {},
-): ApiKeyUsage7DayResponse {
-	return ApiKeyUsage7DayResponseSchema.parse({
-		keyId: "key_1",
-		totalTokens: 280_000,
-		cachedInputTokens: 45_000,
-		totalRequests: 350,
-		totalCostUsd: 2.47,
 		...overrides,
 	});
 }
@@ -1058,4 +935,229 @@ export function createReportOptionsWire() {
 		models: ["claude-opus-5-5", "claude-sonnet-4-5"],
 		user_agents: ["(unknown)", "claude-cli"],
 	};
+}
+
+// ── API keys (claude-lb `/api/keys`, snake_case wire shapes) ──
+
+export type LimitUsageWire = {
+	id: string;
+	source: "rule" | "legacy";
+	metric: "requests" | "total_tokens" | "input_tokens" | "output_tokens" | "cost_usd";
+	window: "5h" | "7d" | "daily" | "weekly" | "monthly" | "custom";
+	window_seconds: number;
+	max_value: number;
+	model_filter: string | null;
+	current_value: number;
+	remaining: number;
+	used_percent: number;
+	window_start: string;
+	resets_at: string | null;
+};
+
+export type ApiKeyWire = {
+	id: string;
+	name: string;
+	key_hint: string;
+	enabled: boolean;
+	status: "active" | "disabled" | "expired";
+	expires_at: string | null;
+	max_requests_per_window: number | null;
+	max_tokens_per_window: number | null;
+	max_cost_usd_per_window: number | null;
+	window_seconds: number;
+	pinned_account_id: string | null;
+	allowed_models: string[] | null;
+	enforced_model: string | null;
+	assigned_account_ids: string[] | null;
+	limits: LimitUsageWire[];
+	total_requests: number;
+	total_cost_usd: number;
+	total_tokens: number;
+	lifetime_requests: number;
+	lifetime_cost_usd: number;
+	last_used_at: string | null;
+	created_at: string;
+};
+
+export const MOCK_WINDOW_SECONDS: Record<LimitUsageWire["window"], number> = {
+	"5h": 18_000,
+	"7d": 604_800,
+	daily: 86_400,
+	weekly: 604_800,
+	monthly: 2_678_400,
+	custom: 3_600,
+};
+
+export function createLimitUsageWire(overrides: Partial<LimitUsageWire> = {}): LimitUsageWire {
+	const base: LimitUsageWire = {
+		id: "rule_1",
+		source: "rule",
+		metric: "cost_usd",
+		window: "daily",
+		window_seconds: 86_400,
+		max_value: 10,
+		model_filter: null,
+		current_value: 2.5,
+		remaining: 7.5,
+		used_percent: 25,
+		window_start: hoursFromNow(-6),
+		resets_at: hoursFromNow(18),
+	};
+	const merged = { ...base, ...overrides };
+	const used = merged.max_value > 0 ? Math.min(100, (merged.current_value / merged.max_value) * 100) : 0;
+	return {
+		...merged,
+		remaining: overrides.remaining ?? Math.max(0, merged.max_value - merged.current_value),
+		used_percent: overrides.used_percent ?? used,
+	};
+}
+
+export function createApiKeyWire(overrides: Partial<ApiKeyWire> = {}): ApiKeyWire {
+	return {
+		id: "key_1",
+		name: "claude-code-team",
+		key_hint: "a1b2c3",
+		enabled: true,
+		status: "active",
+		expires_at: null,
+		max_requests_per_window: null,
+		max_tokens_per_window: null,
+		max_cost_usd_per_window: null,
+		window_seconds: 3600,
+		pinned_account_id: null,
+		allowed_models: ["claude-sonnet-5"],
+		enforced_model: null,
+		assigned_account_ids: ["acc_max"],
+		limits: [
+			createLimitUsageWire(),
+			createLimitUsageWire({
+				id: "rule_2",
+				metric: "requests",
+				window: "5h",
+				window_seconds: 18_000,
+				max_value: 100,
+				current_value: 92,
+				resets_at: hoursFromNow(1.5),
+			}),
+		],
+		total_requests: 150,
+		total_cost_usd: 1.23,
+		total_tokens: 50_000,
+		lifetime_requests: 150,
+		lifetime_cost_usd: 1.23,
+		last_used_at: hoursFromNow(-0.1),
+		created_at: hoursFromNow(-24 * 10),
+		...overrides,
+	};
+}
+
+export function createDefaultApiKeyWires(): ApiKeyWire[] {
+	return [
+		createApiKeyWire(),
+		createApiKeyWire({
+			id: "key_2",
+			name: "ci-review-bot",
+			key_hint: "d4e5f6",
+			enabled: false,
+			status: "disabled",
+			allowed_models: null,
+			assigned_account_ids: null,
+			max_cost_usd_per_window: 25,
+			limits: [
+				createLimitUsageWire({
+					id: "legacy-cost_usd",
+					source: "legacy",
+					metric: "cost_usd",
+					window: "custom",
+					window_seconds: 3600,
+					max_value: 25,
+					current_value: 0,
+					resets_at: null,
+				}),
+			],
+			total_requests: 42,
+			total_cost_usd: 0.42,
+			total_tokens: 12_500,
+			lifetime_requests: 42,
+			lifetime_cost_usd: 0.42,
+			last_used_at: null,
+		}),
+	];
+}
+
+export function createKeyTrendsWire(keyId: string, days = 7) {
+	const today = new Date();
+	const usage = Array.from({ length: days }, (_, i) => {
+		const day = new Date(today.getTime() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10);
+		const requests = 10 + i * 3;
+		return {
+			day,
+			requests,
+			errors: i % 3 === 0 ? 1 : 0,
+			input_tokens: requests * 900,
+			output_tokens: requests * 300,
+			cache_read_input_tokens: requests * 4000,
+			cache_creation_input_tokens: requests * 100,
+			total_tokens: requests * 5300,
+			cost_usd: +(requests * 0.03).toFixed(2),
+		};
+	});
+	const sum = (field: keyof (typeof usage)[number]) =>
+		usage.reduce((total, day) => total + (day[field] as number), 0);
+	return {
+		key_id: keyId,
+		days,
+		usage,
+		totals: {
+			requests: sum("requests"),
+			errors: sum("errors"),
+			input_tokens: sum("input_tokens"),
+			output_tokens: sum("output_tokens"),
+			cache_read_input_tokens: sum("cache_read_input_tokens"),
+			cache_creation_input_tokens: sum("cache_creation_input_tokens"),
+			total_tokens: sum("total_tokens"),
+			cost_usd: +sum("cost_usd").toFixed(2),
+		},
+		by_account: [
+			{ account_id: "acc_max", account_name: "alice-max", plan_type: "max_5x", deleted: false, requests: 80, total_tokens: 400_000, cost_usd: 3.1 },
+			{ account_id: "acc_gone", account_name: null, plan_type: null, deleted: true, requests: 9, total_tokens: 20_000, cost_usd: 0.4 },
+		],
+		by_model: [{ model: "claude-sonnet-5", requests: 89, total_tokens: 420_000, cost_usd: 3.5 }],
+	};
+}
+
+export function createKeysOverviewWire(keys: ApiKeyWire[]) {
+	const statuses = keys.map((key) => key.status);
+	return {
+		total: keys.length,
+		active: statuses.filter((s) => s === "active").length,
+		disabled: statuses.filter((s) => s === "disabled").length,
+		expired: statuses.filter((s) => s === "expired").length,
+		idle: keys.filter((key) => key.status === "active" && key.last_used_at === null).length,
+		used_last_7d: keys.filter((key) => key.last_used_at !== null).length,
+		lifetime_requests: keys.reduce((sum, key) => sum + key.lifetime_requests, 0),
+		lifetime_cost_usd: keys.reduce((sum, key) => sum + key.lifetime_cost_usd, 0),
+		lifetime_tokens: keys.reduce((sum, key) => sum + key.total_tokens, 0),
+		by_key: keys
+			.map((key) => ({
+				id: key.id,
+				name: key.name,
+				key_hint: key.key_hint,
+				requests: key.lifetime_requests,
+				total_tokens: key.total_tokens,
+				cost_usd: key.lifetime_cost_usd,
+			}))
+			.sort((a, b) => b.cost_usd - a.cost_usd),
+	};
+}
+
+export function createCatalogModelWires() {
+	return ["claude-haiku-5", "claude-opus-5", "claude-sonnet-5"].map((model_id) => ({
+		model_id,
+		display_name: model_id,
+		accounts: 2,
+		max_input_tokens: 200_000,
+		max_output_tokens: 64_000,
+		synced_at: hoursFromNow(-1),
+	}));
 }

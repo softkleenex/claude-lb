@@ -7,10 +7,10 @@ import { formatCurrency } from "@/utils/formatters";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { useThemeStore } from "@/hooks/use-theme";
-import type { ApiKeyAccountCost } from "@/features/apis/schemas";
+import type { KeyAccountCost } from "@/features/api-keys/schemas";
 
 export type AccountCostDonutProps = {
-  accountCosts: ApiKeyAccountCost[];
+  accountCosts: KeyAccountCost[];
   totalCostUsd: number;
 };
 
@@ -46,13 +46,18 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
 		const palette = buildDonutPalette(visibleCosts.length, isDark);
 
 		const items = visibleCosts.map((ac, i) => {
-			const isDeleted = ac.isDeleted;
+			const isDeleted = ac.deleted;
+			const isUnattributed = ac.accountId === null;
 			return {
-				id: isDeleted ? "__deleted__" : (ac.accountId ?? `__unknown_${i}__`),
-				label: isDeleted ? t("apis.accountCost.deletedAccount") : (ac.email ?? t("apis.accountCost.unknownAccount")),
-				isDeleted,
+				id: ac.accountId ?? `__unattributed_${i}__`,
+				label: isDeleted
+					? t("apis.accountCost.deletedAccount")
+					: isUnattributed
+						? t("apis.accountCost.noAccount")
+						: (ac.accountName ?? t("apis.accountCost.deletedAccount")),
+				isDeleted: isDeleted || isUnattributed,
 				value: ac.costUsd,
-				color: isDeleted ? consumedColor : palette[i % palette.length],
+				color: isDeleted || isUnattributed ? consumedColor : palette[i % palette.length],
 			};
 		});
 

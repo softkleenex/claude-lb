@@ -47,7 +47,21 @@ KEYS = [
     # name, budget kwargs
     ("claude-code-team", {}),
     ("ci-review-bot", {"max_cost_usd_per_window": 25.0, "window_seconds": 3600}),
-    ("support-agent", {"max_requests_per_window": 5000, "window_seconds": 3600}),
+    (
+        "support-agent",
+        {
+            "limits": [
+                {"metric": "requests", "window": "5h", "max_value": 5000},
+                {"metric": "cost_usd", "window": "monthly", "max_value": 250.0},
+                {
+                    "metric": "output_tokens",
+                    "window": "daily",
+                    "max_value": 2_000_000,
+                    "model_filter": "claude-opus-5-5",
+                },
+            ]
+        },
+    ),
 ]
 
 USER_AGENTS = ["claude-cli/2.1.3 (external, cli)", "anthropic-python/0.72.0", "ci-review-bot/1.4"]
@@ -228,7 +242,7 @@ async def seed(port: int) -> list[str]:
     from claude_lb.core.pricing import estimate_cost_usd
     from claude_lb.db.models import Account, RequestLog, UsageDaily
     from claude_lb.db.session import session_scope
-    from claude_lb.modules.api_keys.service import create_api_key
+    from claude_lb.modules.api_keys.service import LimitRuleInput, create_api_key
     from claude_lb.modules.usage import rollup
 
     rng = random.Random(7)
@@ -261,7 +275,9 @@ async def seed(port: int) -> list[str]:
             await session.flush()
             account_ids.append(account.id)
         for name, limits in KEYS:
-            issued = await create_api_key(session, name=name, **limits)
+            rules = [LimitRuleInput(**rule) for rule in limits.get("limits", [])]
+            budget = {k: v for k, v in limits.items() if k != "limits"}
+            issued = await create_api_key(session, name=name, limits=rules, **budget)
             key_ids.append(issued.record.id)
             plaintext_keys.append(issued.plaintext)
 

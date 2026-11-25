@@ -13,13 +13,9 @@ import {
 } from "@/components/ui/select";
 import { ApiListItem } from "@/features/apis/components/api-list-item";
 import type { ApiKey } from "@/features/api-keys/schemas";
+import { useNow } from "@/features/accounts/lib/time";
 
 const STATUS_FILTER_OPTIONS = ["all", "active", "disabled", "expired"] as const;
-const STATUS_FILTER_LABEL_KEYS = {
-  active: "common.states.active",
-  disabled: "common.states.disabled",
-  expired: "common.states.expired",
-} as const;
 
 export type ApiListProps = {
   apiKeys: ApiKey[];
@@ -28,33 +24,22 @@ export type ApiListProps = {
   onOpenCreate: () => void;
 };
 
-function isExpired(apiKey: ApiKey): boolean {
-  if (!apiKey.expiresAt) return false;
-  return new Date(apiKey.expiresAt).getTime() < Date.now();
-}
-
-function matchStatus(apiKey: ApiKey, filter: string): boolean {
-  if (filter === "all") return true;
-  const expired = isExpired(apiKey);
-  if (filter === "active") return apiKey.isActive && !expired;
-  if (filter === "disabled") return !apiKey.isActive;
-  if (filter === "expired") return expired;
-  return true;
-}
 
 export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiListProps) {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const now = useNow();
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return apiKeys.filter((apiKey) => {
-      if (!matchStatus(apiKey, statusFilter)) return false;
+      if (statusFilter !== "all" && apiKey.status !== statusFilter) return false;
       if (!needle) return true;
       return (
         apiKey.name.toLowerCase().includes(needle) ||
-        apiKey.keyPrefix.toLowerCase().includes(needle)
+        apiKey.keyHint.toLowerCase().includes(needle) ||
+        (apiKey.allowedModels ?? []).some((model) => model.toLowerCase().includes(needle))
       );
     });
   }, [apiKeys, search, statusFilter]);
@@ -65,6 +50,8 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
+            name="api-key-search"
+            aria-label={t("apis.list.searchPlaceholder")}
             placeholder={t("apis.list.searchPlaceholder")}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -72,13 +59,13 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
           />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger size="sm" className="w-32 shrink-0">
-            <SelectValue placeholder={t("accounts.list.statusPlaceholder")} />
+          <SelectTrigger size="sm" className="w-32 shrink-0" aria-label={t("apis.list.statusFilter")}>
+            <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {STATUS_FILTER_OPTIONS.map((option) => (
               <SelectItem key={option} value={option}>
-                {option === "all" ? t("accounts.list.allStatuses") : t(STATUS_FILTER_LABEL_KEYS[option])}
+                {option === "all" ? t("apis.list.allStatuses") : t(`apiKeys.status.${option}`)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -106,6 +93,7 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
               key={apiKey.id}
               apiKey={apiKey}
               selected={apiKey.id === selectedKeyId}
+              now={now}
               onSelect={onSelect}
             />
           ))

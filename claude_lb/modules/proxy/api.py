@@ -6,6 +6,7 @@ existing ``/v1/...`` paths keep working.
 
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi import APIRouter, Request, Response
@@ -32,6 +33,24 @@ router = APIRouter(tags=["proxy"])
 # disables the account that received it, so relaying it let any client switch off the
 # pool one account at a time.
 PROXIED_PREFIXES = ("/v1/messages", "/v1/models", "/v1/complete", "/v1/files")
+
+
+def _enforce_model(body: bytes, model: str) -> bytes:
+    """Rewrite the request's ``model`` to the key's enforced model.
+
+    Only a JSON object that already names a model is touched; anything else is relayed
+    as sent, exactly like a key without an enforced model.
+    """
+    try:
+        payload = json.loads(body) if body else None
+    except (ValueError, UnicodeDecodeError):
+        return body
+    if not isinstance(payload, dict) or not isinstance(payload.get("model"), str):
+        return body
+    if payload["model"] == model:
+        return body
+    payload["model"] = model
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def _is_proxied(path: str) -> bool:
@@ -79,6 +98,8 @@ async def _proxy(
 
     api_key = admission.key if admission else None
     body = await request.body()
+    if api_key is not None and api_key.enforced_model:
+        body = _enforce_model(body, api_key.enforced_model)
     started_at = time.perf_counter()
     api_key_id = api_key.id if api_key else None
     model, _ = proxy_service._peek_request(body)  # noqa: SLF001 - same package

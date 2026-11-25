@@ -5,85 +5,76 @@ import { toast } from "sonner";
 import {
   createApiKey,
   deleteApiKey,
+  getApiKeyTrends,
+  getKeysOverview,
   listApiKeys,
   regenerateApiKey,
   updateApiKey,
 } from "@/features/api-keys/api";
-import type {
-  ApiKeyCreateRequest,
-  ApiKeyUpdateRequest,
-} from "@/features/api-keys/schemas";
-import { getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
+import type { ApiKey, ApiKeyCreateRequest, ApiKeyUpdateRequest } from "@/features/api-keys/schemas";
+
+const REFRESH = { refetchInterval: 30_000, refetchIntervalInBackground: false } as const;
 
 export function useApiKeys() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
-    queryKey: ["api-keys", "list"],
-    queryFn: listApiKeys,
-    select: (data) => data,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-  });
-  const apiKeysQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
+  const apiKeysQuery = useQuery({ queryKey: ["api-keys", "list"], queryFn: listApiKeys, ...REFRESH });
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+  };
+  const fail = (fallback: string) => (error: Error) => {
+    toast.error(error.message || t(fallback));
+  };
 
   const createMutation = useMutation({
     mutationFn: (payload: ApiKeyCreateRequest) => createApiKey(payload),
     onSuccess: () => {
       toast.success(t("apiKeys.toasts.created"));
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      invalidate();
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t("apiKeys.toasts.createFailed"));
-    },
+    onError: fail("apiKeys.toasts.createFailed"),
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ keyId, payload }: { keyId: string; payload: ApiKeyUpdateRequest }) =>
-      updateApiKey(keyId, payload),
+    mutationFn: ({ keyId, payload }: { keyId: string; payload: ApiKeyUpdateRequest }) => updateApiKey(keyId, payload),
     onSuccess: () => {
       toast.success(t("apiKeys.toasts.updated"));
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      invalidate();
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t("apiKeys.toasts.updateFailed"));
-    },
+    onError: fail("apiKeys.toasts.updateFailed"),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (keyId: string) => deleteApiKey(keyId),
-    onSuccess: () => {
+    onSuccess: (_, keyId) => {
       toast.success(t("apiKeys.toasts.deleted"));
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      // Drop the deleted key first, or its still-mounted trends query refetches into a 404.
+      queryClient.setQueryData<ApiKey[]>(["api-keys", "list"], (keys) => keys?.filter((key) => key.id !== keyId));
+      queryClient.removeQueries({ queryKey: ["api-keys", "trends", keyId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["api-keys"],
+        predicate: (query) => !(query.queryKey[1] === "trends" && query.queryKey[2] === keyId),
+      });
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t("apiKeys.toasts.deleteFailed"));
-    },
+    onError: fail("apiKeys.toasts.deleteFailed"),
   });
 
   const regenerateMutation = useMutation({
     mutationFn: (keyId: string) => regenerateApiKey(keyId),
     onSuccess: () => {
       toast.success(t("apiKeys.toasts.regenerated"));
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      invalidate();
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t("apiKeys.toasts.regenerateFailed"));
-    },
+    onError: fail("apiKeys.toasts.regenerateFailed"),
   });
 
-  return {
-    apiKeysQuery,
-    createMutation,
-    updateMutation,
-    deleteMutation,
-    regenerateMutation,
-  };
+  return { apiKeysQuery, createMutation, updateMutation, deleteMutation, regenerateMutation };
+}
+
+export function useKeysOverview() {
+  return useQuery({ queryKey: ["api-keys", "overview"], queryFn: getKeysOverview, ...REFRESH });
 }
 
 export function useApiKeyTrends(keyId: string | null) {
@@ -91,18 +82,7 @@ export function useApiKeyTrends(keyId: string | null) {
     queryKey: ["api-keys", "trends", keyId],
     queryFn: () => getApiKeyTrends(keyId!),
     enabled: !!keyId,
-    staleTime: 5 * 60_000,
-    refetchInterval: 5 * 60_000,
-    refetchIntervalInBackground: false,
-  });
-}
-
-export function useApiKeyUsage7Day(keyId: string | null) {
-  return useQuery({
-    queryKey: ["api-keys", "usage-7d", keyId],
-    queryFn: () => getApiKeyUsage7Day(keyId!),
-    enabled: !!keyId,
-    staleTime: 2 * 60_000,
+    staleTime: 60_000,
     refetchInterval: 2 * 60_000,
     refetchIntervalInBackground: false,
   });

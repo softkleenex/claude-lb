@@ -12,36 +12,27 @@ import {
 
 import { useChartColors } from "@/hooks/use-chart-colors";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
-import type { ApiKeyTrendPoint } from "@/features/apis/schemas";
-import { formatChartDateTime, formatCompactNumber, formatCurrency } from "@/utils/formatters";
+import type { KeyTrendDay } from "@/features/api-keys/schemas";
+import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
 
-type MergedPoint = {
+type ChartPoint = {
   t: string;
   cost: number;
   tokens: number;
 };
 
-function mergePoints(
-  cost: ApiKeyTrendPoint[],
-  tokens: ApiKeyTrendPoint[],
-): MergedPoint[] {
-  const costMap = new Map(cost.map((p) => [p.t, p.v]));
-  const tokensMap = new Map(tokens.map((p) => [p.t, p.v]));
-
-  const allTimes = new Set([...costMap.keys(), ...tokensMap.keys()]);
-  if (allTimes.size === 0) return [];
-
-  return Array.from(allTimes)
-    .sort()
-    .map((t) => ({
-      t,
-      cost: costMap.get(t) ?? 0,
-      tokens: tokensMap.get(t) ?? 0,
-    }));
+function toPoints(usage: KeyTrendDay[], accumulated: boolean): ChartPoint[] {
+  let cost = 0;
+  let tokens = 0;
+  return usage.map((day) => {
+    cost = accumulated ? cost + day.costUsd : day.costUsd;
+    tokens = accumulated ? tokens + day.totalTokens : day.totalTokens;
+    return { t: day.day, cost, tokens };
+  });
 }
 
-function formatXTick(isoStr: string): string {
-  return isoStr.slice(5, 10);
+function formatXTick(day: string): string {
+  return day.slice(5);
 }
 
 function formatCostTick(value: number): string {
@@ -58,9 +49,9 @@ function formatTokenTick(value: number): string {
   return String(value);
 }
 
-const SERIES_META: Record<string, { label: string; formatter: (v: number) => string }> = {
-  cost: { label: "Cost", formatter: formatCurrency },
-  tokens: { label: "Tokens", formatter: (v) => formatCompactNumber(v) },
+const SERIES_META: Record<string, { formatter: (v: number) => string }> = {
+  cost: { formatter: formatCurrency },
+  tokens: { formatter: (v) => formatCompactNumber(v) },
 };
 
 type ChartTooltipPayloadEntry = {
@@ -78,7 +69,7 @@ type ChartTooltipProps = {
 function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
   const { t } = useTranslation();
   if (!active || !payload?.length) return null;
-  const heading = formatChartDateTime(label as string);
+  const heading = label ?? "";
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md">
       <p className="mb-1 text-[11px] text-muted-foreground">{heading}</p>
@@ -90,7 +81,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
               className="inline-block h-2 w-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
-            <span className="text-muted-foreground">{meta ? t(`apis.trend.series.${entry.dataKey}`, { defaultValue: meta.label }) : ""}</span>
+            <span className="text-muted-foreground">{meta ? t(`apis.trend.${entry.dataKey}`) : ""}</span>
             <span className="ml-auto tabular-nums font-medium">
               {meta?.formatter(entry.value ?? 0)}
             </span>
@@ -104,25 +95,25 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
 const CHART_MARGIN = { top: 4, right: 8, bottom: 0, left: 0 } as const;
 
 export type ApiTrendChartProps = {
-  cost: ApiKeyTrendPoint[];
-  tokens: ApiKeyTrendPoint[];
+  usage: KeyTrendDay[];
+  accumulated?: boolean;
 };
 
-export function ApiTrendChart({ cost, tokens }: ApiTrendChartProps) {
+export function ApiTrendChart({ usage, accumulated = false }: ApiTrendChartProps) {
   const { t } = useTranslation();
   const chartColors = useChartColors();
   const reducedMotion = useReducedMotion();
   const c1 = chartColors[0];
   const c2 = chartColors[1];
-  const data = useMemo(() => mergePoints(cost, tokens), [cost, tokens]);
+  const data = useMemo(() => toPoints(usage, accumulated), [usage, accumulated]);
 
   const maxTokens = useMemo(() => Math.max(...data.map((d) => d.tokens), 1), [data]);
   const maxCost = useMemo(() => Math.max(...data.map((d) => d.cost), 0.01), [data]);
 
-  if (data.length === 0) {
+  if (data.every((point) => point.cost === 0 && point.tokens === 0)) {
     return (
       <div className="flex h-[280px] items-center justify-center text-xs text-muted-foreground">
-        {t("accounts.trend.empty")}
+        {t("apis.trend.empty")}
       </div>
     );
   }
@@ -150,7 +141,7 @@ export function ApiTrendChart({ cost, tokens }: ApiTrendChartProps) {
           tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           tickLine={false}
           axisLine={false}
-          minTickGap={50}
+          minTickGap={20}
           dy={4}
         />
         <YAxis
