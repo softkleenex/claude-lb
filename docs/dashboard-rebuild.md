@@ -26,6 +26,8 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
 - [x] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
 - [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
+  - [x] G1. conversations, audit log page, model catalog page, sticky sessions browser
+  - [ ] G2. firewall, guest role, automations
 - [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
 
 ## Log
@@ -560,3 +562,106 @@ should have an id or name" issue, count 2).
   any "usage vs limit" display. `service.check_model_allowed` / `effective_model` are the model policy.
 - Frontend: `ApiKeyFormDialog` takes `apiKey: null` for create; `useApiKeys()` mutations invalidate the whole
   `["api-keys"]` prefix. Wire factories for keys are in `test/mocks/factories.ts` (snake_case).
+
+
+### 2026-11-27 — Step G1 (conversations, audit log, model catalog, sticky sessions)
+**Done**
+- **Backend**
+  - Conversations (`modules/request_logs/conversations.py`, routes in `request_logs/api.py` as `conversations_router`):
+    **`GET /api/conversations?limit&offset&search&timeframe|since`** groups request logs by `session_key` (rows without
+    one are skipped) → `{conversations[{session_key, first_at, last_at, duration_ms, requests, errors (= not "ok"),
+    input/output/cache read/cache write/total tokens, cost_usd, accounts[{id,name}], api_keys[{id,name}], models[]}],
+    total, limit, offset, has_more}`; newest activity first; aggregates cover the window only; facets are ranked by
+    request count and computed for the page's keys only (one extra grouped query). Search = a conversation with *any*
+    request whose key/model/UA/IP/account name/key name matches (escaped LIKE, subquery). **`GET
+    /api/conversations/{key}`** (whole retained conversation) → summary + `busy_ms` (sum of durations), `accounts`
+    (with plan + requests), `api_keys`, `dominant_user_agent` and `_family` (`usage.reports.user_agent_family`),
+    per-model stats, `timeline` (≤ 200 `RequestLogItem`s, newest first, `timeline_truncated`); 404 when unknown.
+  - Audit: **`GET /api/audit/events?limit&offset&action*&target&search&timeframe|since&until&ok`** →
+    `{events, total, limit, offset, has_more}` (target = substring, search over action/target/detail/IP/actor, both
+    escaped LIKE); **`GET /api/audit/actions`** → `[{action, count}]`. `GET /api/audit` (plain list) is kept for the
+    legacy page/scripts. Health probe/model-sync audits now carry the client IP.
+  - Model catalog page: **`GET /api/health/catalog`** → `models[{model_id, display_name, accounts[{id,name}],
+    max_input_tokens, max_output_tokens, synced_at, price, price_key}]` (price = the `pricing.PRICES` entry the id
+    resolves to by the same longest-prefix rule, per MTok: input/output/cache_read/cache_write_5m/cache_write_1h +
+    long-context tier), `prices` (the whole built-in table), `blocks` (active runtime refusals from
+    `Account.model_blocks_json`: account, plan, model, until), `accounts` (models synced per account,
+    `models_synced_at`, enabled/paused), `last_synced_at`. `/api/health/models`, `/sync-models`, `/probe` unchanged.
+  - Sticky sessions (`modules/sticky_sessions/api.py`, helpers `entries/forget_many/forget_account/purge_expired/
+    capacity` in `proxy/sticky.py`): **`GET /api/sticky-sessions?account_id&include_expired&search&limit&offset`** →
+    entries (key, account id/name, wall-clock `expires_at` derived from the monotonic expiry, `remaining_seconds`,
+    `expired`), most recently used first, plus `size`, `expired_count`, `capacity` (10 000), `enabled`, `ttl_seconds`,
+    `by_account` counts. `POST /delete {keys}`, `POST /delete-account {account_id}`, `POST /purge` (expired only) →
+    `{deleted_count}`; `DELETE /{key}` → 204/404. All audited (`sticky.deleted`, `sticky.account_cleared`,
+    `sticky.purged`). Management-guarded like every other router (admin only; guest role arrives in G2).
+  - **Bug fix (demo)**: the fake upstream was appended *after* the dashboard's SPA fallback, so its `GET
+    /__demo-upstream/v1/models` returned the dashboard HTML — model sync/probe in the demo always found 0 models (why the
+    Step F demo catalog was empty). New `demo.mount_fake_upstream(app)` puts its routes first (+ regression test).
+  - Tests: new `tests/test_dashboard_extras.py` (6: conversations list/facets/paging/search/escaping/422, detail,
+    audit filters/paging/actions/legacy list, catalog prices/blocks/accounts, sticky list/filter/delete/purge/audit,
+    401 guard) + 1 demo regression test.
+- **Frontend**
+  - Dashboard request-log section: **Requests / Conversations** tab switch (`?view=conversations`, own URL params
+    `convSearch`, `convTimeframe` (default all), `convLimit`, `convOffset`). `ConversationsView` (debounced search,
+    timeframe, table: last request, duration, short key `xxxxxxxx…xxxx`, accounts / API keys / models with "+N more",
+    requests (+errors), tokens (+cached), cost; pagination). **Row click → request log filtered by that conversation**
+    (reuses Step D `?session=`, drops `view`); "Details" → `ConversationDetailsDialog` (copyable key, start/last/duration,
+    requests/errors, time in requests, cost, accounts, keys, main user agent, by-model table, request timeline, "Show
+    these requests in the log"). Column chooser is hidden in the conversations view.
+  - New pages under **Advanced** (desktop dropdown + mobile sheet; `ADVANCED_NAV_ITEMS`), lazy routes in `App.tsx`:
+    - `/audit` (`features/audit`): search, timeframe, action multi-select (translated labels + counts), target, result
+      (all/succeeded/failed), reset, all in the URL; table time / action (label + raw code + area dot) / target / detail /
+      client IP / result; pagination. `action-labels.ts` lists every action the backend records (27) with en+ko labels
+      (a test enforces both); unknown actions show their code.
+    - `/models` (`features/model-catalog`): "Sync from upstream" and "Probe unhealthy accounts" with inline result cards
+      (per-account models / pass-fail with HTTP status), summary (model count, last sync, per-account chips), **runtime
+      refusals** ("claude-pro refuses claude-opus-5-5 — routed elsewhere until … (Nh left)", "Try again" →
+      `DELETE /api/accounts/{id}/model-blocks?model=`), searchable model table (served by, context window, max output,
+      price in/out + cache read/write + long-context tier, synced), collapsible built-in price table.
+    - `/sticky-sessions` (`features/sticky-sessions`, codex code replaced): status card (on/off, TTL, size/capacity,
+      expired, **in-memory/per-process note**), account filter (all live accounts with counts), key search, show-expired
+      switch, row checkboxes + select-all on page, "Delete selected (N)", "Delete all for <account>", "Purge expired (N)",
+      per-row delete — all behind confirm dialogs; "Requests" link → `/dashboard?session=<key>`; pagination; 15 s refresh.
+  - Shared `components/search-input.tsx` (debounced text filter). `shortConversationKey` / `formatConversationDuration`
+    in `features/dashboard/utils.ts`.
+  - i18n: en +218 / ko +196 keys (`audit.*`, `models.*`, `stickySessions.*`, `dashboard.conversations.*`,
+    `dashboard.requests.view*`, `nav.audit/models/stickySessions`); 47 codex `stickySessions.*` keys removed from all
+    three locales. zh-CN falls back to English for all of these.
+  - MSW: handlers for conversations (derived from the mock request logs, mirroring the backend grouping), conversation
+    detail, audit events/actions, health catalog/sync/probe, sticky list/delete/delete-account/purge/delete-one; wire
+    factories `createAuditEventWire`/`createDefaultAuditEventWires`, `createCatalogWire`, `createStickyEntryWire`/
+    `createDefaultStickyEntryWires`; helpers `setMockStickyEntries`/`getMockStickyEntries`, `setMockAuditEvents`,
+    `setMockCatalog`. Old codex sticky handlers removed; coverage test updated.
+  - Tests: `conversations-view.test.tsx` 6, `audit-page.test.tsx` 7, `model-catalog-page.test.tsx` 6,
+    `sticky-sessions-page.test.tsx` 7, `__integration__/advanced-pages-flow.test.tsx` 4, header +2.
+
+**Results**: `pytest` 544 passed (+7); `ruff check` clean; `npm test` 72 files / 402 tests pass; `npm run lint` clean;
+`npm run build` OK (lazy chunks: audit 9 kB, sticky 12 kB, model catalog 18 kB). Browser (demo on :2461, Korean UI):
+conversations tab → 67 conversations with accounts/keys/models "+N more", details dialog (by-model + timeline, main
+UA `anthropic-python`), "요청 로그에서 이 요청들 보기" → `?session=…` with exactly that conversation's 3 rows; model
+sync → 3 models × 4 accounts with prices + long-context tier; a refusal seeded in the demo DB shown and cleared by
+"다시 시도" (audited `account.model_blocks_cleared`); probe → "점검할 비정상 계정이 없습니다"; audit page in dark mode with
+translated labels; sticky: select 2 → confirm → "세션 고정 2개를 삭제했습니다", account filter → delete all for
+claude-max-5x (confirm showed the count); 390 px: `/dashboard?view=conversations`, `/audit`, `/models`,
+`/sticky-sessions` all scrollWidth 390 (tables scroll inside their cards), mobile sheet lists the three Advanced pages;
+no console messages.
+
+**Known issues**
+- Conversation aggregates are retention-bounded (request logs) and the list's window aggregates only that window;
+  detail always covers every retained request of the key.
+- Sticky map is per process: with several workers the page shows only the worker that served the request (UI says so).
+  Remaining time is a snapshot refreshed every 15 s.
+- Demo seed rows use `ddd…dXX` session keys (only 60 distinct, shared across days), so seeded "conversations" span
+  ~20 h; real keys are SHA-256.
+- Audit `detail` strings come from the backend in English (e.g. "4 account(s)").
+- `claude-lb demo` leaves its `claude-lb-demo-*` temp dir behind on exit (pre-existing; many exist in `$TMPDIR`).
+- zh-CN lacks all G1 strings.
+
+**Notes for G2**
+- Advanced nav: add firewall/automations entries to `ADVANCED_NAV_ITEMS` in `components/layout/app-header.tsx` and lazy
+  routes in `App.tsx`; `__integration__/advanced-pages-flow.test.tsx` and `app-header.test.tsx` list the expected items.
+- Guest role: every G1 endpoint is behind `require_management_auth` (router-level in `main.py`); write endpoints are
+  `POST/DELETE /api/sticky-sessions*`, `POST /api/health/{sync-models,probe}`, `DELETE /api/accounts/{id}/model-blocks`.
+  The pages already disable write buttons when `useAuthStore().canWrite` is false.
+- New audit actions need a label in `features/audit/action-labels.ts` + `audit.action.<action>` in en/ko (a test checks).
+- `features/firewall` and `features/quota-planner` are still codex-lb leftovers with legacy MSW handlers.

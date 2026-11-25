@@ -14,7 +14,7 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 // Route-level code splitting: only the visited page's chunk loads, instead
-// of one entry bundle carrying all six pages' code.
+// of one entry bundle carrying every page's code.
 const DashboardPage = lazy(() =>
   import("@/features/dashboard/components/dashboard-page").then((m) => ({ default: m.DashboardPage })),
 );
@@ -25,6 +25,15 @@ const AccountsPage = lazy(() =>
   import("@/features/accounts/components/accounts-page").then((m) => ({ default: m.AccountsPage })),
 );
 const ApisPage = lazy(() => import("@/features/apis/components/apis-page").then((m) => ({ default: m.ApisPage })));
+const AuditPage = lazy(() => import("@/features/audit/components/audit-page").then((m) => ({ default: m.AuditPage })));
+const ModelCatalogPage = lazy(() =>
+  import("@/features/model-catalog/components/model-catalog-page").then((m) => ({ default: m.ModelCatalogPage })),
+);
+const StickySessionsPage = lazy(() =>
+  import("@/features/sticky-sessions/components/sticky-sessions-page").then((m) => ({
+    default: m.StickySessionsPage,
+  })),
+);
 const SettingsPage = lazy(() =>
   import("@/features/settings/components/settings-page").then((m) => ({ default: m.SettingsPage })),
 );
@@ -73,6 +82,9 @@ export default function App() {
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/audit" element={<AuditPage />} />
+            <Route path="/models" element={<ModelCatalogPage />} />
+            <Route path="/sticky-sessions" element={<StickySessionsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Route>
         </Routes>

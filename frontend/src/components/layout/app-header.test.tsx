@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter } from "react-router-dom";
@@ -26,7 +26,7 @@ function renderHeader(props: Partial<Parameters<typeof AppHeader>[0]> = {}) {
 }
 
 describe("AppHeader", () => {
-  it("renders the five core destinations and no empty Advanced menu", async () => {
+  it("renders the five core destinations and the Advanced menu", async () => {
     renderHeader();
 
     expect(await screen.findByRole("link", { name: /Dashboard/i })).toBeInTheDocument();
@@ -34,15 +34,34 @@ describe("AppHeader", () => {
     expect(screen.getByRole("link", { name: /Accounts/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /APIs/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Settings/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Advanced" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Advanced" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
+  });
+
+  it("lists the audit log, model catalog and sticky sessions under Advanced", async () => {
+    const user = userEvent.setup();
+    renderHeader();
+
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(await screen.findByRole("menuitem", { name: "Audit log" })).toHaveAttribute("href", "/audit");
+    expect(screen.getByRole("menuitem", { name: "Model catalog" })).toHaveAttribute("href", "/models");
+    expect(screen.getByRole("menuitem", { name: "Sticky sessions" })).toHaveAttribute("href", "/sticky-sessions");
+  });
+
+  it("shows the Advanced pages in the mobile menu", async () => {
+    const user = userEvent.setup();
+    renderHeader();
+
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/audit");
+    expect(within(dialog).getByRole("link", { name: "Model catalog" })).toHaveAttribute("href", "/models");
+    expect(within(dialog).getByRole("link", { name: "Sticky sessions" })).toHaveAttribute("href", "/sticky-sessions");
   });
 
   it("badges Accounts with the number of available accounts", async () => {
     server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json([account("a", true), account("b", true), account("c", false)]),
-      ),
+      http.get("/api/accounts", () => HttpResponse.json([account("a", true), account("b", true), account("c", false)])),
     );
 
     renderHeader();

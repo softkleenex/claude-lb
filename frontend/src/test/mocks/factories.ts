@@ -1161,3 +1161,186 @@ export function createCatalogModelWires() {
 		synced_at: hoursFromNow(-1),
 	}));
 }
+
+// ── Audit log (claude-lb `/api/audit/events`, `/api/audit/actions`) ──
+
+export type AuditEventWire = {
+	id: string;
+	created_at: string;
+	action: string;
+	target: string;
+	detail: string;
+	actor: string;
+	client_ip: string;
+	ok: boolean;
+};
+
+export function createAuditEventWire(overrides: Partial<AuditEventWire> = {}): AuditEventWire {
+	return {
+		id: "evt_0001",
+		created_at: hoursFromNow(-1).replace("Z", ""),
+		action: "account.created",
+		target: "alice-max",
+		detail: "provider=oauth plan=max_5x",
+		actor: "dashboard",
+		client_ip: "127.0.0.1",
+		ok: true,
+		...overrides,
+	};
+}
+
+/** Newest first, like the backend. */
+export function createDefaultAuditEventWires(): AuditEventWire[] {
+	return [
+		createAuditEventWire({
+			id: "evt_0004",
+			created_at: hoursFromNow(-0.1).replace("Z", ""),
+			action: "auth.login",
+			target: "",
+			detail: "invalid password",
+			client_ip: "203.0.113.9",
+			ok: false,
+		}),
+		createAuditEventWire({
+			id: "evt_0003",
+			created_at: hoursFromNow(-0.5).replace("Z", ""),
+			action: "settings.updated",
+			target: "",
+			detail: "routing_strategy",
+		}),
+		createAuditEventWire({
+			id: "evt_0002",
+			created_at: hoursFromNow(-0.8).replace("Z", ""),
+			action: "api_key.created",
+			target: "claude-code-team",
+			detail: "clb-…team",
+		}),
+		createAuditEventWire(),
+		createAuditEventWire({
+			id: "evt_0000",
+			created_at: hoursFromNow(-72).replace("Z", ""),
+			action: "custom.unknown_action",
+			target: "legacy",
+			detail: "",
+		}),
+	];
+}
+
+// ── Model catalog page (claude-lb `GET /api/health/catalog`) ──
+
+function priceWire(input: number, output: number, cacheRead = input * 0.1) {
+	return {
+		input,
+		output,
+		cache_read: cacheRead,
+		cache_write_5m: input * 1.25,
+		cache_write_1h: input * 2,
+		long_context_threshold: null,
+		long_context: null,
+	};
+}
+
+export function createCatalogWire() {
+	const synced = hoursFromNow(-1).replace("Z", "");
+	return {
+		models: [
+			{
+				model_id: "claude-haiku-5-5-20260101",
+				display_name: "Claude Haiku 5.5",
+				accounts: [
+					{ id: "acc_max", name: "alice-max" },
+					{ id: "acc_console", name: "console" },
+				],
+				max_input_tokens: 200_000,
+				max_output_tokens: 64_000,
+				synced_at: synced,
+				price: {
+					...priceWire(0.1, 0.5),
+					long_context_threshold: 100_000,
+					long_context: priceWire(0.5, 2.5),
+				},
+				price_key: "claude-haiku-5-5",
+			},
+			{
+				model_id: "claude-opus-5-5",
+				display_name: "Claude Opus 5.5",
+				accounts: [{ id: "acc_console", name: "console" }],
+				max_input_tokens: 1_000_000,
+				max_output_tokens: 128_000,
+				synced_at: synced,
+				price: priceWire(4, 20, 0.2),
+				price_key: "claude-opus-5-5",
+			},
+			{
+				model_id: "claude-experimental-1",
+				display_name: "",
+				accounts: [{ id: "acc_console", name: "console" }],
+				max_input_tokens: null,
+				max_output_tokens: null,
+				synced_at: synced,
+				price: null,
+				price_key: null,
+			},
+		],
+		prices: [
+			{ model: "claude-opus-5-5", price: priceWire(4, 20, 0.2) },
+			{ model: "claude-sonnet-5-5", price: priceWire(2, 10, 0.1) },
+			{ model: "claude-haiku-5-5", price: { ...priceWire(0.1, 0.5), long_context_threshold: 100_000, long_context: priceWire(0.5, 2.5) } },
+		],
+		blocks: [
+			{
+				account_id: "acc_max",
+				account_name: "alice-max",
+				plan_type: "max_5x",
+				model: "claude-sonnet-5-5",
+				until: hoursFromNow(6).replace("Z", ""),
+			},
+		],
+		accounts: [
+			{ id: "acc_max", name: "alice-max", plan_type: "max_5x", enabled: true, paused: false, models: 1, models_synced_at: synced },
+			{ id: "acc_console", name: "console", plan_type: "api", enabled: true, paused: false, models: 3, models_synced_at: synced },
+			{ id: "acc_paused", name: "backup-key", plan_type: "api", enabled: false, paused: true, models: 0, models_synced_at: null },
+		],
+		last_synced_at: synced,
+	};
+}
+
+// ── Sticky sessions (claude-lb `GET /api/sticky-sessions`) ──
+
+export type StickyEntryWire = {
+	key: string;
+	account_id: string;
+	account_name: string | null;
+	expires_at: string;
+	remaining_seconds: number;
+	expired: boolean;
+};
+
+export function createStickyEntryWire(overrides: Partial<StickyEntryWire> = {}): StickyEntryWire {
+	return {
+		key: "a".repeat(64),
+		account_id: "acc_max",
+		account_name: "alice-max",
+		expires_at: new Date(Date.now() + 600_000).toISOString(),
+		remaining_seconds: 600,
+		expired: false,
+		...overrides,
+	};
+}
+
+/** Most recently used first, like the backend. */
+export function createDefaultStickyEntryWires(): StickyEntryWire[] {
+	return [
+		createStickyEntryWire(),
+		createStickyEntryWire({ key: "b".repeat(64), account_id: "acc_console", account_name: "console" }),
+		createStickyEntryWire({ key: "c".repeat(64), remaining_seconds: 120 }),
+		createStickyEntryWire({
+			key: "d".repeat(64),
+			account_id: "acc_console",
+			account_name: "console",
+			expires_at: new Date(Date.now() - 60_000).toISOString(),
+			remaining_seconds: 0,
+			expired: true,
+		}),
+	];
+}

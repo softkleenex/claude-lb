@@ -57,10 +57,22 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/settings",
 	"PATCH /api/settings",
 	"POST /api/settings/reset",
+	// sticky sessions (claude-lb, in-memory map)
 	"GET /api/sticky-sessions",
 	"POST /api/sticky-sessions/delete",
-	"POST /api/sticky-sessions/delete-filtered",
+	"POST /api/sticky-sessions/delete-account",
 	"POST /api/sticky-sessions/purge",
+	"DELETE /api/sticky-sessions/:key",
+	// conversations
+	"GET /api/conversations",
+	"GET /api/conversations/:sessionKey",
+	// audit log
+	"GET /api/audit/events",
+	"GET /api/audit/actions",
+	// model catalog page
+	"GET /api/health/catalog",
+	"POST /api/health/sync-models",
+	"POST /api/health/probe",
 	// quota planner
 	"GET /api/quota-planner/settings",
 	"PUT /api/quota-planner/settings",

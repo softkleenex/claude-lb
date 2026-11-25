@@ -150,3 +150,41 @@ def clear() -> None:
 
 def size() -> int:
     return len(_affinity)
+
+
+# ---------------------------------------------------------------- operator browsing
+
+
+def entries(*, now: float | None = None) -> list[tuple[str, str, float]]:
+    """``(key, account_id, seconds_left)`` for every entry, most recently used first.
+
+    Expired entries are included with a negative ``seconds_left``: ``resolve`` only drops
+    them lazily, when that conversation comes back.
+    """
+    now = now if now is not None else time.monotonic()
+    return [
+        (key, account_id, expires_at - now) for key, (account_id, expires_at) in reversed(_affinity.items())
+    ]
+
+
+def forget_many(keys: Sequence[str]) -> int:
+    removed = 0
+    for key in keys:
+        if _affinity.pop(key, None) is not None:
+            removed += 1
+    return removed
+
+
+def forget_account(account_id: str) -> int:
+    keys = [key for key, (owner, _) in _affinity.items() if owner == account_id]
+    return forget_many(keys)
+
+
+def purge_expired(*, now: float | None = None) -> int:
+    now = now if now is not None else time.monotonic()
+    keys = [key for key, (_, expires_at) in _affinity.items() if expires_at <= now]
+    return forget_many(keys)
+
+
+def capacity() -> int:
+    return _MAX_ENTRIES

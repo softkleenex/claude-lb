@@ -9,6 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { formatDuration } from "@/features/accounts/lib/time";
 import type { DashboardOverview, TrendBucket } from "@/features/dashboard/schemas";
 import { formatCompactNumber } from "@/utils/formatters";
 import { parseServerDate } from "@/utils/server-date";
@@ -61,6 +62,18 @@ export function formatMs(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   if (ms < 1000) return `${Math.round(ms)} ms`;
   return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+}
+
+/** Head and tail of a conversation key ("3f9a1c0b…e4d2"): enough to tell conversations apart. */
+export function shortConversationKey(key: string): string {
+  return key.length > 14 ? `${key.slice(0, 8)}…${key.slice(-4)}` : key;
+}
+
+/** "850 ms", "42.0 s", then "3m", "1h 5m" — conversations run from seconds to hours. */
+export function formatConversationDuration(ms: number): string {
+  if (ms <= 0) return "—";
+  if (ms < 60_000) return formatMs(ms);
+  return formatDuration(ms);
 }
 
 /** ISO string with an explicit offset, so shared formatters read naive UTC correctly. */

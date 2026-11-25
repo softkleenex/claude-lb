@@ -267,6 +267,75 @@ export const FilterStateSchema = z.object({
   offset: z.number().int().nonnegative(),
 });
 
+// ── Conversations (request logs grouped by session_key) ──
+
+const NamedRefSchema = z.object({ id: z.string(), name: z.string() });
+
+export const ConversationSchema = z.object({
+  sessionKey: z.string(),
+  firstAt: DateTimeSchema,
+  lastAt: DateTimeSchema,
+  durationMs: z.number(),
+  requests: z.number(),
+  errors: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  cacheReadInputTokens: z.number(),
+  cacheCreationInputTokens: z.number(),
+  totalTokens: z.number(),
+  costUsd: z.number(),
+  accounts: z.array(NamedRefSchema),
+  apiKeys: z.array(NamedRefSchema),
+  models: z.array(z.string()),
+});
+
+export const ConversationPageSchema = z.object({
+  conversations: z.array(ConversationSchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  hasMore: z.boolean(),
+});
+
+export const ConversationModelStatSchema = z.object({
+  model: z.string().nullable(),
+  requests: z.number(),
+  errors: z.number(),
+  durationMs: z.number(),
+  inputTokens: z.number(),
+  cacheReadInputTokens: z.number(),
+  cacheCreationInputTokens: z.number(),
+  outputTokens: z.number(),
+  costUsd: z.number(),
+});
+
+export const ConversationDetailSchema = z.object({
+  sessionKey: z.string(),
+  firstAt: DateTimeSchema,
+  lastAt: DateTimeSchema,
+  durationMs: z.number(),
+  busyMs: z.number(),
+  requests: z.number(),
+  errors: z.number(),
+  costUsd: z.number(),
+  accountCount: z.number(),
+  accounts: z.array(NamedRefSchema.extend({ planType: z.string().nullable(), requests: z.number() })),
+  apiKeys: z.array(NamedRefSchema.extend({ requests: z.number() })),
+  dominantUserAgent: z.string().nullable(),
+  dominantUserAgentFamily: z.string().nullable(),
+  models: z.array(ConversationModelStatSchema),
+  timeline: z.array(RequestLogSchema),
+  timelineTruncated: z.boolean(),
+});
+
+export const REQUEST_LOG_VIEWS = ["requests", "conversations"] as const;
+export type RequestLogView = (typeof REQUEST_LOG_VIEWS)[number];
+
+export type Conversation = z.infer<typeof ConversationSchema>;
+export type ConversationPage = z.infer<typeof ConversationPageSchema>;
+export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
+export type ConversationDetail = z.infer<typeof ConversationDetailSchema>;
+
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
 export type DashboardMetrics = z.infer<typeof MetricsSchema>;
 export type TrendBucket = z.infer<typeof TrendBucketSchema>;

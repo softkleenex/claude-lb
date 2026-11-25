@@ -26,6 +26,7 @@ import {
 } from "@/features/dashboard/components/account-section";
 import { AccountViewModeToggle } from "@/features/dashboard/components/account-view-mode-toggle";
 import { ApiSpendCard } from "@/features/dashboard/components/api-spend-card";
+import { ConversationsView } from "@/features/dashboard/components/conversations-view";
 import { CostTrendChart } from "@/features/dashboard/components/cost-trend-chart";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
@@ -38,11 +39,14 @@ import { CapacityDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useCostTrend, useDashboardOverview, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
-import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { parseFilterState, useRequestLogs, writeFilterState } from "@/features/dashboard/hooks/use-request-logs";
+import { useRequestLogView } from "@/features/dashboard/hooks/use-conversations";
 import { REQUEST_LOG_COLUMN_OPTIONS } from "@/features/dashboard/request-log-columns";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
+  REQUEST_LOG_VIEWS,
   parseOverviewTimeframe,
+  type RequestLogView,
   type DashboardOverview,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
@@ -50,8 +54,38 @@ import { buildStats } from "@/features/dashboard/utils";
 import { routingStrategyLabelKey } from "@/features/settings/routing-labels";
 import { useChartColors } from "@/hooks/use-chart-colors";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { cn } from "@/lib/utils";
 
 const SECTION_TITLE = "text-[13px] font-medium uppercase tracking-wider text-muted-foreground";
+
+function ViewSwitch({ value, onChange }: { value: RequestLogView; onChange: (view: RequestLogView) => void }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      role="tablist"
+      aria-label={t("dashboard.requests.viewLabel")}
+      className="inline-flex items-center rounded-lg border border-border/50 bg-muted/40 p-0.5"
+    >
+      {REQUEST_LOG_VIEWS.map((view) => (
+        <button
+          key={view}
+          type="button"
+          role="tab"
+          aria-selected={value === view}
+          onClick={() => onChange(view)}
+          className={cn(
+            "inline-flex h-7 items-center rounded-md px-3 text-xs font-medium transition-colors",
+            value === view
+              ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t(`dashboard.requests.views.${view}`)}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function MetaLine({ overview }: { overview: DashboardOverview }) {
   const { t } = useTranslation();
@@ -85,6 +119,7 @@ export function DashboardPage() {
   const accountsQuery = useAccounts();
   const poolQuotaQuery = usePoolQuota();
   const { filters, filtersApplied, logsQuery, optionsQuery, updateFilters, resetFilters } = useRequestLogs();
+  const { view: logView, setView: setLogView } = useRequestLogView();
   const { visibleColumns, columnWidths, toggleColumn, setColumnWidth, restoreDefaultLayout } =
     useRequestLogTablePreferences();
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
@@ -153,6 +188,20 @@ export function DashboardPage() {
       { replace: true },
     );
   };
+
+  const showConversationRequests = useCallback(
+    (sessionKey: string) => {
+      setSearchParams(
+        (current) => {
+          const params = writeFilterState({ ...parseFilterState(current), sessionKey, offset: 0 }, current);
+          params.delete("view");
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   const isRefreshing =
     overviewQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching || accountsQuery.isFetching;
@@ -302,97 +351,108 @@ export function DashboardPage() {
           <h2 id="dashboard-requests-title" className={SECTION_TITLE}>
             {t("dashboard.requests.title")}
           </h2>
-          {logPage ? (
+          <ViewSwitch value={logView} onChange={setLogView} />
+          {logView === "requests" && logPage ? (
             <span className="text-xs tabular-nums text-muted-foreground">
               {t("dashboard.requests.total", { count: logPage.total })}
             </span>
           ) : null}
           <div className="h-px min-w-8 flex-1 bg-border" />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="sm">
-                <Columns3 className="mr-2 h-4 w-4" />
-                {t("dashboard.requests.columnLayout.columns", { count: visibleColumns.length })}
+          {logView === "requests" ? (
+            <>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="outline" size="sm">
+                    <Columns3 className="mr-2 h-4 w-4" />
+                    {t("dashboard.requests.columnLayout.columns", { count: visibleColumns.length })}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuLabel>{t("dashboard.requests.columnLayout.visibleColumns")}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {REQUEST_LOG_COLUMN_OPTIONS.map((column) => {
+                    const isVisible = visibleColumns.includes(column.id);
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={column.id}
+                        checked={isVisible}
+                        disabled={isVisible && visibleColumns.length === 1}
+                        onCheckedChange={() => toggleColumn(column.id)}
+                        onSelect={(event) => event.preventDefault()}
+                      >
+                        {t(column.translationKey)}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t("dashboard.requests.columnLayout.restoreDefault")}
+                title={t("dashboard.requests.columnLayout.restoreDefault")}
+                onClick={restoreDefaultLayout}
+              >
+                <RotateCcw className="h-4 w-4" />
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
-              <DropdownMenuLabel>{t("dashboard.requests.columnLayout.visibleColumns")}</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {REQUEST_LOG_COLUMN_OPTIONS.map((column) => {
-                const isVisible = visibleColumns.includes(column.id);
-                return (
-                  <DropdownMenuCheckboxItem
-                    key={column.id}
-                    checked={isVisible}
-                    disabled={isVisible && visibleColumns.length === 1}
-                    onCheckedChange={() => toggleColumn(column.id)}
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    {t(column.translationKey)}
-                  </DropdownMenuCheckboxItem>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t("dashboard.requests.columnLayout.restoreDefault")}
-            title={t("dashboard.requests.columnLayout.restoreDefault")}
-            onClick={restoreDefaultLayout}
-          >
-            <RotateCcw className="h-4 w-4" />
-          </Button>
+            </>
+          ) : null}
         </div>
 
-        <RequestFilters
-          filters={filters}
-          filtersApplied={filtersApplied}
-          accountOptions={accountOptions}
-          apiKeyOptions={apiKeyOptions}
-          modelOptions={modelOptions}
-          statusOptions={statusOptions}
-          onChange={updateFilters}
-          onReset={resetFilters}
-        />
-
-        {logsQuery.error && !logPage ? (
-          <div className="space-y-3 rounded-xl border bg-card p-4">
-            <div role="alert">
-              <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void logsQuery.refetch()}
-              disabled={logsQuery.isFetching}
-            >
-              {t("common.actions.retry")}
-            </Button>
-          </div>
-        ) : !logPage ? (
-          <div className="rounded-xl border bg-card py-8">
-            <SpinnerBlock />
-          </div>
+        {logView === "conversations" ? (
+          <ConversationsView onShowRequests={showConversationRequests} />
         ) : (
-          <div className={logsQuery.isPlaceholderData ? "opacity-60 transition-opacity" : "transition-opacity"}>
-            <RecentRequestsTable
-              requests={logPage.requests}
-              total={logPage.total}
-              limit={filters.limit}
-              offset={filters.offset}
-              hasMore={logPage.hasMore}
+          <>
+            <RequestFilters
+              filters={filters}
               filtersApplied={filtersApplied}
-              visibleColumns={visibleColumns}
-              columnWidths={columnWidths}
-              onColumnWidthChange={setColumnWidth}
-              onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
-              onOffsetChange={(offset) => updateFilters({ offset })}
-              onSelect={setSelectedRequestId}
+              accountOptions={accountOptions}
+              apiKeyOptions={apiKeyOptions}
+              modelOptions={modelOptions}
+              statusOptions={statusOptions}
+              onChange={updateFilters}
+              onReset={resetFilters}
             />
-          </div>
+
+            {logsQuery.error && !logPage ? (
+              <div className="space-y-3 rounded-xl border bg-card p-4">
+                <div role="alert">
+                  <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void logsQuery.refetch()}
+                  disabled={logsQuery.isFetching}
+                >
+                  {t("common.actions.retry")}
+                </Button>
+              </div>
+            ) : !logPage ? (
+              <div className="rounded-xl border bg-card py-8">
+                <SpinnerBlock />
+              </div>
+            ) : (
+              <div className={logsQuery.isPlaceholderData ? "opacity-60 transition-opacity" : "transition-opacity"}>
+                <RecentRequestsTable
+                  requests={logPage.requests}
+                  total={logPage.total}
+                  limit={filters.limit}
+                  offset={filters.offset}
+                  hasMore={logPage.hasMore}
+                  filtersApplied={filtersApplied}
+                  visibleColumns={visibleColumns}
+                  columnWidths={columnWidths}
+                  onColumnWidthChange={setColumnWidth}
+                  onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
+                  onOffsetChange={(offset) => updateFilters({ offset })}
+                  onSelect={setSelectedRequestId}
+                />
+              </div>
+            )}
+          </>
         )}
       </section>
 

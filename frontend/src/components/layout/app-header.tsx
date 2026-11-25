@@ -26,10 +26,14 @@ const CORE_NAV_ITEMS = [
   { to: "/settings", labelKey: "nav.settings" },
 ] as const;
 
-// Power-user pages. Later steps add conversations, audit log, model catalog, firewall
-// and the sticky-session browser here. Automations (codex-lb) stays unlisted: claude-lb
-// has no automations backend. The dropdown renders only when this list is non-empty.
-const ADVANCED_NAV_ITEMS: ReadonlyArray<{ to: string; labelKey: string }> = [];
+// Power-user pages, behind the "Advanced" dropdown (and a section of the mobile sheet).
+// Conversations live on the Dashboard (Requests / Conversations switch). The dropdown
+// renders only when this list is non-empty.
+const ADVANCED_NAV_ITEMS: ReadonlyArray<{ to: string; labelKey: string }> = [
+  { to: "/audit", labelKey: "nav.audit" },
+  { to: "/models", labelKey: "nav.models" },
+  { to: "/sticky-sessions", labelKey: "nav.stickySessions" },
+];
 
 export type AppHeaderProps = {
   onLogout: () => void;

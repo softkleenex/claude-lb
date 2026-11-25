@@ -1,97 +1,39 @@
 import { z } from "zod";
 
-const STICKY_SESSION_KINDS = ["codex_session", "sticky_thread", "prompt_cache"] as const;
-const STICKY_SESSION_SORT_FIELDS = ["updated_at", "created_at", "account", "key"] as const;
-const STICKY_SESSION_SORT_DIRECTIONS = ["asc", "desc"] as const;
+/** claude-lb `GET /api/sticky-sessions` (the in-memory conversation → account map). */
 
-const StickySessionKindSchema = z.enum(STICKY_SESSION_KINDS);
-const StickySessionSortBySchema = z.enum(STICKY_SESSION_SORT_FIELDS);
-const StickySessionSortDirSchema = z.enum(STICKY_SESSION_SORT_DIRECTIONS);
-
-export const StickySessionEntrySchema = z.object({
-  key: z.string().min(1),
-  displayName: z.string().min(1),
-  kind: StickySessionKindSchema,
-  createdAt: z.iso.datetime({ offset: true }),
-  updatedAt: z.iso.datetime({ offset: true }),
-  expiresAt: z.iso.datetime({ offset: true }).nullable(),
-  isStale: z.boolean(),
+export const StickyEntrySchema = z.object({
+  key: z.string(),
+  accountId: z.string(),
+  accountName: z.string().nullable(),
+  expiresAt: z.string(),
+  remainingSeconds: z.number(),
+  expired: z.boolean(),
 });
 
-export const StickySessionIdentifierSchema = z.object({
-  key: z.string().min(1),
-  kind: StickySessionKindSchema,
+export const StickyPageSchema = z.object({
+  entries: z.array(StickyEntrySchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  hasMore: z.boolean(),
+  size: z.number(),
+  expiredCount: z.number(),
+  capacity: z.number(),
+  enabled: z.boolean(),
+  ttlSeconds: z.number(),
+  byAccount: z.array(z.object({ accountId: z.string(), accountName: z.string().nullable(), entries: z.number() })),
 });
 
-export const StickySessionsDeleteRequestSchema = z.object({
-  sessions: z
-    .array(StickySessionIdentifierSchema)
-    .min(1)
-    .max(500)
-    .refine(
-      (sessions) => new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
-      "Duplicate sticky session targets are not allowed",
-    ),
-});
+export const DeletedCountSchema = z.object({ deletedCount: z.number() });
 
-const StickySessionDeleteFailureSchema = z.object({
-  key: z.string().min(1),
-  kind: StickySessionKindSchema,
-  reason: z.string().min(1),
-});
+export type StickyEntry = z.infer<typeof StickyEntrySchema>;
+export type StickyPage = z.infer<typeof StickyPageSchema>;
 
-export const StickySessionsListResponseSchema = z.object({
-  entries: z.array(StickySessionEntrySchema).default([]),
-  stalePromptCacheCount: z.number().int().nonnegative().default(0),
-  total: z.number().int().nonnegative().default(0),
-  hasMore: z.boolean().default(false),
-});
-
-export const StickySessionsListParamsSchema = z.object({
-  staleOnly: z.boolean().default(false),
-  accountQuery: z.string().default(""),
-  keyQuery: z.string().default(""),
-  sortBy: StickySessionSortBySchema.default("updated_at"),
-  sortDir: StickySessionSortDirSchema.default("desc"),
-  offset: z.number().int().nonnegative().default(0),
-  limit: z.number().int().positive().max(500).default(10),
-});
-
-export const StickySessionsDeleteResponseSchema = z.object({
-  deletedCount: z.number().int().nonnegative(),
-  deleted: z.array(StickySessionIdentifierSchema).default([]),
-  failed: z.array(StickySessionDeleteFailureSchema).default([]),
-});
-
-export const StickySessionsDeleteFilteredRequestSchema = z.object({
-  staleOnly: z.boolean().default(false),
-  accountQuery: z.string().default(""),
-  keyQuery: z.string().default(""),
-});
-
-export const StickySessionsDeleteFilteredResponseSchema = z.object({
-  deletedCount: z.number().int().nonnegative(),
-});
-
-export const StickySessionsPurgeRequestSchema = z.object({
-  staleOnly: z.boolean().default(true),
-});
-
-export const StickySessionsPurgeResponseSchema = z.object({
-  deletedCount: z.number().int().nonnegative(),
-});
-
-export type StickySessionKind = z.infer<typeof StickySessionKindSchema>;
-export type StickySessionSortBy = z.infer<typeof StickySessionSortBySchema>;
-export type StickySessionSortDir = z.infer<typeof StickySessionSortDirSchema>;
-export type StickySessionEntry = z.infer<typeof StickySessionEntrySchema>;
-export type StickySessionIdentifier = z.infer<typeof StickySessionIdentifierSchema>;
-export type StickySessionsDeleteRequest = z.infer<typeof StickySessionsDeleteRequestSchema>;
-export type StickySessionsListResponse = z.infer<typeof StickySessionsListResponseSchema>;
-export type StickySessionsListParams = z.infer<typeof StickySessionsListParamsSchema>;
-export type StickySessionDeleteFailure = z.infer<typeof StickySessionDeleteFailureSchema>;
-export type StickySessionsDeleteResponse = z.infer<typeof StickySessionsDeleteResponseSchema>;
-export type StickySessionsDeleteFilteredRequest = z.infer<typeof StickySessionsDeleteFilteredRequestSchema>;
-export type StickySessionsDeleteFilteredResponse = z.infer<typeof StickySessionsDeleteFilteredResponseSchema>;
-export type StickySessionsPurgeRequest = z.infer<typeof StickySessionsPurgeRequestSchema>;
-export type StickySessionsPurgeResponse = z.infer<typeof StickySessionsPurgeResponseSchema>;
+export type StickyFilters = {
+  accountId: string | null;
+  search: string;
+  includeExpired: boolean;
+  limit: number;
+  offset: number;
+};

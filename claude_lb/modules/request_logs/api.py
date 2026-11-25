@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from claude_lb.core.pricing import cost_breakdown_usd
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.dashboard.timeframes import TIMEFRAMES
-from claude_lb.modules.request_logs import service
+from claude_lb.modules.request_logs import conversations, service
 from claude_lb.modules.request_logs.service import STATUS_CATEGORIES, LogFilters
 
 router = APIRouter(prefix="/api/request-logs", tags=["request-logs"])
@@ -164,3 +164,112 @@ async def request_log_detail(request_id: str, session: SessionDep) -> RequestLog
         cache_read_input_tokens=item["cache_read_input_tokens"],
     )
     return RequestLogDetail(**item, cost_breakdown=CostBreakdown(**breakdown))
+
+
+# ---------------------------------------------------------------- conversations
+
+conversations_router = APIRouter(prefix="/api/conversations", tags=["request-logs"])
+
+
+class NamedRef(BaseModel):
+    id: str
+    name: str
+
+
+class ConversationItem(BaseModel):
+    session_key: str
+    first_at: datetime
+    last_at: datetime
+    duration_ms: int
+    requests: int
+    errors: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    total_tokens: int
+    cost_usd: float
+    accounts: list[NamedRef]
+    api_keys: list[NamedRef]
+    models: list[str]
+
+
+class ConversationPage(BaseModel):
+    conversations: list[ConversationItem]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class ConversationModelStat(BaseModel):
+    model: str | None
+    requests: int
+    errors: int
+    duration_ms: int
+    input_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class ConversationAccount(BaseModel):
+    id: str
+    name: str
+    plan_type: str | None
+    requests: int
+
+
+class ConversationApiKey(BaseModel):
+    id: str
+    name: str
+    requests: int
+
+
+class ConversationDetail(BaseModel):
+    session_key: str
+    first_at: datetime
+    last_at: datetime
+    duration_ms: int
+    busy_ms: int
+    requests: int
+    errors: int
+    cost_usd: float
+    account_count: int
+    accounts: list[ConversationAccount]
+    api_keys: list[ConversationApiKey]
+    dominant_user_agent: str | None
+    dominant_user_agent_family: str | None
+    models: list[ConversationModelStat]
+    timeline: list[RequestLogItem]
+    timeline_truncated: bool
+
+
+@conversations_router.get("", response_model=ConversationPage)
+async def list_conversations(
+    session: SessionDep,
+    limit: int = Query(default=25, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None, max_length=200),
+    timeframe: str | None = Query(default=None, description="all | 1h | 24h | 7d | 30d"),
+    since: datetime | None = None,
+) -> ConversationPage:
+    items, total = await conversations.list_page(
+        session, since=_since(timeframe, since), search=search, limit=limit, offset=offset
+    )
+    return ConversationPage(
+        conversations=[ConversationItem(**item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=offset + len(items) < total,
+    )
+
+
+@conversations_router.get("/{session_key}", response_model=ConversationDetail)
+async def conversation_detail(session_key: str, session: SessionDep) -> ConversationDetail:
+    item = await conversations.detail(session, session_key)
+    if item is None:
+        raise HTTPException(404, "conversation not found")
+    return ConversationDetail(**item)

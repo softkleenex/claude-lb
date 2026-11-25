@@ -1,6 +1,8 @@
 import { get } from "@/lib/api-client";
 
 import {
+  ConversationDetailSchema,
+  ConversationPageSchema,
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
@@ -70,4 +72,24 @@ export function getRequestLogOptions(params: { timeframe?: RequestLogTimeframe }
 
 export function getRequestLogDetail(requestId: string) {
   return get(`/api/request-logs/${encodeURIComponent(requestId)}`, RequestLogDetailSchema);
+}
+
+export type ConversationListFilters = {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  timeframe?: RequestLogTimeframe;
+};
+
+export function getConversations(params: ConversationListFilters = {}) {
+  const query = new URLSearchParams();
+  if (typeof params.limit === "number") query.set("limit", String(params.limit));
+  if (typeof params.offset === "number") query.set("offset", String(params.offset));
+  if (params.search?.trim()) query.set("search", params.search.trim());
+  if (params.timeframe && params.timeframe !== "all") query.set("timeframe", params.timeframe);
+  return get(withQuery("/api/conversations", query), ConversationPageSchema);
+}
+
+export function getConversationDetail(sessionKey: string) {
+  return get(`/api/conversations/${encodeURIComponent(sessionKey)}`, ConversationDetailSchema);
 }

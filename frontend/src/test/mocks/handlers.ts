@@ -41,6 +41,11 @@ import {
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
+  type AuditEventWire,
+  type StickyEntryWire,
+  createCatalogWire,
+  createDefaultAuditEventWires,
+  createDefaultStickyEntryWires,
 } from "@/test/mocks/factories";
 
 const REQUEST_STATUS_ORDER = [
@@ -129,15 +134,9 @@ type MockState = {
   apiKeys: ApiKeyWire[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   reportOverrides: Partial<ReportWire>;
-  stickySessions: Array<{
-    key: string;
-    displayName: string;
-    kind: "codex_session" | "sticky_thread" | "prompt_cache";
-    createdAt: string;
-    updatedAt: string;
-    expiresAt: string | null;
-    isStale: boolean;
-  }>;
+  stickyEntries: StickyEntryWire[];
+  auditEvents: AuditEventWire[];
+  catalog: ReturnType<typeof createCatalogWire>;
 };
 
 function createInitialState(): MockState {
@@ -156,7 +155,9 @@ function createInitialState(): MockState {
     apiKeys: createDefaultApiKeyWires(),
     firewallEntries: [],
     reportOverrides: {},
-    stickySessions: [],
+    stickyEntries: createDefaultStickyEntryWires(),
+    auditEvents: createDefaultAuditEventWires(),
+    catalog: createCatalogWire(),
   };
 }
 
@@ -864,7 +865,314 @@ const claudeLbHandlers = [
   }),
 ];
 
+/** Replaces the sticky-session map for a test (wire shape, most recent first). */
+export function setMockStickyEntries(entries: StickyEntryWire[]): void {
+  state.stickyEntries = entries;
+}
+
+export function getMockStickyEntries(): StickyEntryWire[] {
+  return state.stickyEntries;
+}
+
+export function setMockAuditEvents(events: AuditEventWire[]): void {
+  state.auditEvents = events;
+}
+
+export function setMockCatalog(overrides: Partial<ReturnType<typeof createCatalogWire>>): void {
+  state.catalog = { ...state.catalog, ...overrides };
+}
+
+function wireTime(value: string): number {
+  return new Date(/Z$|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`).getTime();
+}
+
+/** Mirrors `request_logs/conversations.py`: group by session_key, newest activity first. */
+function conversationWires(url: URL) {
+  const params = url.searchParams;
+  const timeframe = params.get("timeframe");
+  const since = timeframe && TIMEFRAME_MS[timeframe] ? Date.now() - TIMEFRAME_MS[timeframe] : null;
+  const term = (params.get("search") ?? "").trim().toLowerCase();
+  const rows = state.requestLogs.filter(
+    (row) => row.session_key && (since === null || wireTime(row.created_at) >= since),
+  );
+  const groups = new Map<string, RequestLogWire[]>();
+  for (const row of rows) {
+    const key = row.session_key as string;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  const ranked = (values: Array<string | null>) => {
+    const counts = new Map<string, number>();
+    for (const value of values) if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([value]) => value);
+  };
+  const items = [...groups].map(([key, group]) => {
+    const times = group.map((row) => wireTime(row.created_at));
+    const first = group[times.indexOf(Math.min(...times))].created_at;
+    const last = group[times.indexOf(Math.max(...times))].created_at;
+    const sum = (pick: (row: RequestLogWire) => number) => group.reduce((total, row) => total + pick(row), 0);
+    const named = (pairs: Array<[string | null, string | null]>) => {
+      const names = new Map(pairs.filter(([id]) => id).map(([id, name]) => [id as string, name ?? "(deleted)"]));
+      return ranked(pairs.map(([id]) => id)).map((id) => ({ id, name: names.get(id) as string }));
+    };
+    return {
+      session_key: key,
+      first_at: first,
+      last_at: last,
+      duration_ms: Math.max(...times) - Math.min(...times),
+      requests: group.length,
+      errors: group.filter((row) => row.status !== "ok").length,
+      input_tokens: sum((row) => row.input_tokens),
+      output_tokens: sum((row) => row.output_tokens),
+      cache_read_input_tokens: sum((row) => row.cache_read_input_tokens),
+      cache_creation_input_tokens: sum((row) => row.cache_creation_input_tokens),
+      total_tokens: sum((row) => row.total_tokens),
+      cost_usd: sum((row) => row.cost_usd),
+      accounts: named(group.map((row) => [row.account_id, row.account_name])),
+      api_keys: named(group.map((row) => [row.api_key_id, row.api_key_name])),
+      models: ranked(group.map((row) => row.model)),
+      _haystack: group
+        .flatMap((row) => [row.session_key, row.model, row.user_agent, row.client_ip, row.account_name, row.api_key_name])
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase(),
+    };
+  });
+  return items
+    .filter((item) => !term || item._haystack.includes(term))
+    .sort((a, b) => wireTime(b.last_at) - wireTime(a.last_at))
+    .map((item) => {
+      const { _haystack, ...rest } = item;
+      void _haystack;
+      return rest;
+    });
+}
+
+const extrasHandlers = [
+  http.get("/api/conversations", ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const url = new URL(request.url);
+    const timeframe = url.searchParams.get("timeframe");
+    if (timeframe && timeframe !== "all" && !TIMEFRAME_MS[timeframe]) {
+      return detail(422, "timeframe must be one of all, 1h, 24h, 7d, 30d");
+    }
+    const all = conversationWires(url);
+    const limit = Number(url.searchParams.get("limit") ?? 25);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const page = all.slice(offset, offset + limit);
+    return HttpResponse.json({
+      conversations: page,
+      total: all.length,
+      limit,
+      offset,
+      has_more: offset + page.length < all.length,
+    });
+  }),
+
+  http.get("/api/conversations/:sessionKey", ({ params }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const key = String(params.sessionKey);
+    const rows = state.requestLogs.filter((row) => row.session_key === key);
+    if (rows.length === 0) return detail(404, "conversation not found");
+    const [summary] = conversationWires(new URL("http://localhost/api/conversations")).filter(
+      (item) => item.session_key === key,
+    );
+    const byModel = new Map<string | null, RequestLogWire[]>();
+    for (const row of rows) byModel.set(row.model, [...(byModel.get(row.model) ?? []), row]);
+    const count = (pick: (row: RequestLogWire) => string | null) => {
+      const counts = new Map<string, number>();
+      for (const row of rows) {
+        const value = pick(row);
+        if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+      return counts;
+    };
+    const accountCounts = count((row) => row.account_id);
+    const keyCounts = count((row) => row.api_key_id);
+    const agents = [...count((row) => row.user_agent)].sort((a, b) => b[1] - a[1]);
+    return HttpResponse.json({
+      session_key: key,
+      first_at: summary.first_at,
+      last_at: summary.last_at,
+      duration_ms: summary.duration_ms,
+      busy_ms: rows.reduce((total, row) => total + row.duration_ms, 0),
+      requests: rows.length,
+      errors: summary.errors,
+      cost_usd: summary.cost_usd,
+      account_count: accountCounts.size,
+      accounts: summary.accounts.map((account) => ({
+        ...account,
+        plan_type: rows.find((row) => row.account_id === account.id)?.plan_type ?? null,
+        requests: accountCounts.get(account.id) ?? 0,
+      })),
+      api_keys: summary.api_keys.map((apiKey) => ({ ...apiKey, requests: keyCounts.get(apiKey.id) ?? 0 })),
+      dominant_user_agent: agents[0]?.[0] ?? null,
+      dominant_user_agent_family: agents[0] ? agents[0][0].split("/", 1)[0] : "(unknown)",
+      models: [...byModel].map(([model, group]) => ({
+        model,
+        requests: group.length,
+        errors: group.filter((row) => row.status !== "ok").length,
+        duration_ms: group.reduce((total, row) => total + row.duration_ms, 0),
+        input_tokens: group.reduce((total, row) => total + row.input_tokens, 0),
+        cache_read_input_tokens: group.reduce((total, row) => total + row.cache_read_input_tokens, 0),
+        cache_creation_input_tokens: group.reduce((total, row) => total + row.cache_creation_input_tokens, 0),
+        output_tokens: group.reduce((total, row) => total + row.output_tokens, 0),
+        cost_usd: group.reduce((total, row) => total + row.cost_usd, 0),
+      })),
+      timeline: [...rows].sort((a, b) => wireTime(b.created_at) - wireTime(a.created_at)),
+      timeline_truncated: false,
+    });
+  }),
+
+  http.get("/api/audit/events", ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const params = new URL(request.url).searchParams;
+    const timeframe = params.get("timeframe");
+    if (timeframe && timeframe !== "all" && !TIMEFRAME_MS[timeframe]) {
+      return detail(422, "timeframe must be one of all, 1h, 24h, 7d, 30d");
+    }
+    const since = timeframe && TIMEFRAME_MS[timeframe] ? Date.now() - TIMEFRAME_MS[timeframe] : null;
+    const actions = params.getAll("action");
+    const target = (params.get("target") ?? "").trim().toLowerCase();
+    const term = (params.get("search") ?? "").trim().toLowerCase();
+    const ok = params.get("ok");
+    const matched = state.auditEvents.filter((event) => {
+      if (since !== null && wireTime(event.created_at) < since) return false;
+      if (actions.length && !actions.includes(event.action)) return false;
+      if (target && !event.target.toLowerCase().includes(target)) return false;
+      if (ok !== null && String(event.ok) !== ok) return false;
+      if (term) {
+        const haystack = [event.action, event.target, event.detail, event.client_ip, event.actor].join(" ").toLowerCase();
+        if (!haystack.includes(term)) return false;
+      }
+      return true;
+    });
+    const limit = Number(params.get("limit") ?? 50);
+    const offset = Number(params.get("offset") ?? 0);
+    const page = matched.slice(offset, offset + limit);
+    return HttpResponse.json({
+      events: page,
+      total: matched.length,
+      limit,
+      offset,
+      has_more: offset + page.length < matched.length,
+    });
+  }),
+
+  http.get("/api/audit/actions", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const counts = new Map<string, number>();
+    for (const event of state.auditEvents) counts.set(event.action, (counts.get(event.action) ?? 0) + 1);
+    return HttpResponse.json(
+      [...counts].sort((a, b) => a[0].localeCompare(b[0])).map(([action, count]) => ({ action, count })),
+    );
+  }),
+
+  http.get("/api/health/catalog", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json(state.catalog);
+  }),
+
+  http.post("/api/health/sync-models", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json({ "alice-max": 1, console: 3 });
+  }),
+
+  http.post("/api/health/probe", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json([
+      { account_id: "acc_console", account_name: "console", ok: true, status_code: 200, detail: "", models: 3 },
+      { account_id: "acc_broken", account_name: "broken-sub", ok: false, status_code: 401, detail: "invalid x-api-key", models: 0 },
+    ]);
+  }),
+
+  http.get("/api/sticky-sessions", ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const params = new URL(request.url).searchParams;
+    const accountId = params.get("account_id");
+    const includeExpired = params.get("include_expired") !== "false";
+    const term = (params.get("search") ?? "").trim().toLowerCase();
+    const all = state.stickyEntries;
+    const rows = all.filter(
+      (entry) =>
+        (!accountId || entry.account_id === accountId) &&
+        (includeExpired || !entry.expired) &&
+        (!term || entry.key.includes(term)),
+    );
+    const limit = Number(params.get("limit") ?? 25);
+    const offset = Number(params.get("offset") ?? 0);
+    const page = rows.slice(offset, offset + limit);
+    const counts = new Map<string, { account_name: string | null; entries: number }>();
+    for (const entry of all) {
+      const current = counts.get(entry.account_id) ?? { account_name: entry.account_name, entries: 0 };
+      counts.set(entry.account_id, { ...current, entries: current.entries + 1 });
+    }
+    return HttpResponse.json({
+      entries: page,
+      total: rows.length,
+      limit,
+      offset,
+      has_more: offset + page.length < rows.length,
+      size: all.length,
+      expired_count: all.filter((entry) => entry.expired).length,
+      capacity: 10_000,
+      enabled: state.settings.sticky_sessions_enabled,
+      ttl_seconds: state.settings.sticky_ttl_seconds,
+      by_account: [...counts]
+        .map(([account_id, value]) => ({ account_id, ...value }))
+        .sort((a, b) => b.entries - a.entries || (a.account_name ?? "").localeCompare(b.account_name ?? "")),
+    });
+  }),
+
+  http.post("/api/sticky-sessions/delete", async ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
+    if (keys.length === 0) return detail(422, [{ loc: ["body", "keys"], msg: "List should have at least 1 item" }]);
+    const before = state.stickyEntries.length;
+    state.stickyEntries = state.stickyEntries.filter((entry) => !keys.includes(entry.key));
+    return HttpResponse.json({ deleted_count: before - state.stickyEntries.length });
+  }),
+
+  http.post("/api/sticky-sessions/delete-account", async ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const accountId = typeof body.account_id === "string" ? body.account_id : "";
+    if (!accountId) return detail(422, [{ loc: ["body", "account_id"], msg: "Field required" }]);
+    const before = state.stickyEntries.length;
+    state.stickyEntries = state.stickyEntries.filter((entry) => entry.account_id !== accountId);
+    return HttpResponse.json({ deleted_count: before - state.stickyEntries.length });
+  }),
+
+  http.post("/api/sticky-sessions/purge", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const before = state.stickyEntries.length;
+    state.stickyEntries = state.stickyEntries.filter((entry) => !entry.expired);
+    return HttpResponse.json({ deleted_count: before - state.stickyEntries.length });
+  }),
+
+  http.delete("/api/sticky-sessions/:key", ({ params }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const before = state.stickyEntries.length;
+    state.stickyEntries = state.stickyEntries.filter((entry) => entry.key !== params.key);
+    if (state.stickyEntries.length === before) return detail(404, "sticky session not found");
+    return new HttpResponse(null, { status: 204 });
+  }),
+];
+
 export const handlers = [
+  ...extrasHandlers,
   ...claudeLbHandlers,
   ...accountHandlers,
   ...apiKeyHandlers,
@@ -1107,177 +1415,6 @@ export const handlers = [
         reason: "admin_canceled",
       }),
     );
-  }),
-
-  http.get("/api/sticky-sessions", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const staleOnly = url.searchParams.get("staleOnly") === "true";
-    const accountQuery = (url.searchParams.get("accountQuery") ?? "")
-      .trim()
-      .toLowerCase();
-    const keyQuery = (url.searchParams.get("keyQuery") ?? "")
-      .trim()
-      .toLowerCase();
-    const sortBy = url.searchParams.get("sortBy") ?? "updated_at";
-    const sortDir = url.searchParams.get("sortDir") ?? "desc";
-    const offset = Number(url.searchParams.get("offset") ?? "0");
-    const limit = Number(url.searchParams.get("limit") ?? "10");
-    const filteredEntries = state.stickySessions
-      .filter((entry) => {
-        if (staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
-          return false;
-        }
-        if (
-          accountQuery &&
-          !entry.displayName.toLowerCase().includes(accountQuery)
-        ) {
-          return false;
-        }
-        if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
-          return false;
-        }
-        return true;
-      })
-      .sort((left, right) => {
-        const direction = sortDir === "asc" ? 1 : -1;
-        if (sortBy === "account") {
-          return left.displayName.localeCompare(right.displayName) * direction;
-        }
-        if (sortBy === "key") {
-          return left.key.localeCompare(right.key) * direction;
-        }
-        const leftTime = Date.parse(
-          sortBy === "created_at" ? left.createdAt : left.updatedAt,
-        );
-        const rightTime = Date.parse(
-          sortBy === "created_at" ? right.createdAt : right.updatedAt,
-        );
-        if (leftTime !== rightTime) {
-          return (leftTime - rightTime) * direction;
-        }
-        return left.key.localeCompare(right.key);
-      });
-    const entries = filteredEntries.slice(offset, offset + limit);
-    const stalePromptCacheCount = state.stickySessions.filter(
-      (entry) => entry.kind === "prompt_cache" && entry.isStale,
-    ).length;
-    return HttpResponse.json({
-      entries,
-      stalePromptCacheCount,
-      total: filteredEntries.length,
-      hasMore: offset + entries.length < filteredEntries.length,
-    });
-  }),
-  http.post("/api/sticky-sessions/delete", async ({ request }) => {
-    const payload = (await parseJsonBody(
-      request,
-      z.object({
-        sessions: z
-          .array(
-            z.object({
-              key: z.string().min(1),
-              kind: z.enum(["codex_session", "sticky_thread", "prompt_cache"]),
-            }),
-          )
-          .min(1)
-          .max(500)
-          .refine(
-            (sessions) =>
-              new Set(
-                sessions.map((session) => `${session.kind}:${session.key}`),
-              ).size === sessions.length,
-            "Duplicate sticky session targets are not allowed",
-          ),
-      }),
-    )) ?? { sessions: [] };
-    const targets = new Set(
-      payload.sessions.map((session) => `${session.kind}:${session.key}`),
-    );
-    const deleted = state.stickySessions
-      .filter((entry) => targets.has(`${entry.kind}:${entry.key}`))
-      .map((entry) => ({ key: entry.key, kind: entry.kind }));
-    const deletedTargets = new Set(
-      deleted.map((entry) => `${entry.kind}:${entry.key}`),
-    );
-    state.stickySessions = state.stickySessions.filter(
-      (entry) => !targets.has(`${entry.kind}:${entry.key}`),
-    );
-    return HttpResponse.json({
-      deletedCount: deleted.length,
-      deleted,
-      failed: payload.sessions
-        .filter(
-          (session) => !deletedTargets.has(`${session.kind}:${session.key}`),
-        )
-        .map((session) => ({
-          key: session.key,
-          kind: session.kind,
-          reason: "not_found",
-        })),
-    });
-  }),
-
-  http.post("/api/sticky-sessions/delete-filtered", async ({ request }) => {
-    const payload = (await parseJsonBody(
-      request,
-      z.object({
-        staleOnly: z.boolean().default(false),
-        accountQuery: z.string().default(""),
-        keyQuery: z.string().default(""),
-      }),
-    )) ?? {
-      staleOnly: false,
-      accountQuery: "",
-      keyQuery: "",
-    };
-    const accountQuery = payload.accountQuery.trim().toLowerCase();
-    const keyQuery = payload.keyQuery.trim().toLowerCase();
-    const matched = state.stickySessions.filter((entry) => {
-      if (
-        payload.staleOnly &&
-        !(entry.kind === "prompt_cache" && entry.isStale)
-      ) {
-        return false;
-      }
-      if (
-        accountQuery &&
-        !entry.displayName.toLowerCase().includes(accountQuery)
-      ) {
-        return false;
-      }
-      if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
-        return false;
-      }
-      return true;
-    });
-    const targets = new Set(
-      matched.map((entry) => `${entry.kind}:${entry.key}`),
-    );
-    state.stickySessions = state.stickySessions.filter(
-      (entry) => !targets.has(`${entry.kind}:${entry.key}`),
-    );
-    return HttpResponse.json({ deletedCount: matched.length });
-  }),
-
-  http.post("/api/sticky-sessions/purge", async ({ request }) => {
-    const payload = (await parseJsonBody(
-      request,
-      z.object({ staleOnly: z.boolean().default(true) }),
-    )) ?? {
-      staleOnly: true,
-    };
-    if (payload.staleOnly) {
-      const before = state.stickySessions.length;
-      state.stickySessions = state.stickySessions.filter(
-        (entry) => !entry.isStale,
-      );
-      return HttpResponse.json({
-        deletedCount: before - state.stickySessions.length,
-      });
-    }
-    const deletedCount = state.stickySessions.length;
-    state.stickySessions = [];
-    return HttpResponse.json({ deletedCount });
   }),
 
 ];

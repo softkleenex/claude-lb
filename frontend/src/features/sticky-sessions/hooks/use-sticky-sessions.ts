@@ -1,146 +1,106 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useDeferredValue, useMemo, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
-  deleteFilteredStickySessions,
+  deleteAccountStickySessions,
+  deleteStickySession,
   deleteStickySessions,
   listStickySessions,
-  purgeStickySessions,
+  purgeExpiredStickySessions,
 } from "@/features/sticky-sessions/api";
-import type {
-  StickySessionIdentifier,
-  StickySessionSortBy,
-  StickySessionSortDir,
-  StickySessionsDeleteFilteredResponse,
-  StickySessionsDeleteResponse,
-  StickySessionsListParams,
-} from "@/features/sticky-sessions/schemas";
+import type { StickyFilters } from "@/features/sticky-sessions/schemas";
 
-const DEFAULT_STICKY_SESSIONS_LIMIT = 10;
+export const DEFAULT_STICKY_FILTERS: StickyFilters = {
+  accountId: null,
+  search: "",
+  includeExpired: true,
+  limit: 25,
+  offset: 0,
+};
+
+const QUERY_KEY = ["sticky-sessions"] as const;
+
+function intParam(value: string | null, fallback: number, min: number): number {
+  const parsed = Number(value);
+  return value !== null && Number.isInteger(parsed) && parsed >= min ? parsed : fallback;
+}
+
+export function parseStickyFilters(params: URLSearchParams): StickyFilters {
+  return {
+    accountId: params.get("account") || null,
+    search: params.get("search") ?? "",
+    includeExpired: params.get("expired") !== "hide",
+    limit: Math.min(500, intParam(params.get("limit"), DEFAULT_STICKY_FILTERS.limit, 1)),
+    offset: intParam(params.get("offset"), 0, 0),
+  };
+}
+
+export function writeStickyFilters(filters: StickyFilters, base?: URLSearchParams): URLSearchParams {
+  const params = new URLSearchParams(base);
+  for (const key of ["account", "search", "expired", "limit", "offset"]) params.delete(key);
+  if (filters.accountId) params.set("account", filters.accountId);
+  if (filters.search) params.set("search", filters.search);
+  if (!filters.includeExpired) params.set("expired", "hide");
+  if (filters.limit !== DEFAULT_STICKY_FILTERS.limit) params.set("limit", String(filters.limit));
+  if (filters.offset > 0) params.set("offset", String(filters.offset));
+  return params;
+}
 
 export function useStickySessions() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [params, setParams] = useState<StickySessionsListParams>({
-    staleOnly: false,
-    accountQuery: "",
-    keyQuery: "",
-    sortBy: "updated_at",
-    sortDir: "desc",
-    offset: 0,
-    limit: DEFAULT_STICKY_SESSIONS_LIMIT,
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters = useMemo(() => parseStickyFilters(searchParams), [searchParams]);
+
+  const listQuery = useQuery({
+    queryKey: [...QUERY_KEY, filters],
+    queryFn: () => listStickySessions(filters),
+    placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
   });
-  const deferredAccountQuery = useDeferredValue(params.accountQuery);
-  const deferredKeyQuery = useDeferredValue(params.keyQuery);
-  const queryParams = useMemo(
-    () => ({
-      ...params,
-      accountQuery: deferredAccountQuery,
-      keyQuery: deferredKeyQuery,
-    }),
-    [deferredAccountQuery, deferredKeyQuery, params],
+
+  const updateFilters = useCallback(
+    (patch: Partial<StickyFilters>) => {
+      setSearchParams((current) => writeStickyFilters({ ...parseStickyFilters(current), ...patch }, current), {
+        replace: true,
+      });
+    },
+    [setSearchParams],
   );
 
-  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
-    queryKey: ["sticky-sessions", "list", queryParams],
-    queryFn: () => listStickySessions(queryParams),
-    placeholderData: (previousData) => previousData,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+  const settle = () => void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+  const failed = (error: Error) => toast.error(error.message || t("stickySessions.toasts.failed"));
+  const deleted = (count: number) => toast.success(t("stickySessions.toasts.deleted", { count }));
+
+  const deleteOne = useMutation({
+    mutationFn: deleteStickySession,
+    onSuccess: () => deleted(1),
+    onError: failed,
+    onSettled: settle,
   });
-  const stickySessionsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
-
-  const setOffset = (offset: number) => {
-    setParams((current) => ({ ...current, offset }));
-  };
-
-  const setLimit = (limit: number) => {
-    setParams((current) => ({ ...current, limit, offset: 0 }));
-  };
-
-  const setAccountQuery = (accountQuery: string) => {
-    setParams((current) => ({ ...current, accountQuery, offset: 0 }));
-  };
-
-  const setKeyQuery = (keyQuery: string) => {
-    setParams((current) => ({ ...current, keyQuery, offset: 0 }));
-  };
-
-  const setSort = (sortBy: StickySessionSortBy, sortDir: StickySessionSortDir) => {
-    setParams((current) => ({ ...current, sortBy, sortDir, offset: 0 }));
-  };
-
-  const deleteMutation = useMutation({
-    mutationFn: (targets: StickySessionIdentifier[]) => deleteStickySessions({ sessions: targets }),
-    onSuccess: async (response: StickySessionsDeleteResponse) => {
-      if (response.deletedCount > 0 && response.failed.length === 0) {
-        toast.success(
-          response.deletedCount === 1
-            ? t("stickySessions.toasts.deletedOne")
-            : t("stickySessions.toasts.deletedMany", { count: response.deletedCount }),
-        );
-      } else if (response.deletedCount > 0) {
-        toast.warning(
-          t("stickySessions.toasts.deletedPartial", { deleted: response.deletedCount, failed: response.failed.length }),
-        );
-      } else {
-        toast.error(t("stickySessions.toasts.noneSelectedDeleted"));
-      }
-      await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || t("stickySessions.toasts.deleteFailed"));
-    },
+  const deleteMany = useMutation({
+    mutationFn: deleteStickySessions,
+    onSuccess: (result) => deleted(result.deletedCount),
+    onError: failed,
+    onSettled: settle,
+  });
+  const deleteAccount = useMutation({
+    mutationFn: deleteAccountStickySessions,
+    onSuccess: (result) => deleted(result.deletedCount),
+    onError: failed,
+    onSettled: settle,
+  });
+  const purge = useMutation({
+    mutationFn: purgeExpiredStickySessions,
+    onSuccess: (result) => toast.success(t("stickySessions.toasts.purged", { count: result.deletedCount })),
+    onError: failed,
+    onSettled: settle,
   });
 
-  const deleteFilteredMutation = useMutation({
-    mutationFn: () =>
-      deleteFilteredStickySessions({
-        staleOnly: queryParams.staleOnly,
-        accountQuery: queryParams.accountQuery,
-        keyQuery: queryParams.keyQuery,
-      }),
-    onSuccess: async (response: StickySessionsDeleteFilteredResponse) => {
-      if (response.deletedCount > 0) {
-        toast.success(
-          response.deletedCount === 1
-            ? t("stickySessions.toasts.filteredDeletedOne")
-            : t("stickySessions.toasts.filteredDeletedMany", { count: response.deletedCount }),
-        );
-      } else {
-        toast.error(t("stickySessions.toasts.noneFilteredDeleted"));
-      }
-      await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || t("stickySessions.toasts.deleteFilteredFailed"));
-    },
-  });
-
-  const purgeMutation = useMutation({
-    mutationFn: (staleOnly: boolean) => purgeStickySessions({ staleOnly }),
-    onSuccess: (response) => {
-      toast.success(t("stickySessions.toasts.purged", { count: response.deletedCount }));
-      void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || t("stickySessions.toasts.purgeFailed"));
-    },
-  });
-
-  return {
-    params,
-    setAccountQuery,
-    setKeyQuery,
-    setSort,
-    setOffset,
-    setLimit,
-    stickySessionsQuery,
-    deleteMutation,
-    deleteFilteredMutation,
-    purgeMutation,
-  };
+  const busy = deleteOne.isPending || deleteMany.isPending || deleteAccount.isPending || purge.isPending;
+  return { filters, listQuery, updateFilters, deleteOne, deleteMany, deleteAccount, purge, busy };
 }

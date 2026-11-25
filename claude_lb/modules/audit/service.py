@@ -8,8 +8,10 @@ only names, ids, and hints reach `detail`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.db.models import AuditEvent
@@ -64,6 +66,67 @@ async def recent(session: AsyncSession, *, limit: int = 100, action: str | None 
         stmt = stmt.where(AuditEvent.action == action)
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def page(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    actions: Sequence[str] = (),
+    target: str | None = None,
+    search: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    ok: bool | None = None,
+) -> tuple[list[AuditEvent], int]:
+    """A filtered page of events, newest first, plus the total that matched."""
+    conditions = []
+    if actions:
+        conditions.append(AuditEvent.action.in_(list(actions)))
+    if target:
+        conditions.append(AuditEvent.target.ilike(f"%{_escape_like(target.strip())}%", escape="\\"))
+    if since is not None:
+        conditions.append(AuditEvent.created_at >= since)
+    if until is not None:
+        conditions.append(AuditEvent.created_at < until)
+    if ok is not None:
+        conditions.append(AuditEvent.ok.is_(ok))
+    term = (search or "").strip()
+    if term:
+        pattern = f"%{_escape_like(term)}%"
+        conditions.append(
+            or_(
+                AuditEvent.action.ilike(pattern, escape="\\"),
+                AuditEvent.target.ilike(pattern, escape="\\"),
+                AuditEvent.detail.ilike(pattern, escape="\\"),
+                AuditEvent.client_ip.ilike(pattern, escape="\\"),
+                AuditEvent.actor.ilike(pattern, escape="\\"),
+            )
+        )
+    total = (await session.execute(select(func.count(AuditEvent.id)).where(*conditions))).scalar_one()
+    rows = await session.execute(
+        select(AuditEvent)
+        .where(*conditions)
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(rows.scalars()), int(total)
+
+
+async def actions(session: AsyncSession) -> list[tuple[str, int]]:
+    """Every action recorded so far, with how often."""
+    rows = await session.execute(
+        select(AuditEvent.action, func.count(AuditEvent.id))
+        .group_by(AuditEvent.action)
+        .order_by(AuditEvent.action)
+    )
+    return [(action, int(count)) for action, count in rows]
 
 
 async def prune(session: AsyncSession, *, keep: int = 5000) -> int:

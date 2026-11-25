@@ -112,6 +112,19 @@ def prepare_environment(port: int, host: str = "127.0.0.1") -> Path:
 # ---- simulated upstream --------------------------------------------------------
 
 
+def mount_fake_upstream(app) -> None:
+    """Add the fake upstream to ``app`` ahead of every existing route.
+
+    The dashboard's SPA fallback (registered last by ``create_app``) answers any other
+    GET, so appended upstream routes would never see ``GET /v1/models`` — the health
+    probe and model sync would get the dashboard's HTML and find no models.
+    """
+    existing = list(app.router.routes)
+    app.include_router(build_fake_upstream())
+    added = app.router.routes[len(existing) :]
+    app.router.routes[:] = added + existing
+
+
 def build_fake_upstream():
     router = APIRouter(prefix=DEMO_UPSTREAM_PREFIX, include_in_schema=False)
     # (credential, prefix hash) -> cached prefix size. Scoped per credential, as
@@ -436,7 +449,7 @@ async def run(port: int, *, traffic: bool, on_ready, host: str = "127.0.0.1") ->
     from claude_lb.main import create_app
 
     app = create_app()
-    app.include_router(build_fake_upstream())
+    mount_fake_upstream(app)
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
