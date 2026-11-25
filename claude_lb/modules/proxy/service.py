@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -54,35 +55,90 @@ _STRIPPED_RESPONSE_HEADERS = frozenset(
 
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 
-_BILLING_MARKERS = ("credit balance is too low", "reached your specified api usage limits")
+# Anthropic's own wordings for "this account cannot pay". Matched against the *whole*
+# message: an ordinary 400 can quote client input back ("<field>: Extra inputs are not
+# permitted"), and a substring match let any client switch accounts off by naming a
+# field after these phrases.
+_BILLING_MESSAGES = (
+    re.compile(
+        r"Your credit balance is too low to access the Anthropic API\. "
+        r"Please go to Plans & Billing to upgrade or purchase credits\."
+    ),
+    re.compile(r"You have reached your specified API usage limits\. You will regain access on .{1,64}\."),
+)
 
 
 def is_billing_exhausted(body: bytes) -> bool:
-    """True when a 400 says the *account* cannot pay, e.g. Console credit ran out."""
+    """True when a 400 says the *account* cannot pay, e.g. Console credit ran out.
+
+    Only an ``invalid_request_error`` whose message is exactly one of Anthropic's known
+    wordings counts; anything else is an ordinary 400 that belongs to the caller.
+    """
     try:
-        message = str(json.loads(body).get("error", {}).get("message", "")).lower()
-    except (ValueError, AttributeError):
+        error = json.loads(body).get("error")
+    except (ValueError, UnicodeDecodeError, AttributeError):
         return False
-    return any(marker in message for marker in _BILLING_MARKERS)
+    if not isinstance(error, dict) or error.get("type") != "invalid_request_error":
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(pattern.fullmatch(message) for pattern in _BILLING_MESSAGES)
+
+
+def _unavailable_reason(account: Account, model: str | None) -> tuple[str, str] | None:
+    """(category shown to clients, detail for the server log), or None if usable."""
+    if not account.enabled:
+        if lb.is_paused(account):
+            return "paused", "paused by operator"
+        return "disabled", f"disabled ({account.disabled_reason or 'by operator'})"
+    if lb.spend_cap_reached(account):
+        return "at spend cap", f"spend cap ${account.spend_cap_usd:.2f} reached"
+    if model_blocks.is_blocked(account, model):
+        return "does not serve this model", f"subscription does not serve {model}"
+    if not lb.is_available(account):
+        return "cooling down", account.quota_status or "cooling down"
+    return None
 
 
 def explain_unavailable(accounts: list[Account], model: str | None) -> str | None:
-    """Say *why* nothing can take the request, in terms an operator can act on."""
+    """Say *why* nothing can take the request.
+
+    The answer goes to whoever holds an API key, so it is by category only — how many
+    accounts are capped, paused, and so on. Names, amounts and upstream error text are
+    for the operator and go to the server log.
+    """
     if not accounts:
         return "no accounts configured — add one with `claude-lb account add`"
-    reasons: list[str] = []
+    counts: dict[str, int] = {}
+    details: list[str] = []
     for account in accounts:
-        if not account.enabled:
-            reasons.append(f"{account.name}: disabled ({account.disabled_reason or 'by operator'})")
-        elif lb.spend_cap_reached(account):
-            reasons.append(f"{account.name}: spend cap ${account.spend_cap_usd:.2f} reached")
-        elif model_blocks.is_blocked(account, model):
-            reasons.append(f"{account.name}: subscription does not serve {model}")
-        elif not lb.is_available(account):
-            reasons.append(f"{account.name}: {account.quota_status or 'cooling down'}")
-    if not reasons:
+        reason = _unavailable_reason(account, model)
+        if reason is None:
+            continue
+        category, detail = reason
+        counts[category] = counts.get(category, 0) + 1
+        details.append(f"{account.name}: {detail}")
+    if not counts:
         return None
-    return f"no account can serve {model or 'this request'} right now — " + "; ".join(reasons)
+    target = model or "this request"
+    logger.info("no account can serve %s: %s", target, "; ".join(details))
+    summary = ", ".join(f"{n} {category}" for category, n in counts.items())
+    return f"no account can serve {target} right now: {summary}"
+
+
+def forced_refusal(account: Account, model: str | None) -> str | None:
+    """Why even a forced send (an automation told to include a paused account) must not
+    go through this account. Forcing skips the *pause* only — never the spend cap, a model
+    the subscription refuses, or a breaker that took the account out (auth failure, out
+    of credit)."""
+    if not account.enabled and not lb.is_paused(account):
+        return f"account is disabled ({account.disabled_reason or 'breaker'})"
+    if lb.spend_cap_reached(account):
+        return f"account reached its spend cap (${account.spend_cap_usd:.2f})"
+    if model_blocks.is_blocked(account, model):
+        return f"model refused: {account.name} does not serve {model}"
+    return None
 
 
 class UpstreamExhausted(RuntimeError):
@@ -255,6 +311,9 @@ class ProxyService:
                         if pin_account_id in tried:
                             raise lb.NoAccountAvailable("pinned account already tried")
                         account = all_accounts[0]
+                        refusal = forced_refusal(account, model)
+                        if refusal is not None:
+                            raise UpstreamExhausted(refusal, status_code=503)
                     else:
                         account = lb.select_account(
                             accounts,

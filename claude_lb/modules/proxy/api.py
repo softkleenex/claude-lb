@@ -6,7 +6,6 @@ existing ``/v1/...`` paths keep working.
 
 from __future__ import annotations
 
-import json
 import time
 
 from fastapi import APIRouter, Request, Response
@@ -15,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from claude_lb.dependencies import AdmissionDep, ProxyServiceDep
 from claude_lb.modules.api_keys.service import Admission
 from claude_lb.modules.auth.dependencies import client_ip
-from claude_lb.modules.proxy import sticky
+from claude_lb.modules.proxy import request_models, sticky
 from claude_lb.modules.proxy.service import (
     ProxyService,
     UpstreamExhausted,
@@ -35,25 +34,11 @@ router = APIRouter(tags=["proxy"])
 PROXIED_PREFIXES = ("/v1/messages", "/v1/models", "/v1/complete", "/v1/files")
 
 
-def _enforce_model(body: bytes, model: str) -> bytes:
-    """Rewrite the request's ``model`` to the key's enforced model.
-
-    Only a JSON object that already names a model is touched; anything else is relayed
-    as sent, exactly like a key without an enforced model.
-    """
-    try:
-        payload = json.loads(body) if body else None
-    except (ValueError, UnicodeDecodeError):
-        return body
-    if not isinstance(payload, dict) or not isinstance(payload.get("model"), str):
-        return body
-    if payload["model"] == model:
-        return body
-    payload["model"] = model
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-
-
 def _is_proxied(path: str) -> bool:
+    if request_models.has_unsafe_segments(path):
+        # An upstream may collapse `//`, `.` or `..` and land on another endpoint than
+        # the one admission classified (e.g. `/v1/messages/./batches`).
+        return False
     return any(path == prefix or path.startswith(prefix + "/") for prefix in PROXIED_PREFIXES)
 
 
@@ -99,10 +84,12 @@ async def _proxy(
     api_key = admission.key if admission else None
     body = await request.body()
     if api_key is not None and api_key.enforced_model:
-        body = _enforce_model(body, api_key.enforced_model)
+        body = request_models.enforce(request.method, path, body, api_key.enforced_model)
     started_at = time.perf_counter()
     api_key_id = api_key.id if api_key else None
     model, _ = proxy_service._peek_request(body)  # noqa: SLF001 - same package
+    if model is None and admission is not None:
+        model = admission.model  # a batch whose entries all use one model
     # Logged on every row (not only when sticky routing is on) so the dashboard can
     # count and filter conversations.
     session_key = sticky.session_key(body, api_key_id=api_key_id)

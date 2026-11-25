@@ -72,6 +72,35 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - `POST /api/settings/reset` resets only runtime settings; it no longer touches the firewall mode
   or guest access.
 
+### Security
+- **Message batches no longer bypass API-key model policy.** `POST /v1/messages/batches` names a
+  model per entry (`requests[*].params.model`); every entry must now pass the key's allowlist
+  (403 `permission_error`), and an enforced model rewrites each entry. Keys with token or cost
+  limits (rules or the legacy budget) get 403 for batches: their usage happens upstream, later,
+  and claude-lb cannot meter it. Request-count limits still allow batches.
+- **Model-bearing bodies are read strictly for keys with a model policy** (allowlist, enforced
+  model, or a model-filtered limit): a compressed body (`Content-Encoding`), a byte-order mark,
+  duplicate keys, a non-string `model` or a malformed batch is refused with 400 instead of being
+  relayed unchecked. Applies to `/v1/messages`, `/v1/messages/count_tokens`, `/v1/complete` and
+  batch creation. Proxy paths with empty or dot segments (`/v1/messages/./batches`) are 404.
+- **Out-of-credit detection** now needs `error.type == "invalid_request_error"` and a message that
+  is exactly one of Anthropic's wordings. Before, any 400 whose message merely *contained* the
+  phrase disabled the account — and upstream echoes client field names, so a client could switch
+  the pool off.
+- **"No account available" (503)** tells API-key holders only categories ("1 at spend cap,
+  1 disabled"); account names, cap amounts and disabled reasons go to the server log (INFO).
+- **Automations**: disabling a job, changing its schedule, or dropping an account from its targets
+  cancels runs that were planned but not sent (a spread can hold them for two hours), and every run
+  re-checks the job right before sending. A run forced through a paused account still respects the
+  spend cap, model refusals and breaker-disabled accounts. One job with a broken schedule or
+  timezone no longer fails the whole scheduler tick, and long error text is clipped to the column.
+- **Guests** no longer see firewall addresses: entries show `hidden` (no note), firewall audit
+  events have no target/detail, and searching the audit log cannot confirm an address.
+- The firewall rule cache is dropped after a change commits (it was dropped before, so a request in
+  between could cache the old rules for the TTL).
+- Model-filtered limits and allowlists treat an alias and its dated snapshot / `-latest` form as the
+  same model in both directions (`claude-opus-4-1` ⇄ `claude-opus-4-1-20250805`).
+
 ## [0.6.1] — 2026-11-25
 
 ### Fixed

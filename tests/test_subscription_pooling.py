@@ -709,7 +709,9 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
     assert _asyncio.run(_run_check()) == ("max_5x", "bearer", token)
 
 
-def test_unavailable_message_names_the_actual_reasons():
+def test_unavailable_message_counts_reasons_and_logs_the_details(caplog):
+    import logging
+
     from claude_lb.modules.proxy import model_blocks
     from claude_lb.modules.proxy.service import explain_unavailable
 
@@ -718,7 +720,12 @@ def test_unavailable_message_names_the_actual_reasons():
     capped.enabled = True
     sub = _make_account("sub")
     model_blocks.add_block(sub, "claude-sonnet-5-5")
+    caplog.set_level(logging.INFO, logger="claude_lb.modules.proxy.service")
     message = explain_unavailable([capped, sub], "claude-sonnet-5-5")
-    assert "console: spend cap $1.00 reached" in message
-    assert "sub: subscription does not serve claude-sonnet-5-5" in message
+    # The client sees categories only; names and amounts are for the operator's log.
+    assert message == (
+        "no account can serve claude-sonnet-5-5 right now: 1 at spend cap, 1 does not serve this model"
+    )
+    assert "console: spend cap $1.00 reached" in caplog.text
+    assert "sub: subscription does not serve claude-sonnet-5-5" in caplog.text
     assert "add one" in explain_unavailable([], "x")

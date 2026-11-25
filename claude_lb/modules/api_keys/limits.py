@@ -12,6 +12,7 @@ Usage is counted from request logs, so it is exact for everything that has finis
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -81,18 +82,35 @@ def window_start(spec: RuleSpec, now: datetime) -> datetime:
     return now - timedelta(seconds=spec.window_seconds)
 
 
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{8}|latest)$")
+
+
+def model_base(model: str) -> str:
+    """A model id without its dated-snapshot or ``-latest`` suffix:
+    ``claude-opus-4-1-20250805`` and ``claude-opus-4-1-latest`` → ``claude-opus-4-1``."""
+    return _SNAPSHOT_SUFFIX.sub("", model)
+
+
 def model_matches(model_filter: str | None, model: str | None) -> bool:
-    """Exact id, or a family prefix: ``claude-sonnet-4-5`` covers ``claude-sonnet-4-5-20250929``."""
+    """Exact id, or a family prefix: ``claude-sonnet-4-5`` covers ``claude-sonnet-4-5-20250929``.
+
+    Aliases and dated snapshots match both ways — a filter written as
+    ``claude-opus-4-1-20250805`` also covers requests for ``claude-opus-4-1`` — so a rule
+    cannot be sidestepped by naming the same model the other way.
+    """
     if model_filter is None:
         return True
     if model is None:
         return False
-    return model == model_filter or model.startswith(model_filter + "-")
+    base = model_base(model_filter)
+    return model == base or model.startswith(base + "-")
 
 
 def _model_condition(model_filter: str):
-    escaped = model_filter.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return or_(RequestLog.model == model_filter, RequestLog.model.like(escaped + "-%", escape="\\"))
+    """SQL form of :func:`model_matches`."""
+    base = model_base(model_filter)
+    escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return or_(RequestLog.model == base, RequestLog.model.like(escaped + "-%", escape="\\"))
 
 
 def key_rules(key: ApiKey) -> list[RuleSpec]:

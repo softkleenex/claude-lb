@@ -31,6 +31,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import select, update
@@ -62,6 +63,14 @@ MANUAL_COOLDOWN = timedelta(minutes=5)
 """No job runs more often than this, manual "Run now" included."""
 CONCURRENCY = 4
 TERMINAL = ("success", "failed", "skipped")
+ERROR_MAX_CHARS = 512
+"""`AutomationRun.error` is a VARCHAR(512); longer text is cut, never rejected."""
+
+
+def clip_error(text: str | None) -> str | None:
+    if text is None or len(text) <= ERROR_MAX_CHARS:
+        return text
+    return text[: ERROR_MAX_CHARS - 1] + "…"
 
 
 def now_utc() -> datetime:
@@ -79,7 +88,7 @@ def next_run_at(job: AutomationJob, now: datetime | None = None) -> datetime | N
         return None
     try:
         return sched.next_slot(schedule_of(job), now or now_utc())
-    except (sched.ScheduleError, ValueError):
+    except (sched.ScheduleError, ValueError, ZoneInfoNotFoundError):
         return None
 
 
@@ -208,30 +217,60 @@ async def plan_due_cycles(session: AsyncSession, now: datetime, rng: random.Rand
     """Plan the cycle of every enabled job whose latest slot is due. Returns runs planned."""
     result = await session.execute(select(AutomationJob).where(AutomationJob.enabled.is_(True)))
     planned = 0
-    for job in result.scalars():
+    for job in list(result.scalars()):
+        # One broken job (an invalid schedule, a timezone the system no longer knows)
+        # must not stop every other job from firing.
         try:
-            schedule = schedule_of(job)
-        except sched.ScheduleError:
-            logger.warning("automation %s has an invalid schedule; skipping", job.name)
-            continue
-        latest = sched.latest_slot(schedule, now)
-        if latest is None:
-            continue
-        local_day, instant = latest
-        if instant < (as_aware(job.armed_at) or instant) or now - instant > GRACE:
-            continue
-        runs = await plan_cycle(
-            session,
-            job,
-            cycle_key=sched.cycle_key(job.id, schedule, local_day),
-            trigger="scheduled",
-            base_time=instant,
-            rng=rng,
-        )
-        if runs:
-            logger.info("automation %s: planned %d run(s) for %s", job.name, len(runs), instant.isoformat())
-        planned += len(runs)
+            planned += await _plan_job(session, job, now, rng)
+        except Exception:
+            logger.exception("automation %s could not be planned; skipping it this tick", job.name)
     return planned
+
+
+async def _plan_job(
+    session: AsyncSession, job: AutomationJob, now: datetime, rng: random.Random | None
+) -> int:
+    try:
+        schedule = schedule_of(job)
+        latest = sched.latest_slot(schedule, now)
+    except (sched.ScheduleError, ValueError, ZoneInfoNotFoundError):
+        logger.warning("automation %s has an invalid schedule; skipping", job.name)
+        return 0
+    if latest is None:
+        return 0
+    local_day, instant = latest
+    if instant < (as_aware(job.armed_at) or instant) or now - instant > GRACE:
+        return 0
+    runs = await plan_cycle(
+        session,
+        job,
+        cycle_key=sched.cycle_key(job.id, schedule, local_day),
+        trigger="scheduled",
+        base_time=instant,
+        rng=rng,
+    )
+    if runs:
+        logger.info("automation %s: planned %d run(s) for %s", job.name, len(runs), instant.isoformat())
+    return len(runs)
+
+
+async def cancel_pending(
+    session: AsyncSession, job_id: str, reason: str, *, keep_account_ids: Iterable[str] | None = None
+) -> int:
+    """Skip a job's runs that are planned but not started, e.g. because the job was
+    switched off or rescheduled. ``keep_account_ids`` spares the runs of those accounts
+    (used when only the targets changed). Returns how many were cancelled."""
+    conditions = [AutomationRun.job_id == job_id, AutomationRun.status == "pending"]
+    if keep_account_ids is not None:
+        keep = list(keep_account_ids)
+        if keep:
+            conditions.append((AutomationRun.account_id.is_(None)) | (AutomationRun.account_id.not_in(keep)))
+    result = await session.execute(
+        update(AutomationRun)
+        .where(*conditions)
+        .values(status="skipped", finished_at=now_utc(), error=clip_error(f"cancelled: {reason}"))
+    )
+    return result.rowcount or 0
 
 
 # ---- execution ---------------------------------------------------------------
@@ -239,6 +278,8 @@ async def plan_due_cycles(session: AsyncSession, now: datetime, rng: random.Rand
 
 async def _finish(run_id: str, **values) -> None:
     values.setdefault("finished_at", now_utc())
+    if "error" in values:
+        values["error"] = clip_error(values["error"])
     async with session_scope() as session:
         await session.execute(update(AutomationRun).where(AutomationRun.id == run_id).values(**values))
 
@@ -278,6 +319,14 @@ async def execute_run(client: httpx.AsyncClient, run_id: str) -> str:
         if account is None:
             await _finish(run_id, status="skipped", error="the account was deleted")
             return "skipped"
+        # The job may have changed since this run was planned (a spread run can wait up
+        # to two hours): re-check right before sending.
+        if run.trigger == "scheduled" and not job.enabled:
+            await _finish(run_id, status="skipped", error="cancelled: the automation was disabled")
+            return "skipped"
+        if job.account_ids and account.id not in job.account_ids:
+            await _finish(run_id, status="skipped", error="cancelled: the account is no longer a target")
+            return "skipped"
         paused = lb.is_paused(account)
         if paused and not job.include_paused_accounts:
             await _finish(run_id, status="skipped", error="account is paused")
@@ -292,6 +341,13 @@ async def execute_run(client: httpx.AsyncClient, run_id: str) -> str:
         if model_blocks.is_blocked(account, job.model):
             await _finish(
                 run_id, status="skipped", error=f"model refused: {account.name} does not serve {job.model}"
+            )
+            return "skipped"
+        if lb.spend_cap_reached(account):
+            await _finish(
+                run_id,
+                status="skipped",
+                error=f"account reached its spend cap (${account.spend_cap_usd:.2f})",
             )
             return "skipped"
         account_id, model = account.id, job.model
@@ -396,8 +452,13 @@ async def run_claimed(client: httpx.AsyncClient, run_ids: list[str]) -> None:
 
     async def one(run_id: str) -> None:
         async with semaphore:
-            if await claim(run_id):
+            if not await claim(run_id):
+                return
+            try:
                 await execute_run(client, run_id)
+            except Exception as exc:  # noqa: BLE001 - one run must not sink the others
+                logger.exception("automation run %s crashed", run_id)
+                await _finish(run_id, status="failed", error=f"{type(exc).__name__}: {exc}")
 
     await asyncio.gather(*(one(r) for r in run_ids))
 

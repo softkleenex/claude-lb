@@ -443,6 +443,15 @@ async def update_job(job_id: str, payload: JobPatch, request: Request, session: 
     if rearm:
         # A slot that passed while the job was off (or on the old schedule) never fires late.
         job.armed_at = service.now_utc()
+    # Runs already planned (a spread cycle can wait up to two hours) follow the change.
+    if toggled is False:
+        await service.cancel_pending(session, job.id, "the automation was disabled")
+    elif "schedule" in changed:
+        await service.cancel_pending(session, job.id, "the schedule changed")
+    elif "accounts" in changed and job.account_ids:
+        await service.cancel_pending(
+            session, job.id, "the account is no longer a target", keep_account_ids=job.account_ids
+        )
     await session.flush()
     ip = client_ip(request)
     if changed:

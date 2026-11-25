@@ -850,6 +850,42 @@ shows all firewall/guest/automation events (guest login with actor `guest`). 390
   error messages are English; recharts chunk > 600 kB; `npm audit` moderate advisories in dev deps not reviewed;
   `claude-lb demo` leaves a `claude-lb-demo-*` dir in `$TMPDIR`.
 
+### 2026-11-27 — Review fixes (security review of the rebuild)
+**Done** (regression tests in `tests/test_review_fixes.py`, one class per finding)
+1. **[High] Batches bypassed key model policy** — new `claude_lb/modules/proxy/request_models.py`: `inspect()` reads the
+   models a request names (top-level `model` for `/v1/messages`, `/count_tokens`, `/v1/complete`; every
+   `requests[*].params.model` for `POST /v1/messages/batches`) strictly (UTF-8, no BOM, no duplicate keys via
+   `object_pairs_hook`, no `Content-Encoding`); `enforce()` rewrites them all. `admit()` takes `batch_models` and
+   `unreadable`: unreadable → 400 for keys with a model policy (allowlist, enforced model or model-filtered rule);
+   batch → 403 for keys with any token/cost rule or legacy token/cost budget, every entry checked against the
+   allowlist. `_is_proxied` refuses empty/dot path segments. `TestBatchModelPolicy`.
+2. **[Medium] Echoed text disabled accounts** — `is_billing_exhausted` needs `invalid_request_error` and a full
+   `re.fullmatch` against the two known wordings. `TestBillingDetection` (existing out-of-credit test unchanged).
+3. **[Medium-Low] Planned spread runs survived disable/reschedule** — `execute_run` re-checks `job.enabled` (scheduled
+   runs; "Run now" on a disabled job still works) and that the account is still targeted; `PATCH` cancels pending runs
+   (`skipped`, error `cancelled: …`) on disable, schedule change, or dropped targets (`service.cancel_pending`).
+   Deleting a job already deleted its runs. `TestAutomationChanges`.
+4. **[Low] Forced runs ignored caps** — `forced_refusal()` in `forward(force_account=True)` (spend cap, model block,
+   breaker-disabled); `execute_run` also skips capped accounts up front. `TestForcedAutomation`.
+5. `explain_unavailable` → category counts for clients, per-account detail logged at INFO. `TestUnavailableMessage`;
+   `test_unavailable_message_counts_reasons_and_logs_the_details` updated.
+6. `clip_error()` for `AutomationRun.error` (512); per-job `try` in planning, `ZoneInfoNotFoundError` caught, one
+   crashing run cannot sink `gather`. `TestAutomationRobustness`.
+7. Firewall cache invalidated from `after_commit`/`after_rollback` session events. `TestFirewallCache`.
+8. Guests: firewall entries `network: "hidden"`, note and own IP blank; firewall-entry audit events masked and not
+   searchable by target/detail. `TestGuestFirewallPrivacy`.
+9. `limits.model_base()` strips `-YYYYMMDD`/`-latest`; `model_matches` and the SQL condition compare on the base.
+   `TestModelAliases`.
+
+**Results**: 36 of the 43 new tests fail on the pre-fix tree (the other 7 guard behaviour that must stay); all pass
+after. `ruff check`/`ruff format --check` clean; `pytest` **607 passed**. Frontend untouched (guests see the literal
+`hidden` in the network column).
+
+**Known issues / not done**
+- The allowlist now also uses alias/snapshot matching, so an entry `claude-opus-4-1-20250805` admits any
+  `claude-opus-4-1-*` id — same family, but broader than an exact snapshot pin.
+- A batch's later usage is still not metered for request-count-only keys (one batch = one request).
+
 ### 아침 요약 (Morning summary)
 **만든 것** — 예전 단일 HTML 대시보드를 codex-lb 기반 React 대시보드로 완전히 교체했습니다(A–H, 커밋 13개, push 안 함).
 - 페이지: 대시보드(지표·추이·5h/7d 용량 도넛·주간 속도·API 키 지출·계정 카드·모델별 사용량·요청 로그/대화 보기),

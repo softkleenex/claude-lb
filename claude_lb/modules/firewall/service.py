@@ -25,7 +25,7 @@ import ipaddress
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.db.models import FirewallEntry
@@ -69,6 +69,18 @@ _cached_at = 0.0
 def invalidate() -> None:
     global _cache, _cached_at
     _cache, _cached_at = None, 0.0
+
+
+def _invalidate_when_done(session: AsyncSession) -> None:
+    """Drop the cached rules once ``session``'s transaction ends.
+
+    Not before: until the change commits, another request can still load the old rules
+    and cache them for the whole TTL. After a rollback too, because this request may
+    have cached its own uncommitted view.
+    """
+    sync_session = session.sync_session
+    event.listen(sync_session, "after_commit", lambda _s: invalidate(), once=True)
+    event.listen(sync_session, "after_rollback", lambda _s: invalidate(), once=True)
 
 
 def parse_address(ip: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -117,7 +129,7 @@ async def set_mode(session: AsyncSession, mode: str) -> None:
     if mode not in MODES:
         raise FirewallError(f"unknown mode {mode!r}; expected one of {', '.join(MODES)}")
     await settings_service.set_value(session, MODE_KEY, mode)
-    invalidate()
+    _invalidate_when_done(session)
 
 
 async def list_entries(session: AsyncSession) -> list[FirewallEntry]:
@@ -151,11 +163,11 @@ async def add_entry(session: AsyncSession, value: str, note: str = "") -> Firewa
     entry = FirewallEntry(network=network, note=note.strip()[:255])
     session.add(entry)
     await session.flush()
-    invalidate()
+    _invalidate_when_done(session)
     return entry
 
 
 async def remove_entry(session: AsyncSession, entry: FirewallEntry) -> None:
     await session.delete(entry)
     await session.flush()
-    invalidate()
+    _invalidate_when_done(session)

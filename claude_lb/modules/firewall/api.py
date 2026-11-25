@@ -11,7 +11,7 @@ from claude_lb.db.models import FirewallEntry
 from claude_lb.db.session import session_scope
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.audit import service as audit
-from claude_lb.modules.auth.dependencies import client_ip
+from claude_lb.modules.auth.dependencies import client_ip, is_guest
 from claude_lb.modules.firewall import service
 
 router = APIRouter(prefix="/api/firewall", tags=["firewall"])
@@ -63,9 +63,13 @@ class CheckOut(BaseModel):
     """Whether this client would pass if the entry were added (current mode)."""
 
 
-def _entry_out(entry: FirewallEntry, ip: str | None = None) -> FirewallEntryOut:
+HIDDEN = "hidden"
+"""What a read-only guest sees instead of an address or a note (notes name people)."""
+
+
+def _entry_out(entry: FirewallEntry, ip: str | None = None, *, guest: bool = False) -> FirewallEntryOut:
     network = service.to_network(entry.network)
-    return FirewallEntryOut(
+    out = FirewallEntryOut(
         covers_client=bool(service.Rules(mode="allowlist", networks=(network,)).covering(ip)),
         id=entry.id,
         network=entry.network,
@@ -74,16 +78,18 @@ def _entry_out(entry: FirewallEntry, ip: str | None = None) -> FirewallEntryOut:
         addresses=min(network.num_addresses, 2**63 - 1),
         created_at=entry.created_at,
     )
+    return out.model_copy(update={"network": HIDDEN, "note": ""}) if guest else out
 
 
 async def _state(session, request: Request) -> FirewallOut:
     rules = await service.load_rules(session, use_cache=False)
     entries = await service.list_entries(session)
     ip = client_ip(request)
+    guest = is_guest(request)
     return FirewallOut(
         mode=rules.mode,
-        entries=[_entry_out(e, ip) for e in entries],
-        client_ip=ip,
+        entries=[_entry_out(e, ip, guest=guest) for e in entries],
+        client_ip="" if guest else ip,
         client_allowed=rules.allows(ip),
         client_covered=bool(rules.covering(ip)),
     )
@@ -106,7 +112,7 @@ async def check_entry(request: Request, session: SessionDep, network: str = Quer
     after = service.Rules(mode=rules.mode, networks=(*rules.networks, service.to_network(normalized)))
     return CheckOut(
         network=normalized,
-        client_ip=ip,
+        client_ip="" if is_guest(request) else ip,
         covers_client=bool(
             service.Rules(mode="allowlist", networks=(service.to_network(normalized),)).covering(ip)
         ),

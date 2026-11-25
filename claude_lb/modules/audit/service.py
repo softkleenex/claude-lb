@@ -11,7 +11,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.db.models import AuditEvent
@@ -19,6 +19,13 @@ from claude_lb.db.models import AuditEvent
 logger = logging.getLogger(__name__)
 
 MAX_DETAIL = 512
+
+# Actions whose target/detail is a client address (a firewall entry and its note).
+ADDRESS_ACTIONS = ("firewall.entry_added", "firewall.entry_removed", "firewall.entry_updated")
+
+
+def reveals_addresses(action: str) -> bool:
+    return action in ADDRESS_ACTIONS
 
 
 async def record(
@@ -89,8 +96,12 @@ async def page(
     conditions = []
     if actions:
         conditions.append(AuditEvent.action.in_(list(actions)))
+    # Without client addresses (a guest), the address-bearing rows must not be findable
+    # by their address either: searching for one would confirm it is on the firewall.
+    addressless = None if search_client_ip else AuditEvent.action.not_in(ADDRESS_ACTIONS)
     if target:
-        conditions.append(AuditEvent.target.ilike(f"%{_escape_like(target.strip())}%", escape="\\"))
+        match = AuditEvent.target.ilike(f"%{_escape_like(target.strip())}%", escape="\\")
+        conditions.append(match if addressless is None else and_(addressless, match))
     if since is not None:
         conditions.append(AuditEvent.created_at >= since)
     if until is not None:
@@ -100,10 +111,14 @@ async def page(
     term = (search or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"
-        columns = [AuditEvent.action, AuditEvent.target, AuditEvent.detail, AuditEvent.actor]
+        matches = [column.ilike(pattern, escape="\\") for column in (AuditEvent.action, AuditEvent.actor)]
+        free_text = or_(
+            AuditEvent.target.ilike(pattern, escape="\\"), AuditEvent.detail.ilike(pattern, escape="\\")
+        )
+        matches.append(free_text if addressless is None else and_(addressless, free_text))
         if search_client_ip:
-            columns.append(AuditEvent.client_ip)
-        conditions.append(or_(*(column.ilike(pattern, escape="\\") for column in columns)))
+            matches.append(AuditEvent.client_ip.ilike(pattern, escape="\\"))
+        conditions.append(or_(*matches))
     total = (await session.execute(select(func.count(AuditEvent.id)).where(*conditions))).scalar_one()
     rows = await session.execute(
         select(AuditEvent)

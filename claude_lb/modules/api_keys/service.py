@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -194,22 +195,83 @@ class Admission:
             self.ticket = None
 
 
-async def admit(session: AsyncSession, presented_key: str, model: str | None = None) -> Admission:
+async def admit(
+    session: AsyncSession,
+    presented_key: str,
+    model: str | None = None,
+    *,
+    batch_models: Sequence[str] | None = None,
+    unreadable: str | None = None,
+) -> Admission:
     """Authenticate a key, apply its model policy and, if it has limits, reserve an
     in-flight slot.
 
-    ``model`` is the model named in the request body, if any. The caller must call
-    :meth:`Admission.release` once the request has been logged.
+    ``model`` is the model named in the request body, if any. ``batch_models`` is set
+    for a message-batch creation: every entry's model. ``unreadable`` says why the body
+    of a model-bearing request could not be read; keys whose policy depends on the model
+    refuse such a request instead of relaying what they could not check.
+
+    The caller must call :meth:`Admission.release` once the request has been logged.
     """
     record = await _resolve(session, presented_key)
+    rules = limits_mod.key_rules(record)
+    if unreadable is not None and has_model_policy(record, rules):
+        raise AuthError(
+            f"claude-lb cannot check this request against the API key's model policy: {unreadable}",
+            status_code=400,
+            error_type="invalid_request_error",
+        )
+    if batch_models is not None:
+        return await _admit_batch(session, record, rules, batch_models)
     effective = effective_model(record, model)
     check_model_allowed(record, effective)
-    specs = [s for s in limits_mod.key_rules(record) if limits_mod.model_matches(s.model_filter, effective)]
+    specs = [s for s in rules if limits_mod.model_matches(s.model_filter, effective)]
     if not specs:
         return Admission(record, None, effective)
     async with _key_lock(record.id):
         await _enforce_limits(session, record, specs, model=effective)
         return Admission(record, _take_slot(record.id, effective), effective)
+
+
+METERED_METRICS = frozenset({"total_tokens", "input_tokens", "output_tokens", "cost_usd"})
+
+
+def has_model_policy(key: ApiKey, rules: list[limits_mod.RuleSpec]) -> bool:
+    """Whether what the key may do depends on the model a request names."""
+    return (
+        key.allowed_models is not None
+        or bool(key.enforced_model)
+        or any(spec.model_filter is not None for spec in rules)
+    )
+
+
+async def _admit_batch(
+    session: AsyncSession, record: ApiKey, rules: list[limits_mod.RuleSpec], models: Sequence[str]
+) -> Admission:
+    """A batch runs many requests later, upstream; its usage never passes through
+    claude-lb. So a key with token or spend limits cannot use batches at all, and the
+    model policy applies to every entry."""
+    if any(spec.metric in METERED_METRICS for spec in rules):
+        raise AuthError(
+            "message batches are not available to API keys with token or cost limits: "
+            "claude-lb cannot meter batch usage",
+            status_code=403,
+            error_type="permission_error",
+        )
+    effective = [effective_model(record, m) or m for m in models]
+    for entry_model in dict.fromkeys(effective):
+        check_model_allowed(record, entry_model)
+    specs = [
+        s
+        for s in rules
+        if s.model_filter is None or any(limits_mod.model_matches(s.model_filter, m) for m in effective)
+    ]
+    single = effective[0] if effective and len(set(effective)) == 1 else None
+    if not specs:
+        return Admission(record, None, single)
+    async with _key_lock(record.id):
+        await _enforce_limits(session, record, specs, model=single)
+        return Admission(record, _take_slot(record.id, single), single)
 
 
 def effective_model(key: ApiKey, requested: str | None) -> str | None:

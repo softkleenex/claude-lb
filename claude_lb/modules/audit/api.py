@@ -40,8 +40,14 @@ class AuditActionCount(BaseModel):
 
 def _out(event, *, guest: bool) -> AuditEventOut:
     out = AuditEventOut.model_validate(event, from_attributes=True)
-    # Guests get a read-only view; who connected from where is not part of it.
-    return out.model_copy(update={"client_ip": ""}) if guest else out
+    if not guest:
+        return out
+    # Guests get a read-only view; who connected from where is not part of it — and a
+    # firewall entry *is* an address (its note often names whose).
+    update = {"client_ip": ""}
+    if service.reveals_addresses(out.action):
+        update |= {"target": "hidden", "detail": ""}
+    return out.model_copy(update=update)
 
 
 def _aware(value: datetime | None) -> datetime | None:
