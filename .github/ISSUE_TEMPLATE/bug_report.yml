@@ -1,0 +1,35 @@
+name: Bug report
+description: Something claude-lb did that it should not have
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `claude-lb --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: How is it running?
+      options: [uv / pipx, Docker, From source, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: db
+    attributes:
+      label: Database
+      options: [SQLite (default), Postgres]
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Include the request shape (streaming or not, model, concurrency) if it matters. Never paste keys or tokens.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      render: text
