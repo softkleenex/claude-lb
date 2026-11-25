@@ -44,12 +44,6 @@ When Anthropic publishes a new model or price, update `claude_lb/core/pricing.py
 release whose price differs from its family's: lookup takes the longest matching prefix, so a
 missing entry silently bills the family rate. Add a test next to the existing pricing tests.
 
-## Scope
-
-claude-lb pools credentials **you are entitled to pool**: Console API keys, or bearer tokens you
-supply. Changes that pool consumer subscriptions, or that ship a provider's OAuth client
-identity, will not be merged.
-
 ## Releasing (maintainers)
 
 1. Move *Unreleased* in the changelog to a new version heading, and bump `version` in
