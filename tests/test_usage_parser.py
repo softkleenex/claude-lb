@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.pricing import cache_read_savings_usd, estimate_cost_usd, lookup
-from app.modules.proxy.usage_parser import StreamUsageCollector, parse_json_usage
+from claude_lb.core.pricing import cache_read_savings_usd, estimate_cost_usd, lookup
+from claude_lb.modules.proxy.usage_parser import StreamUsageCollector, parse_json_usage
 
 SSE = (
     b"event: message_start\n"

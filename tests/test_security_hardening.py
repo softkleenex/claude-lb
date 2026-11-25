@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 
-from app.core import totp
-from app.db.session import session_scope
-from app.modules.auth import service as auth
-from app.modules.usage import reports
+from claude_lb.core import totp
+from claude_lb.db.session import session_scope
+from claude_lb.modules.auth import service as auth
+from claude_lb.modules.usage import reports
 from tests.test_auth import PASSWORD
 from tests.test_proxy_api import make_client, ok_json
 

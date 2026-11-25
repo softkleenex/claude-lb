@@ -27,9 +27,9 @@ def anyio_backend() -> str:
 
 @pytest.fixture(autouse=True)
 async def fresh_database() -> AsyncIterator[None]:
-    from app.db.models import Base
-    from app.db.session import dispose_db, get_engine, init_db
-    from app.modules.auth import service as auth_service
+    from claude_lb.db.models import Base
+    from claude_lb.db.session import dispose_db, get_engine, init_db
+    from claude_lb.modules.auth import service as auth_service
 
     # The "a password exists" latch is process-global and deliberately one-way, so it
     # has to be cleared between tests along with the database it mirrors.

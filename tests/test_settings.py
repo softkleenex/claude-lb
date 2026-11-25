@@ -5,10 +5,10 @@ import json
 import httpx
 import pytest
 
-from app.db.models import Account
-from app.db.session import session_scope
-from app.modules.proxy import sticky
-from app.modules.settings import service
+from claude_lb.db.models import Account
+from claude_lb.db.session import session_scope
+from claude_lb.modules.proxy import sticky
+from claude_lb.modules.settings import service
 from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
 
 
@@ -67,7 +67,7 @@ class TestSettingsService:
             assert (await service.load(session, use_cache=False)).max_attempts == 5
 
     async def test_corrupt_stored_value_falls_back_to_defaults_rather_than_crashing(self):
-        from app.db.models import Setting
+        from claude_lb.db.models import Setting
 
         async with session_scope() as session:
             session.add(Setting(key="routing_strategy", value_json=json.dumps("teleport")))
@@ -77,7 +77,7 @@ class TestSettingsService:
         assert settings.routing_strategy == "capacity_weighted"
 
     async def test_unparseable_row_is_skipped(self):
-        from app.db.models import Setting
+        from claude_lb.db.models import Setting
 
         async with session_scope() as session:
             session.add(Setting(key="max_attempts", value_json="{not json"))

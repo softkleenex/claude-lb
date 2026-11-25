@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import inspect, select, text
 
-from app.db import schema
-from app.db.models import Base, UsageDaily
-from app.db.session import get_engine, init_db, session_scope
+from claude_lb.db import schema
+from claude_lb.db.models import Base, UsageDaily
+from claude_lb.db.session import get_engine, init_db, session_scope
 
 # The shape `usage_daily` had before the api_key dimension was added, verbatim.
 OLD_USAGE_DAILY = """
@@ -84,7 +84,7 @@ class TestAdditiveUpgrade:
         await build_old_schema()
         await init_db()
 
-        from app.modules.usage import reports
+        from claude_lb.modules.usage import reports
 
         async with session_scope() as session:
             report = await reports.build(session, group_by="api_key", start="2026-01-01", end="2026-01-01")
@@ -141,7 +141,7 @@ class TestDefaults:
         # e.g. `default=utcnow` — there is nothing to write into the DDL.
         from sqlalchemy import Column, DateTime
 
-        from app.db.models import utcnow
+        from claude_lb.db.models import utcnow
 
         assert schema._literal_default(Column("c", DateTime, default=utcnow)) is None
 

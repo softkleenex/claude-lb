@@ -13,7 +13,7 @@ from pathlib import Path
 
 from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
 
-INDEX = Path("app/modules/dashboard/index.html").read_text(encoding="utf-8")
+INDEX = Path("claude_lb/modules/dashboard/index.html").read_text(encoding="utf-8")
 
 
 def test_dashboard_html_is_served_intact():

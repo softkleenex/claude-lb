@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.modules.proxy import sticky
+from claude_lb.modules.proxy import sticky
 from tests.test_load_balancer import make_account
 
 

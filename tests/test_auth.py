@@ -6,11 +6,11 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from app.core import totp
-from app.db.session import session_scope
-from app.main import create_app
-from app.modules.auth import service as auth
-from app.modules.auth.dependencies import BOOTSTRAP_HEADER
+from claude_lb.core import totp
+from claude_lb.db.session import session_scope
+from claude_lb.main import create_app
+from claude_lb.modules.auth import service as auth
+from claude_lb.modules.auth.dependencies import BOOTSTRAP_HEADER
 from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
 
 PASSWORD = "correct-horse-battery"

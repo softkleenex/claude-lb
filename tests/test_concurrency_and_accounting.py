@@ -14,14 +14,14 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.core.config import get_settings
-from app.db.models import Account, ApiKey, ModelCatalogEntry, UsageDaily
-from app.db.session import session_scope
-from app.modules.api_keys import service as key_service
-from app.modules.health import service as health_service
-from app.modules.proxy import service as proxy_service
-from app.modules.proxy.service import record_request, wrap_stream_for_accounting
-from app.modules.proxy.usage_parser import Usage
+from claude_lb.core.config import get_settings
+from claude_lb.db.models import Account, ApiKey, ModelCatalogEntry, UsageDaily
+from claude_lb.db.session import session_scope
+from claude_lb.modules.api_keys import service as key_service
+from claude_lb.modules.health import service as health_service
+from claude_lb.modules.proxy import service as proxy_service
+from claude_lb.modules.proxy.service import record_request, wrap_stream_for_accounting
+from claude_lb.modules.proxy.usage_parser import Usage
 from tests.test_proxy_api import (
     MESSAGE_BODY,
     SSE_BODY,

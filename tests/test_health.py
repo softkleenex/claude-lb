@@ -7,10 +7,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.db.models import Account, ModelCatalogEntry
-from app.db.session import session_scope
-from app.modules.health import service
-from app.modules.settings import service as settings_service
+from claude_lb.db.models import Account, ModelCatalogEntry
+from claude_lb.db.session import session_scope
+from claude_lb.modules.health import service
+from claude_lb.modules.settings import service as settings_service
 from tests.test_proxy_api import MESSAGE_BODY, add_account, get_account, make_client
 
 MODELS_BODY = {

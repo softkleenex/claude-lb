@@ -9,13 +9,13 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.core.config import get_settings
-from app.core.crypto import encrypt, mask_secret
-from app.db.models import Account, RequestLog
-from app.db.session import session_scope
-from app.main import create_app
-from app.modules.settings import service as settings_service
-from app.modules.settings.service import RuntimeSettings
+from claude_lb.core.config import get_settings
+from claude_lb.core.crypto import encrypt, mask_secret
+from claude_lb.db.models import Account, RequestLog
+from claude_lb.db.session import session_scope
+from claude_lb.main import create_app
+from claude_lb.modules.settings import service as settings_service
+from claude_lb.modules.settings.service import RuntimeSettings
 
 MESSAGE_BODY = {"model": "claude-opus-5", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
 
