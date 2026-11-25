@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import httpx
@@ -15,9 +16,17 @@ from claude_lb.core.config import get_settings
 from claude_lb.core.crypto import encrypt, mask_secret
 from claude_lb.db.models import Account
 from claude_lb.db.session import dispose_db, init_db, session_scope
-from claude_lb.modules.accounts import credentials, oauth_flow
+from claude_lb.modules.accounts import credentials, importer, oauth_flow, subscription_login
 from claude_lb.modules.api_keys.service import create_api_key
-from claude_lb.modules.proxy.load_balancer import STRATEGIES, headroom, is_available
+from claude_lb.modules.proxy import model_blocks
+from claude_lb.modules.proxy.load_balancer import STRATEGIES, headroom, is_available, spend_cap_reached
+from claude_lb.modules.proxy.quota import (
+    PLAN_TYPES,
+    ROUTING_POLICIES,
+    apply_unified_quota,
+    effective_primary_used,
+    effective_secondary_used,
+)
 
 app = typer.Typer(help="Anthropic API key load balancer & proxy.", no_args_is_help=True)
 account_app = typer.Typer(help="Manage upstream Anthropic accounts.", no_args_is_help=True)
@@ -213,9 +222,25 @@ def account_add(
     api_key: Annotated[str, typer.Option(prompt=True, hide_input=True, help="Anthropic API key.")],
     weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
     priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
+    plan_type: Annotated[
+        str, typer.Option(help=f"Plan tier ({', '.join(PLAN_TYPES)}).")
+    ] = "api",
+    routing_policy: Annotated[
+        str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
+    ] = "normal",
     base_url: Annotated[str | None, typer.Option(help="Override the upstream base URL.")] = None,
+    spend_cap_usd: Annotated[
+        float | None,
+        typer.Option(help="Stop routing here once estimated spend reaches this many USD."),
+    ] = None,
 ) -> None:
     """Add an upstream account."""
+    if plan_type not in PLAN_TYPES:
+        console.print(f"[red]--plan-type must be one of {', '.join(PLAN_TYPES)}.[/red]")
+        raise typer.Exit(1)
+    if routing_policy not in ROUTING_POLICIES:
+        console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
+        raise typer.Exit(1)
 
     async def _add() -> None:
         async with session_scope() as session:
@@ -230,7 +255,10 @@ def account_add(
                     credential_hint=mask_secret(api_key),
                     weight=weight,
                     priority=priority,
+                    plan_type=plan_type,
+                    routing_policy=routing_policy,
                     base_url=base_url,
+                    spend_cap_usd=spend_cap_usd,
                 )
             )
         console.print(f"[green]Added account[/green] {name} ({mask_secret(api_key)})")
@@ -253,6 +281,12 @@ def account_add_oauth(
         typer.Option(help="Extra header as key=value. Repeatable."),
     ] = None,
     auth_scheme: Annotated[str, typer.Option(help="bearer or x-api-key.")] = "bearer",
+    plan_type: Annotated[
+        str, typer.Option(help=f"Subscription plan tier ({', '.join(PLAN_TYPES)}).")
+    ] = "pro",
+    routing_policy: Annotated[
+        str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
+    ] = "normal",
     base_url: Annotated[str | None, typer.Option(help="Override the upstream base URL.")] = None,
     weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
     priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
@@ -268,6 +302,12 @@ def account_add_oauth(
         raise typer.Exit(1)
     if auth_scheme not in credentials.AUTH_SCHEMES:
         console.print(f"[red]--auth-scheme must be one of {', '.join(credentials.AUTH_SCHEMES)}.[/red]")
+        raise typer.Exit(1)
+    if plan_type not in PLAN_TYPES:
+        console.print(f"[red]--plan-type must be one of {', '.join(PLAN_TYPES)}.[/red]")
+        raise typer.Exit(1)
+    if routing_policy not in ROUTING_POLICIES:
+        console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
         raise typer.Exit(1)
 
     extra = _parse_headers(header)
@@ -289,6 +329,8 @@ def account_add_oauth(
                     base_url=base_url,
                     weight=weight,
                     priority=priority,
+                    plan_type=plan_type,
+                    routing_policy=routing_policy,
                     oauth_refresh_token_encrypted=encrypt(refresh_token) if refresh_token else None,
                     oauth_token_endpoint=token_endpoint,
                     oauth_client_id=client_id,
@@ -308,6 +350,121 @@ def account_add_oauth(
             )
 
     _run(_add())
+
+
+@account_app.command("add-subscription")
+def account_add_subscription(
+    name: Annotated[str, typer.Argument(help="Label for this account, e.g. the person's name.")],
+    plan_type: Annotated[
+        str, typer.Option(help=f"Subscription plan ({', '.join(PLAN_TYPES)}).")
+    ] = "pro",
+    routing_policy: Annotated[
+        str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
+    ] = "normal",
+    verify: Annotated[bool, typer.Option(help="Send one tiny request to confirm the token works.")] = True,
+) -> None:
+    """Log in to a Claude subscription in the browser and add it to the pool.
+
+    Runs Claude Code's own `claude setup-token` in a throwaway config directory, so
+    your current Claude Code login and running sessions are not affected.
+    """
+    if plan_type not in PLAN_TYPES:
+        console.print(f"[red]--plan-type must be one of {', '.join(PLAN_TYPES)}.[/red]")
+        raise typer.Exit(1)
+    if routing_policy not in ROUTING_POLICIES:
+        console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
+        raise typer.Exit(1)
+    claude_path = subscription_login.claude_cli()
+    if claude_path is None:
+        console.print(
+            "[red]Claude Code is not installed.[/red] Install it first: "
+            "npm install -g @anthropic-ai/claude-code"
+        )
+        raise typer.Exit(1)
+
+    async def _name_taken() -> bool:
+        async with session_scope() as session:
+            existing = await session.execute(select(Account).where(Account.name == name))
+            return existing.scalar_one_or_none() is not None
+
+    if _run(_name_taken()):
+        console.print(f"[red]An account named {name!r} already exists.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold]Adding subscription account {name!r}[/bold]\n"
+        "  1. A browser window opens. Log in with the Claude account you want to add.\n"
+        "  2. If the terminal asks for a code, paste the one the browser shows.\n"
+        "  [dim]Your current Claude Code login and running sessions are not touched.[/dim]\n"
+    )
+    try:
+        output = subscription_login.run_setup_token(claude_path)
+    except subscription_login.SubscriptionLoginError as exc:
+        console.print(f"[red]{exc}.[/red] Nothing was added.")
+        raise typer.Exit(1) from exc
+
+    candidates = subscription_login.token_candidates(output)
+
+    async def _verify(tokens: list[str]) -> tuple[str | None, subscription_login.VerifyResult | None]:
+        base_url = get_settings().upstream_base_url
+        last = None
+        async with httpx.AsyncClient() as client:
+            for token in tokens:
+                last = await subscription_login.verify_token(client, base_url, token)
+                if last.ok:
+                    return token, last
+        return None, last
+
+    token: str | None = None
+    result: subscription_login.VerifyResult | None = None
+    if verify and candidates:
+        token, result = asyncio.run(_verify(candidates))
+    elif candidates:
+        token = candidates[0]
+    if token is None:
+        console.print("[yellow]Could not read the token from the output automatically.[/yellow]")
+        token = typer.prompt("Paste the token that starts with sk-ant-oat", hide_input=True).strip()
+        if verify:
+            token_ok, result = asyncio.run(_verify([token]))
+            if token_ok is None:
+                detail = f" ({result.status_code}: {result.detail})" if result else ""
+                console.print(f"[red]That token did not work{detail}.[/red] Nothing was added.")
+                raise typer.Exit(1)
+
+    async def _add() -> Account:
+        async with session_scope() as session:
+            account = Account(
+                name=name,
+                provider=credentials.PROVIDER_OAUTH,
+                encrypted_credential=encrypt(token),
+                credential_hint=mask_secret(token),
+                auth_scheme="bearer",
+                plan_type=plan_type,
+                routing_policy=routing_policy,
+            )
+            if result is not None and result.ok:
+                apply_unified_quota(account, result.headers)
+            session.add(account)
+            await session.flush()
+            session.expunge(account)
+            return account
+
+    account = _run(_add())
+    pri = effective_primary_used(account)
+    sec = effective_secondary_used(account)
+    console.print(
+        f"\n[green]Added[/green] {name} ({mask_secret(token)}) · plan {plan_type} · {routing_policy}"
+    )
+    if pri is not None or sec is not None:
+        pri_str = f"{pri:.0f}%" if pri is not None else "-"
+        sec_str = f"{sec:.0f}%" if sec is not None else "-"
+        console.print(f"  Quota right now: 5h {pri_str} used · 7d {sec_str} used")
+    if plan_type == "pro":
+        console.print("  [dim]Max plan? Fix the label with --plan-type max_5x or max_20x when adding.[/dim]")
+    console.print(
+        "  [dim]Note: through claude-lb a subscription may only serve some models (e.g. Haiku). "
+        "Requests for models it refuses go to your other accounts automatically.[/dim]"
+    )
 
 
 @account_app.command("login")
@@ -456,6 +613,84 @@ def account_login(
     _run(_login())
 
 
+@account_app.command("import")
+def account_import(
+    name: Annotated[str, typer.Argument(help="Label for this account.")],
+    file: Annotated[
+        Path,
+        typer.Option(help="Path to a credentials JSON file (e.g. ~/.claude/.credentials.json)."),
+    ],
+    plan_type: Annotated[
+        str | None, typer.Option(help=f"Override plan tier ({', '.join(PLAN_TYPES)}).")
+    ] = None,
+    routing_policy: Annotated[
+        str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
+    ] = "normal",
+    token_endpoint: Annotated[str | None, typer.Option(help="Override OAuth token endpoint.")] = None,
+    client_id: Annotated[str | None, typer.Option(help="Override OAuth client id.")] = None,
+    base_url: Annotated[str | None, typer.Option(help="Override the upstream base URL.")] = None,
+    weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
+    priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
+) -> None:
+    """Import an OAuth/subscription account from a local JSON credential file."""
+    if plan_type is not None and plan_type not in PLAN_TYPES:
+        console.print(f"[red]--plan-type must be one of {', '.join(PLAN_TYPES)}.[/red]")
+        raise typer.Exit(1)
+    if routing_policy not in ROUTING_POLICIES:
+        console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
+        raise typer.Exit(1)
+    if not file.exists():
+        console.print(f"[red]Credential file not found:[/red] {file}")
+        raise typer.Exit(1)
+    try:
+        raw = json.loads(file.read_text(encoding="utf-8"))
+        parsed = importer.parse_credential_bundle(raw)
+    except (ValueError, OSError) as exc:
+        console.print(f"[red]Could not parse credential file:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    resolved_plan = plan_type or parsed.plan_type
+
+    async def _import() -> None:
+        async with session_scope() as session:
+            existing = await session.execute(select(Account).where(Account.name == name))
+            if existing.scalar_one_or_none() is not None:
+                console.print(f"[red]An account named {name!r} already exists.[/red]")
+                raise typer.Exit(1)
+            session.add(
+                Account(
+                    name=name,
+                    provider=credentials.PROVIDER_OAUTH,
+                    encrypted_credential=encrypt(parsed.access_token),
+                    credential_hint=mask_secret(parsed.access_token),
+                    auth_scheme="bearer",
+                    extra_headers_json=json.dumps(parsed.extra_headers),
+                    base_url=base_url or parsed.base_url,
+                    weight=weight,
+                    priority=priority,
+                    plan_type=resolved_plan,
+                    routing_policy=routing_policy,
+                    oauth_refresh_token_encrypted=(
+                        encrypt(parsed.refresh_token) if parsed.refresh_token else None
+                    ),
+                    oauth_token_endpoint=token_endpoint or parsed.token_endpoint,
+                    oauth_client_id=client_id or parsed.client_id,
+                    oauth_client_secret_encrypted=(
+                        encrypt(parsed.client_secret) if parsed.client_secret else None
+                    ),
+                    oauth_scope=parsed.scope,
+                    credential_lifetime_seconds=parsed.lifetime_seconds,
+                    credential_expires_at=parsed.expires_at,
+                )
+            )
+        console.print(
+            f"[green]Imported subscription account[/green] {name} "
+            f"(plan={resolved_plan}, policy={routing_policy}, {mask_secret(parsed.access_token)})"
+        )
+
+    _run(_import())
+
+
 @account_app.command("list")
 def account_list() -> None:
     """List upstream accounts."""
@@ -470,27 +705,70 @@ def account_list() -> None:
             return
 
         table = Table(title="Accounts")
-        for column in ("Name", "Provider", "Key", "Status", "Headroom", "Requests", "Cost"):
+        for column in ("Name", "Plan", "Policy", "Status", "5h / 7d", "Headroom", "Requests", "Cost"):
             table.add_column(column, justify="right" if column in ("Requests", "Cost") else "left")
         for account in accounts:
             if is_available(account):
                 status = "[green]available[/green]"
+            elif account.enabled and spend_cap_reached(account):
+                status = "[yellow]spend cap[/yellow]"
             elif account.enabled:
-                status = "[yellow]cooling down[/yellow]"
+                status = f"[yellow]{account.quota_status}[/yellow]"
             else:
                 status = "[red]disabled[/red]"
+            pri = effective_primary_used(account)
+            sec = effective_secondary_used(account)
+            pri_str = f"{pri:.0f}%" if pri is not None else "-"
+            sec_str = f"{sec:.0f}%" if sec is not None else "-"
+            quota_str = "-" if pri is None and sec is None else f"{pri_str} / {sec_str}"
             table.add_row(
                 account.name,
-                "oauth" if account.provider == credentials.PROVIDER_OAUTH else "api key",
-                account.credential_hint,
+                account.plan_type,
+                account.routing_policy,
                 status,
+                quota_str,
                 f"{headroom(account) * 100:.0f}%",
                 str(account.total_requests),
-                f"${account.total_cost_usd:.4f}",
+                f"${account.total_cost_usd:.4f}"
+                + (f" / ${account.spend_cap_usd:.2f}" if account.spend_cap_usd is not None else ""),
             )
         console.print(table)
+        for account in accounts:
+            blocked = model_blocks.active_blocks(account)
+            if blocked:
+                console.print(
+                    f"[dim]{account.name}: refuses {', '.join(blocked)} — "
+                    "those requests go to other accounts.[/dim]"
+                )
 
     _run(_list())
+
+
+@account_app.command("set-spend-cap")
+def account_set_spend_cap(
+    name: Annotated[str, typer.Argument(help="Account name.")],
+    usd: Annotated[float | None, typer.Argument(help="Cap in USD. Omit to remove the cap.")] = None,
+) -> None:
+    """Cap how much an account may spend before traffic moves to the rest of the pool."""
+    if usd is not None and usd < 0:
+        console.print("[red]The cap cannot be negative.[/red]")
+        raise typer.Exit(1)
+
+    async def _set() -> None:
+        async with session_scope() as session:
+            result = await session.execute(select(Account).where(Account.name == name))
+            account = result.scalar_one_or_none()
+            if account is None:
+                console.print(f"[red]No account named {name!r}.[/red]")
+                raise typer.Exit(1)
+            account.spend_cap_usd = usd
+            spent = account.total_cost_usd
+        if usd is None:
+            console.print(f"[green]Removed spend cap[/green] on {name}")
+        else:
+            console.print(f"[green]Spend cap set[/green] on {name}: ${spent:.4f} spent of ${usd:.2f}")
+
+    _run(_set())
 
 
 @account_app.command("remove")

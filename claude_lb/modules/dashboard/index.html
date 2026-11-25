@@ -140,7 +140,21 @@
     <div id="toast"></div>
     <form class="row" id="account-form">
       <input name="name" placeholder="name" required>
-      <input name="api_key" placeholder="sk-ant-…" required size="28" type="password">
+      <input name="api_key" placeholder="sk-ant-… or token" required size="28" type="password">
+      <select name="plan_type" title="Plan tier">
+        <option value="api">api</option>
+        <option value="pro">pro</option>
+        <option value="max_5x">max_5x</option>
+        <option value="max_20x">max_20x</option>
+        <option value="team">team</option>
+        <option value="enterprise">enterprise</option>
+        <option value="free">free</option>
+      </select>
+      <select name="routing_policy" title="Routing policy">
+        <option value="normal">normal</option>
+        <option value="burn_first">burn_first</option>
+        <option value="preserve">preserve</option>
+      </select>
       <input name="weight" placeholder="weight" type="number" step="0.1" value="1" style="width:90px">
       <input name="priority" placeholder="priority" type="number" value="0" style="width:90px">
       <button type="submit">Add account</button>
@@ -467,7 +481,7 @@ async function refresh() {
     banner.style.display = "none";
   }
 
-  const [health, accounts, keys, summary, requests, settings, audit, trend, catalog] =
+  const [health, accounts, keys, summary, requests, settings, audit, trend, catalog, quota] =
     await Promise.all([
       api("/health"),
       api("/api/accounts"),
@@ -478,38 +492,55 @@ async function refresh() {
       api("/api/audit?limit=25"),
       api("/api/usage/trend?days=28"),
       api("/api/health/models"),
+      api("/api/usage/quota"),
     ]);
 
   $("#meta").textContent =
     `v${health.version} · ${accounts.filter((a) => a.available).length}/${accounts.length} accounts available`
+    + ` · pool ${quota.pool_remaining_percent.toFixed(0)}% remaining`
     + ` · ${settings.settings.routing_strategy}`;
 
   $("#totals").innerHTML = TOTAL_TILES.map(([key, label, format, cls]) =>
     `<div class="tile ${cls || ""}"><div class="label">${label}</div><div class="value">${format(summary.totals[key])}</div></div>`
   ).join("");
 
+  const quotaByAccount = Object.fromEntries(quota.accounts.map((q) => [q.account_id, q]));
   const usageByAccount = Object.fromEntries(summary.by_account.map((r) => [r.account_id, r]));
+  const fmtQuota = (used, resetAt) => {
+    if (used === null || used === undefined) return "—";
+    const pct = Math.round(used);
+    const rst = resetAt ? ` · rst ${new Date(resetAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}` : "";
+    return `${pct}%${rst}`;
+  };
   table($("#accounts"),
-    [{label:"Name"},{label:"Key"},{label:"Status"},{label:"Headroom"},
-     {label:"Requests",num:true},{label:"Cost (window)",num:true},{label:"Cost (all time)",num:true},{label:""}],
+    [{label:"Name"},{label:"Plan"},{label:"Policy"},{label:"Status"},{label:"5h / 7d"},{label:"Headroom"},
+     {label:"Requests",num:true},{label:"Cost (window)",num:true},{label:""}],
     accounts,
     (a) => {
       const w = usageByAccount[a.id] ?? {};
+      const q = quotaByAccount[a.id] ?? {};
       const status = a.available
         ? `<span class="pill ok">available</span>`
-        : `<span class="pill err" title="${esc(a.disabled_reason ?? "")}">${a.enabled ? "cooling down" : "disabled"}</span>`;
+        : `<span class="pill err" title="${esc(a.disabled_reason ?? "")}">${esc(a.quota_status !== "active" ? a.quota_status : (a.enabled ? "cooling down" : "disabled"))}</span>`;
       const pct = Math.round(a.headroom * 100);
       const headroomTitle = a.available
         ? `${pct}% of the rate-limit budget believed to remain`
         : "out of rotation — headroom is not being tracked";
+      const policyOpts = ["normal", "burn_first", "preserve"]
+        .map((p) => `<option value="${p}" ${a.routing_policy === p ? "selected" : ""}>${p}</option>`)
+        .join("");
+      const riskBadge = q.risk_level && q.risk_level !== "safe"
+        ? ` <span class="pill ${q.risk_level === "critical" || q.risk_level === "danger" ? "err" : "warn"}">${esc(q.risk_level)}</span>`
+        : "";
       return `<tr>
         <td>${esc(a.name)}</td>
-        <td><code>${esc(a.credential_hint)}</code></td>
-        <td>${status}</td>
+        <td><code>${esc(a.plan_type)}</code></td>
+        <td><select data-policy="${a.id}">${policyOpts}</select></td>
+        <td>${status}${riskBadge}</td>
+        <td><small>5h: ${esc(fmtQuota(a.primary_used_percent, a.primary_reset_at))}<br>7d: ${esc(fmtQuota(a.secondary_used_percent, a.secondary_reset_at))}</small></td>
         <td><div class="bar${a.available ? "" : " inactive"}" title="${esc(headroomTitle)}"><i style="width:${a.available ? pct : 100}%"></i></div></td>
         <td class="num">${fmt.format(a.total_requests)}</td>
         <td class="num">${usd(w.cost_usd)}</td>
-        <td class="num">${usd(a.total_cost_usd)}</td>
         <td><button data-toggle="${a.id}" data-enabled="${!a.enabled}">${a.enabled ? "Disable" : "Enable"}</button>
             <button data-delete="${a.id}">Delete</button></td>
       </tr>`;
@@ -604,6 +635,18 @@ function formPayload(form) {
   }
   return payload;
 }
+
+$("#accounts").addEventListener("change", async (event) => {
+  const policyId = event.target.dataset.policy;
+  if (!policyId) return;
+  await guard(async () => {
+    await api(`/api/accounts/${policyId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ routing_policy: event.target.value }),
+    });
+    await refresh();
+  });
+});
 
 $("#account-form").addEventListener("submit", async (event) => {
   event.preventDefault();

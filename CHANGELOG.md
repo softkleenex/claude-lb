@@ -5,6 +5,22 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 
 ## [Unreleased]
 
+### Added
+- **Subscription pooling** (`codex-lb` parity):
+  - Plan tiers (`free`, `pro`, `max`, `max_5x`, `max_20x`, `team`, `enterprise`, `api`) with capacity credits and per-account `routing_policy` (`burn_first`, `normal`, `preserve`).
+  - Dual-window (`5h` primary / `7d` secondary) quota parsing from `anthropic-ratelimit-unified-*` headers, `rate_limited` / `quota_exceeded` tracking, overage override, and automatic reset recovery.
+  - Subscription-aware routing strategies: `relative_availability`, `usage_weighted`, `reset_drain`, and `sequential_drain`.
+  - `QuotaHistory` time-series snapshots with EWMA burn-rate and depletion-risk classification (`safe`, `warning`, `danger`, `critical`).
+  - `POST /api/accounts/import`, `POST /api/accounts/{id}/reset-quota`, `GET /api/usage/quota`, `GET /api/usage/quota/{id}/history`, `claude-lb account import`, Prometheus quota metrics, and live dashboard/demo support.
+  - Documentation in [docs/subscription-pooling.md](docs/subscription-pooling.md).
+- **Per-account spend cap** (`spend_cap_usd`): stop routing to an account once its estimated spend reaches the cap. `claude-lb account add --spend-cap-usd`, `claude-lb account set-spend-cap <name> [usd]`, and `spend_cap_usd` on the accounts API.
+- **`claude-lb account add-subscription <name>`**: one command to add a Claude subscription. It runs Claude Code's own `claude setup-token` in a throwaway config directory (existing logins and sessions are untouched), reads the token from its output, verifies it with one tiny request, and shows current 5h/7d usage.
+- **Per-model routing for subscriptions**: when a subscription refuses a model (a `429` without `anthropic-ratelimit-unified-*` headers), only that model is routed elsewhere for 12 hours; the account keeps serving the models it can. Shown in `account list` and as `blocked_models` on the accounts API; `POST /api/accounts/{id}/reset-quota` clears it.
+
+### Fixed
+- A Console `400` "credit balance is too low" / "reached your specified API usage limits" now disables that account and fails over, instead of being returned to the caller.
+- Sticky-session fresh picks now respect `routing_policy` tiers. Previously a new conversation could land on a `preserve` account while a `burn_first` one still had room.
+
 ## [0.6.1] — 2026-11-25
 
 ### Fixed

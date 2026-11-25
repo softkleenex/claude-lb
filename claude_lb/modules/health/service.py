@@ -26,6 +26,7 @@ from claude_lb.db.models import Account, ModelCatalogEntry
 from claude_lb.db.session import session_scope
 from claude_lb.modules.accounts.credentials import ResolvedCredential, parse_extra_headers
 from claude_lb.modules.proxy import load_balancer as lb
+from claude_lb.modules.proxy.quota import reconcile_expired_quota
 from claude_lb.modules.settings import service as settings_service
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,10 @@ async def run_health_probes(client: httpx.AsyncClient) -> list[ProbeResult]:
 
     async with session_scope() as session:
         result = await session.execute(select(Account))
-        candidates = [a for a in result.scalars() if _needs_probe(a, now=now)]
+        all_accounts = list(result.scalars())
+        for account in all_accounts:
+            reconcile_expired_quota(account, now=now)
+        candidates = [a for a in all_accounts if _needs_probe(a, now=now)]
         targets = [
             (a.id, a.name, _credential_for(a), (a.base_url or env.upstream_base_url)) for a in candidates
         ]
@@ -160,6 +164,7 @@ async def run_health_probes(client: httpx.AsyncClient) -> list[ProbeResult]:
             if outcome.ok:
                 was_down = not account.enabled or account.consecutive_failures
                 account.enabled = True
+                account.quota_status = "active"
                 lb.record_success(account)
                 if was_down:
                     logger.info("account %s recovered and is back in rotation", name)

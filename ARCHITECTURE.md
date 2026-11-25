@@ -42,8 +42,8 @@ hanging up, which arrives as a cancellation.
 | `claude_lb/core/pricing.py` | Price table and cost/savings math. **Update when Anthropic changes prices** |
 | `claude_lb/core/crypto.py` | Fernet encryption at rest, `clb_` key hashing |
 | `claude_lb/db/schema.py` | Additive schema reconcile on startup (new columns, int→bigint on Postgres) |
-| `modules/proxy/` | Forwarding, failover, stickiness, usage parsing |
-| `modules/accounts/` | Upstream accounts, OAuth refresh, browser login (PKCE) |
+| `modules/proxy/` | Forwarding, failover, stickiness, subscription quota/depletion, usage parsing |
+| `modules/accounts/` | Upstream accounts, OAuth refresh, browser login (PKCE), credential bundle import |
 | `modules/api_keys/` | `clb_` keys, rolling-window budgets, in-flight slots |
 | `modules/health/` | Background probes that re-enable recovered accounts, and the model catalog |
 | `modules/usage/` | Summaries, daily rollups, cost reports, Prometheus `/metrics` |

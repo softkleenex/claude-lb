@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.db.models import Account, ApiKey, RequestLog
 from claude_lb.modules.proxy import load_balancer as lb
+from claude_lb.modules.proxy import quota as quota_mod
 from claude_lb.modules.proxy import sticky
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -59,6 +60,9 @@ async def render(session: AsyncSession) -> str:
     out.metric("claude_lb_account_tokens_total", "Tokens attributed to the account.", "counter")
     out.metric("claude_lb_account_cost_usd_total", "Estimated spend attributed to the account.", "counter")
     out.metric("claude_lb_account_consecutive_failures", "Consecutive upstream failures.")
+    out.metric("claude_lb_account_primary_used_percent", "5-hour primary quota utilization percent.")
+    out.metric("claude_lb_account_secondary_used_percent", "7-day secondary quota utilization percent.")
+    out.metric("claude_lb_account_capacity_credits", "Effective plan capacity credits.")
 
     for account in accounts:
         label = {"account": account.name}
@@ -69,6 +73,17 @@ async def render(session: AsyncSession) -> str:
         out.sample("claude_lb_account_tokens_total", account.total_output_tokens, **label, direction="output")
         out.sample("claude_lb_account_cost_usd_total", round(account.total_cost_usd, 6), **label)
         out.sample("claude_lb_account_consecutive_failures", account.consecutive_failures, **label)
+        pri = quota_mod.effective_primary_used(account, now=now)
+        sec = quota_mod.effective_secondary_used(account, now=now)
+        if pri is not None:
+            out.sample("claude_lb_account_primary_used_percent", round(pri, 2), **label)
+        if sec is not None:
+            out.sample("claude_lb_account_secondary_used_percent", round(sec, 2), **label)
+        out.sample(
+            "claude_lb_account_capacity_credits",
+            quota_mod.effective_capacity_credits(account),
+            **label,
+        )
 
     # Recent-window view, so a dashboard can alert on error rate without a rate() query.
     since = now - timedelta(minutes=5)

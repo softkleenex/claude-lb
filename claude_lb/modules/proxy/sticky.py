@@ -29,7 +29,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 
 from claude_lb.db.models import Account
-from claude_lb.modules.proxy.load_balancer import is_available
+from claude_lb.modules.proxy.load_balancer import is_available, top_policy_tier
 
 # Bounded so a long-running proxy cannot grow this without limit.
 _MAX_ENTRIES = 10_000
@@ -123,7 +123,9 @@ def resolve(
         # Expired, or the account is down — drop it and fall through to a fresh pick.
         del _affinity[key]
 
-    return rendezvous(key, available)
+    # A fresh pick must respect routing_policy, or a new conversation can land on a
+    # `preserve` account while a `burn_first` one still has room.
+    return rendezvous(key, top_policy_tier(available))
 
 
 def remember(key: str | None, account_id: str, *, ttl_seconds: int, now: float | None = None) -> None:

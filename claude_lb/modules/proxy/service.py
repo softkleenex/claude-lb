@@ -15,12 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.core.config import get_settings
 from claude_lb.core.pricing import estimate_cost_usd
-from claude_lb.db.models import Account, ApiKey, RequestLog
+from claude_lb.db.models import Account, ApiKey, QuotaHistory, RequestLog
 from claude_lb.db.session import session_scope
 from claude_lb.modules.accounts import credentials
 from claude_lb.modules.health import service as health_service
 from claude_lb.modules.proxy import load_balancer as lb
-from claude_lb.modules.proxy import sticky
+from claude_lb.modules.proxy import model_blocks, sticky
+from claude_lb.modules.proxy import quota as quota_mod
 from claude_lb.modules.proxy.usage_parser import StreamUsageCollector, Usage, parse_json_usage
 from claude_lb.modules.settings import service as settings_service
 from claude_lb.modules.usage import rollup
@@ -52,6 +53,36 @@ _STRIPPED_RESPONSE_HEADERS = frozenset(
 )
 
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+
+_BILLING_MARKERS = ("credit balance is too low", "reached your specified api usage limits")
+
+
+def is_billing_exhausted(body: bytes) -> bool:
+    """True when a 400 says the *account* cannot pay, e.g. Console credit ran out."""
+    try:
+        message = str(json.loads(body).get("error", {}).get("message", "")).lower()
+    except (ValueError, AttributeError):
+        return False
+    return any(marker in message for marker in _BILLING_MARKERS)
+
+
+def explain_unavailable(accounts: list[Account], model: str | None) -> str | None:
+    """Say *why* nothing can take the request, in terms an operator can act on."""
+    if not accounts:
+        return "no accounts configured — add one with `claude-lb account add`"
+    reasons: list[str] = []
+    for account in accounts:
+        if not account.enabled:
+            reasons.append(f"{account.name}: disabled ({account.disabled_reason or 'by operator'})")
+        elif lb.spend_cap_reached(account):
+            reasons.append(f"{account.name}: spend cap ${account.spend_cap_usd:.2f} reached")
+        elif model_blocks.is_blocked(account, model):
+            reasons.append(f"{account.name}: subscription does not serve {model}")
+        elif not lb.is_available(account):
+            reasons.append(f"{account.name}: {account.quota_status or 'cooling down'}")
+    if not reasons:
+        return None
+    return f"no account can serve {model or 'this request'} right now — " + "; ".join(reasons)
 
 
 class UpstreamExhausted(RuntimeError):
@@ -97,6 +128,7 @@ class ProxyService:
         other account to go to, so upstream gets to answer rather than the catalog.
         """
         excluded = await health_service.unsupported_accounts(session, model or "")
+        excluded |= {a.id for a in accounts if model_blocks.is_blocked(a, model)}
         excluded.discard(keep_id)
         if not excluded:
             return accounts
@@ -185,9 +217,9 @@ class ProxyService:
 
         for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
-                accounts = await self._load_accounts(session)
+                all_accounts = await self._load_accounts(session)
                 accounts = await self._filter_by_model(
-                    session, accounts, model, keep_id=api_key.pinned_account_id if api_key else None
+                    session, all_accounts, model, keep_id=api_key.pinned_account_id if api_key else None
                 )
                 preferred = (
                     sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
@@ -207,9 +239,12 @@ class ProxyService:
                 except lb.NoAccountAvailable as exc:
                     if tried:
                         break
-                    raise UpstreamExhausted(str(exc), status_code=503) from exc
+                    raise UpstreamExhausted(
+                        explain_unavailable(all_accounts, model) or str(exc), status_code=503
+                    ) from exc
                 account_id = account.id
                 account_name = account.name
+                account_snapshot = account
                 can_reauth = credentials.can_retry_after_auth_failure(account)
                 base_url = (account.base_url or env.upstream_base_url).rstrip("/")
                 session.expunge(account)
@@ -236,6 +271,19 @@ class ProxyService:
                 last_status = 502
                 await self._record_attempt_failure(account_id, status_code=None, reason=last_error)
                 logger.warning("upstream transport error on account=%s: %s", account_id, last_error)
+                continue
+
+            if model and model_blocks.is_model_refusal(
+                account_snapshot, response.status_code, dict(response.headers)
+            ):
+                # This model is off-limits for this subscription; the account itself is
+                # fine for others. Route the model elsewhere instead of cooling down.
+                last_body = await response.aread()
+                await response.aclose()
+                last_status = 429
+                last_error = f"upstream refused model {model} for this subscription"
+                await self._record_model_block(account_id, model)
+                logger.info("account=%s refuses model=%s; routing it elsewhere", account_name, model)
                 continue
 
             if response.status_code in RETRYABLE_STATUS:
@@ -271,6 +319,19 @@ class ProxyService:
                 last_status = 403
                 last_error = "upstream refused the request (403)"
                 logger.info("upstream 403 on account=%s; trying the next account", account_name)
+                continue
+
+            if response.status_code == 400 and is_billing_exhausted(
+                error_body := await response.aread()
+            ):
+                # Out of Console credit (or over the org's spend limit) is an account
+                # problem, not a caller problem: take this account out and try the next.
+                await response.aclose()
+                last_status = 400
+                last_body = error_body
+                last_error = "upstream account is out of credit"
+                await self._record_attempt_failure(account_id, status_code=402, reason=last_error)
+                logger.warning("disabling account=%s: %s", account_name, last_error)
                 continue
 
             if response.status_code == 401:
@@ -355,9 +416,26 @@ class ProxyService:
                 raise UpstreamExhausted("account disappeared mid-request")
             lb.apply_rate_limit_headers(account, headers)
             lb.record_success(account)
+            if quota_mod.parse_unified_headers(headers) is not None:
+                session.add(
+                    QuotaHistory(
+                        account_id=account.id,
+                        primary_used_percent=account.primary_used_percent,
+                        primary_reset_at=account.primary_reset_at,
+                        secondary_used_percent=account.secondary_used_percent,
+                        secondary_reset_at=account.secondary_reset_at,
+                        unified_status=account.unified_status,
+                    )
+                )
             await session.flush()
             session.expunge(account)
             return account
+
+    async def _record_model_block(self, account_id: str, model: str) -> None:
+        async with session_scope() as session:
+            account = await session.get(Account, account_id)
+            if account is not None:
+                model_blocks.add_block(account, model)
 
     async def _record_attempt_failure(
         self,
@@ -374,6 +452,17 @@ class ProxyService:
                 return
             if rate_limit_headers:
                 lb.apply_rate_limit_headers(account, rate_limit_headers)
+                if quota_mod.parse_unified_headers(rate_limit_headers) is not None:
+                    session.add(
+                        QuotaHistory(
+                            account_id=account.id,
+                            primary_used_percent=account.primary_used_percent,
+                            primary_reset_at=account.primary_reset_at,
+                            secondary_used_percent=account.secondary_used_percent,
+                            secondary_reset_at=account.secondary_reset_at,
+                            unified_status=account.unified_status,
+                        )
+                    )
             lb.record_failure(
                 account,
                 status_code=status_code,

@@ -36,10 +36,10 @@ MODELS = [
 ]
 
 ACCOUNTS = [
-    # name, weight, priority, simulated rate limit (requests per minute)
-    ("prod-us", 2.0, 10, 4000),
-    ("prod-eu", 1.0, 5, 2000),
-    ("batch-workspace", 1.0, 0, 1000),
+    # name, weight, priority, simulated rate limit (requests per minute), plan_type, routing_policy
+    ("prod-us", 2.0, 10, 4000, "api", "normal"),
+    ("prod-eu", 1.0, 5, 2000, "api", "normal"),
+    ("claude-max-5x", 1.0, 8, 1000, "max_5x", "burn_first"),
 ]
 
 KEYS = [
@@ -102,10 +102,23 @@ def build_fake_upstream():
     cache: dict[tuple[str, str], int] = {}
     calls: dict[str, int] = {}
 
-    def _rate_headers(credential: str, limit: int) -> dict[str, str]:
+    def _rate_headers(credential: str, limit: int, *, is_subscription: bool = False) -> dict[str, str]:
         calls[credential] = calls.get(credential, 0) + 1
         used = calls[credential] % limit
-        reset = (datetime.now(UTC) + timedelta(seconds=60 - datetime.now(UTC).second)).isoformat()
+        now_dt = datetime.now(UTC)
+        reset = (now_dt + timedelta(seconds=60 - now_dt.second)).isoformat()
+        if is_subscription:
+            pri_util = min(0.92, (calls[credential] % 80) / 100.0 + 0.12)
+            sec_util = min(0.65, (calls[credential] % 200) / 400.0 + 0.08)
+            pri_reset = int((now_dt + timedelta(hours=3, minutes=42)).timestamp())
+            sec_reset = int((now_dt + timedelta(days=4, hours=6)).timestamp())
+            return {
+                "anthropic-ratelimit-unified-status": "allowed_warning" if pri_util >= 0.75 else "allowed",
+                "anthropic-ratelimit-unified-5h-utilization": f"{pri_util:.2f}",
+                "anthropic-ratelimit-unified-5h-reset": str(pri_reset),
+                "anthropic-ratelimit-unified-7d-utilization": f"{sec_util:.2f}",
+                "anthropic-ratelimit-unified-7d-reset": str(sec_reset),
+            }
         return {
             "anthropic-ratelimit-requests-limit": str(limit),
             "anthropic-ratelimit-requests-remaining": str(max(limit - used * 7, limit // 10)),
@@ -132,8 +145,10 @@ def build_fake_upstream():
 
     @router.post("/v1/messages")
     async def messages(request: Request):
-        credential = request.headers.get("x-api-key", "")
-        limit = next((rpm for name, _, _, rpm in ACCOUNTS if credential.endswith(name)), 1000)
+        auth_header = request.headers.get("authorization", "")
+        credential = auth_header.removeprefix("Bearer ").strip() or request.headers.get("x-api-key", "")
+        is_sub = bool(auth_header)
+        limit = next((rpm for name, _, _, rpm, _, _ in ACCOUNTS if credential.endswith(name)), 1000)
         body = await request.json()
         model = body.get("model", MODELS[0][0])
 
@@ -155,7 +170,7 @@ def build_fake_upstream():
             usage = {"cache_read_input_tokens": 0, "cache_creation_input_tokens": prefix_tokens}
         usage["input_tokens"] = random.randint(40, 900)
         output_tokens = random.randint(80, 1600)
-        headers = _rate_headers(credential, limit)
+        headers = _rate_headers(credential, limit, is_subscription=is_sub)
         message_id = f"msg_demo_{random.getrandbits(48):012x}"
 
         if not body.get("stream"):
@@ -220,15 +235,24 @@ async def seed(port: int) -> list[str]:
     plaintext_keys: list[str] = []
 
     async with session_scope() as session:
-        for name, weight, priority, _ in ACCOUNTS:
-            secret = f"sk-ant-demo-{name}"
+        for name, weight, priority, _, plan_type, routing_policy in ACCOUNTS:
+            is_sub = plan_type != "api"
+            secret = f"tok-demo-{name}" if is_sub else f"sk-ant-demo-{name}"
             account = Account(
                 name=name,
+                provider="oauth" if is_sub else "anthropic_api_key",
+                auth_scheme="bearer" if is_sub else "x-api-key",
                 encrypted_credential=encrypt(secret),
                 credential_hint=mask_secret(secret),
                 base_url=base_url,
                 weight=weight,
                 priority=priority,
+                plan_type=plan_type,
+                routing_policy=routing_policy,
+                primary_used_percent=28.0 if is_sub else None,
+                primary_reset_at=datetime.now(UTC) + timedelta(hours=3) if is_sub else None,
+                secondary_used_percent=14.0 if is_sub else None,
+                secondary_reset_at=datetime.now(UTC) + timedelta(days=5) if is_sub else None,
             )
             session.add(account)
             await session.flush()

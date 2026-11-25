@@ -68,6 +68,26 @@ class Account(Base):
     priority: Mapped[int] = mapped_column(Integer, default=0)
     """Lower values are drained first by ordered strategies."""
 
+    # Subscription plan & dual-window quota (5h primary / 7d secondary)
+    plan_type: Mapped[str] = mapped_column(String(32), default="api")
+    routing_policy: Mapped[str] = mapped_column(String(16), default="normal")
+    capacity_credits: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    primary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secondary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    secondary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unified_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    overage_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quota_status: Mapped[str] = mapped_column(String(32), default="active")
+    quota_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    model_blocks_json: Mapped[str] = mapped_column(Text, default="{}")
+    """Models the upstream refused for this account: {model: unix time the block lifts}."""
+    spend_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    """Stop routing to this account once its estimated lifetime spend reaches this. Null = no cap."""
+
     # Health / circuit breaker
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     disabled_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -291,3 +311,26 @@ Index(
     UsageDaily.model,
     unique=True,
 )
+
+
+class QuotaHistory(Base):
+    """Time-series snapshots of dual-window subscription quota utilization.
+
+    Used to compute EWMA burn rate, depletion risk, and weekly pacing per account.
+    """
+
+    __tablename__ = "quota_history"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    account_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    primary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    secondary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unified_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+Index("ix_quota_history_account_recorded", QuotaHistory.account_id, QuotaHistory.recorded_at)

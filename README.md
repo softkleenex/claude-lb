@@ -148,7 +148,11 @@ Change live in the dashboard, or set the default with `CLAUDE_LB_ROUTING_STRATEG
 
 | Strategy | Behavior | Use when |
 |---|---|---|
-| `capacity_weighted` *(default)* | Weighted random over remaining rate-limit headroom × account weight | Mixed pools; smooths load without hard-pinning |
+| `capacity_weighted` *(default)* | Weighted random over remaining rate-limit headroom × plan capacity × weight | Mixed pools; smooths load without hard-pinning |
+| `relative_availability` | Weighted by remaining 7-day quota per time-until-reset (from `codex-lb`) | Subscription pools with staggered weekly reset cycles |
+| `usage_weighted` | Picks the account with lowest 7-day (then 5-hour) utilization | Evenly balancing subscription quota burn |
+| `reset_drain` | Drains accounts whose quota window resets soonest | Avoiding wasted expiring 5h/7d subscription quota |
+| `sequential_drain` | Drains one account before moving to the next | Concentrating load on a primary subscription |
 | `round_robin` | Even rotation | Keys with identical limits |
 | `least_used` | Fewest lifetime requests | Warming a new key into the pool |
 | `fill_first` | Drains the highest-`priority` account before moving on | A cheap/committed-spend key you want consumed first |
@@ -205,6 +209,25 @@ claude-lb then handles the operational half:
 
 Tokens, refresh tokens, and client secrets are all encrypted at rest, and API-key and
 bearer accounts route side by side in one pool.
+
+### Subscription pooling
+
+Pool Claude Pro, Max (`max_5x`, `max_20x`), Team, and Enterprise subscriptions alongside
+Console API keys with `codex-lb`-style dual-window quota tracking:
+
+- **5h + 7d quota tracking**: Reads `anthropic-ratelimit-unified-*` headers on every
+  response, tracks `rate_limited` (5h) and `quota_exceeded` (7d) states, and
+  auto-recovers as soon as the reset timestamp passes.
+- **Subscription routing**: Use `relative_availability`, `usage_weighted`, `reset_drain`,
+  or `sequential_drain`, plus per-account `routing_policy` (`burn_first` > `normal` >
+  `preserve`).
+- **Depletion risk**: Records `QuotaHistory` snapshots to compute EWMA burn rate and
+  `safe` / `warning` / `danger` / `critical` pacing badges.
+- **Credential import**: Import an existing OAuth/subscription JSON file (including
+  `claudeAiOauth` bundles) via `claude-lb account import <name> --file <path>` or
+  `POST /api/accounts/import`.
+
+See [docs/subscription-pooling.md](docs/subscription-pooling.md) for the full guide.
 
 ### Prompt-cache affinity
 
