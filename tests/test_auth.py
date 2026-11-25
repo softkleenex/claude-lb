@@ -275,7 +275,8 @@ class TestProxyIsUnaffected:
         async for client in make_remote_client(ok_json([])):
             response = await client.get("/")
         assert response.status_code == 200
-        assert "<title>claude-lb</title>" in response.text
+        # The React build when present, otherwise the legacy single-file dashboard.
+        assert "<title>Claude LB</title>" in response.text or "<title>claude-lb</title>" in response.text
 
     async def test_health_stays_open_for_probes(self):
         async for client in make_remote_client(ok_json([])):

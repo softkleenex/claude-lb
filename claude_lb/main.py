@@ -137,9 +137,7 @@ def create_app() -> FastAPI:
     ]
     for router in guarded:
         app.include_router(router, dependencies=[Depends(require_management_auth)])
-    if settings.dashboard_enabled:
-        app.include_router(dashboard_router)
-    # Registered last: its catch-all /v1/{path} must not shadow the management API.
+    # Registered after the management API: its catch-all /v1/{path} must not shadow it.
     app.include_router(proxy_router)
 
     @app.middleware("http")
@@ -193,6 +191,10 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "version": app.version})
+
+    # Registered last of all: the SPA fallback answers any GET nothing else claimed.
+    if settings.dashboard_enabled:
+        app.include_router(dashboard_router)
 
     return app
 
