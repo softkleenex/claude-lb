@@ -1,26 +1,35 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import {
-  getRequestLogOptions,
-  getRequestLogs,
-  type RequestLogFacetFilters,
-  type RequestLogsListFilters,
-} from "@/features/dashboard/api";
+import { getRequestLogOptions, getRequestLogs, type RequestLogsListFilters } from "@/features/dashboard/api";
+import { DASHBOARD_REFRESH_MS } from "@/features/dashboard/hooks/use-dashboard";
 import { FilterStateSchema, type FilterState } from "@/features/dashboard/schemas";
 
-const DEFAULT_FILTER_STATE: FilterState = {
+export const DEFAULT_FILTER_STATE: FilterState = {
   search: "",
   timeframe: "all",
   accountIds: [],
   apiKeyIds: [],
-  modelOptions: [],
+  models: [],
   statuses: [],
-  conversationId: null,
+  sessionKey: null,
   limit: 25,
   offset: 0,
 };
+
+/** URL search params that hold the request-log filters (the overview owns `window`). */
+const PARAM_KEYS = [
+  "search",
+  "timeframe",
+  "accountId",
+  "apiKeyId",
+  "model",
+  "status",
+  "session",
+  "limit",
+  "offset",
+] as const;
 
 export function requestLogFiltersApplied(filters: FilterState): boolean {
   return (
@@ -28,206 +37,98 @@ export function requestLogFiltersApplied(filters: FilterState): boolean {
     filters.timeframe !== DEFAULT_FILTER_STATE.timeframe ||
     filters.accountIds.length > 0 ||
     filters.apiKeyIds.length > 0 ||
-    filters.modelOptions.length > 0 ||
+    filters.models.length > 0 ||
     filters.statuses.length > 0 ||
-    Boolean(filters.conversationId)
+    Boolean(filters.sessionKey)
   );
 }
 
-const REQUEST_LOG_PARAM_KEYS = [
-  "search",
-  "timeframe",
-  "accountId",
-  "apiKeyId",
-  "modelOption",
-  "status",
-  "conversationId",
-  "limit",
-  "offset",
-] as const;
-
 function parseNumber(value: string | null, fallback: number): number {
-  if (value === null) {
-    return fallback;
-  }
+  if (value === null) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function parseFilterState(params: URLSearchParams): FilterState {
-  const candidate = {
+export function parseFilterState(params: URLSearchParams): FilterState {
+  const parsed = FilterStateSchema.safeParse({
     search: params.get("search") ?? "",
     timeframe: params.get("timeframe") ?? "all",
     accountIds: params.getAll("accountId"),
     apiKeyIds: params.getAll("apiKeyId"),
-    modelOptions: params.getAll("modelOption"),
+    models: params.getAll("model"),
     statuses: params.getAll("status"),
-    conversationId: params.get("conversationId") || null,
+    sessionKey: params.get("session") || null,
     limit: parseNumber(params.get("limit"), DEFAULT_FILTER_STATE.limit),
     offset: parseNumber(params.get("offset"), DEFAULT_FILTER_STATE.offset),
-  };
-  const parsed = FilterStateSchema.safeParse(candidate);
-  if (parsed.success) {
-    return parsed.data;
-  }
-  return DEFAULT_FILTER_STATE;
+  });
+  return parsed.success ? parsed.data : DEFAULT_FILTER_STATE;
 }
 
-function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearchParams {
+export function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearchParams {
   const params = new URLSearchParams(base);
-  for (const key of REQUEST_LOG_PARAM_KEYS) {
-    params.delete(key);
-  }
-  if (state.search) {
-    params.set("search", state.search);
-  }
-  if (state.timeframe !== "all") {
-    params.set("timeframe", state.timeframe);
-  }
-  for (const value of state.accountIds) {
-    params.append("accountId", value);
-  }
-  for (const value of state.apiKeyIds) {
-    params.append("apiKeyId", value);
-  }
-  for (const value of state.modelOptions) {
-    params.append("modelOption", value);
-  }
-  for (const value of state.statuses) {
-    params.append("status", value);
-  }
-  if (state.conversationId) {
-    params.set("conversationId", state.conversationId);
-  }
-  params.set("limit", String(state.limit));
-  params.set("offset", String(state.offset));
+  for (const key of PARAM_KEYS) params.delete(key);
+  if (state.search) params.set("search", state.search);
+  if (state.timeframe !== "all") params.set("timeframe", state.timeframe);
+  for (const value of state.accountIds) params.append("accountId", value);
+  for (const value of state.apiKeyIds) params.append("apiKeyId", value);
+  for (const value of state.models) params.append("model", value);
+  for (const value of state.statuses) params.append("status", value);
+  if (state.sessionKey) params.set("session", state.sessionKey);
+  if (state.limit !== DEFAULT_FILTER_STATE.limit) params.set("limit", String(state.limit));
+  if (state.offset > 0) params.set("offset", String(state.offset));
   return params;
 }
 
-function timeframeToSinceIso(timeframe: FilterState["timeframe"]): string | undefined {
-  if (timeframe === "all") {
-    return undefined;
-  }
-  const now = Date.now();
-  const lookup: Record<Exclude<FilterState["timeframe"], "all">, number> = {
-    "1h": 60 * 60 * 1000,
-    "24h": 24 * 60 * 60 * 1000,
-    "7d": 7 * 24 * 60 * 60 * 1000,
-  };
-  return new Date(now - lookup[timeframe]).toISOString();
-}
-
-export type UseRequestLogsOptions = {
-  enabled?: boolean;
-};
-
-export function useRequestLogs(options: UseRequestLogsOptions = {}) {
-  const enabled = options.enabled ?? true;
+export function useRequestLogs() {
   const [searchParams, setSearchParams] = useSearchParams();
-
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
   const filtersApplied = requestLogFiltersApplied(filters);
-  const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
+
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
-      search: filters.search || undefined,
+      search: filters.search,
+      timeframe: filters.timeframe,
       limit: filters.limit,
       offset: filters.offset,
       accountIds: filters.accountIds,
       apiKeyIds: filters.apiKeyIds,
+      models: filters.models,
       statuses: filters.statuses,
-      modelOptions: filters.modelOptions,
-      since,
-      conversationId: filters.conversationId ?? undefined,
+      sessionKey: filters.sessionKey,
     }),
-    [filters, since],
-  );
-  const facetFilters = useMemo<RequestLogFacetFilters>(
-    () => ({
-      since,
-      accountIds: filters.accountIds,
-      apiKeyIds: filters.apiKeyIds,
-      modelOptions: filters.modelOptions,
-    }),
-    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, since],
+    [filters],
   );
 
-  const {
-    data: logsResult,
-    error: logsError,
-    isFetching: logsIsFetching,
-    isLoading: logsIsLoading,
-    isPending: logsIsPending,
-    isPlaceholderData: logsIsPlaceholderData,
-    isSuccess: logsIsSuccess,
-    refetch: refetchLogs,
-  } = useQuery({
+  const logsQuery = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
-    queryFn: async () => ({
-      page: await getRequestLogs(listFilters),
-      filtersApplied,
-    }),
-    enabled,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    queryFn: () => getRequestLogs(listFilters),
     placeholderData: keepPreviousData,
-  });
-  const logsData = logsResult?.page;
-  const emptyStateFiltersApplied =
-    filtersApplied || (logsIsPlaceholderData && Boolean(logsResult?.filtersApplied));
-  const logsQuery = {
-    data: logsData,
-    error: logsError,
-    isFetching: logsIsFetching,
-    isLoading: logsIsLoading,
-    isPending: logsIsPending,
-    isPlaceholderData: logsIsPlaceholderData,
-    isSuccess: logsIsSuccess,
-    refetch: refetchLogs,
-  };
-
-  const {
-    data: optionsData,
-    error: optionsError,
-    isFetching: optionsIsFetching,
-    isLoading: optionsIsLoading,
-    isPending: optionsIsPending,
-    isSuccess: optionsIsSuccess,
-    refetch: refetchOptions,
-  } = useQuery({
-    queryKey: ["dashboard", "request-log-options", facetFilters],
-    queryFn: () => getRequestLogOptions(facetFilters),
-    enabled,
-    refetchInterval: 30_000,
+    refetchInterval: DASHBOARD_REFRESH_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
-  const optionsQuery = {
-    data: optionsData,
-    error: optionsError,
-    isFetching: optionsIsFetching,
-    isLoading: optionsIsLoading,
-    isPending: optionsIsPending,
-    isSuccess: optionsIsSuccess,
-    refetch: refetchOptions,
-  };
 
-  const updateFilters = (patch: Partial<FilterState>) => {
-    const nextState: FilterState = {
-      ...filters,
-      ...patch,
-    };
-    setSearchParams(writeFilterState(nextState, searchParams));
-  };
+  const optionsQuery = useQuery({
+    queryKey: ["dashboard", "request-log-options", filters.timeframe],
+    queryFn: () => getRequestLogOptions({ timeframe: filters.timeframe }),
+    placeholderData: keepPreviousData,
+    refetchInterval: DASHBOARD_REFRESH_MS,
+    refetchIntervalInBackground: false,
+  });
 
-  return {
-    filters,
-    listFilters,
-    facetFilters,
-    emptyStateFiltersApplied,
-    logsQuery,
-    optionsQuery,
-    updateFilters,
-  };
+  const updateFilters = useCallback(
+    (patch: Partial<FilterState>) => {
+      setSearchParams(
+        (current) => writeFilterState({ ...parseFilterState(current), ...patch }, current),
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const resetFilters = useCallback(() => {
+    updateFilters({ ...DEFAULT_FILTER_STATE, limit: filters.limit });
+  }, [filters.limit, updateFilters]);
+
+  return { filters, filtersApplied, logsQuery, optionsQuery, updateFilters, resetFilters };
 }

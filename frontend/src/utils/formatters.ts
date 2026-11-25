@@ -246,21 +246,6 @@ export function formatCachedTokensMeta(totalTokens: unknown, cachedInputTokens: 
   });
 }
 
-export function formatModelLabel(
-  model: string | null | undefined,
-  reasoningEffort: string | null | undefined,
-  serviceTier?: string | null | undefined,
-): string {
-  const base = (model || "").trim();
-  if (!base) {
-    return "--";
-  }
-  const effort = (reasoningEffort || "").trim();
-  const tier = (serviceTier || "").trim();
-  const suffix = [effort, tier].filter(Boolean).join(", ");
-  return suffix ? `${base} (${suffix})` : base;
-}
-
 export function formatTimeLong(
   iso: string | null | undefined,
   displayFormat: DateDisplayFormat = getDateDisplayFormat(),
@@ -279,42 +264,6 @@ export function formatTimeLong(
     time: getTimeFormatter().format(date),
     date: getDateFormatter().format(date),
   };
-}
-
-export function formatConversationDuration(
-  firstIso: string | null | undefined,
-  lastIso: string | null | undefined,
-): string {
-  const first = parseDate(firstIso);
-  const last = parseDate(lastIso);
-  if (!first || !last) {
-    return "—";
-  }
-
-  const totalSeconds = Math.max(0, Math.floor((last.getTime() - first.getTime()) / 1000));
-  if (totalSeconds === 0) {
-    return t("formatters.duration.seconds", { count: 0 });
-  }
-  if (totalSeconds < 60) {
-    return t("formatters.duration.seconds", { count: totalSeconds });
-  }
-  if (totalSeconds < 3600) {
-    return t("formatters.duration.minutesSeconds", {
-      minutes: Math.floor(totalSeconds / 60),
-      seconds: totalSeconds % 60,
-    });
-  }
-  if (totalSeconds < 86400) {
-    return t("formatters.duration.hoursMinutes", {
-      hours: Math.floor(totalSeconds / 3600),
-      minutes: Math.floor((totalSeconds % 3600) / 60),
-    });
-  }
-
-  return t("formatters.duration.daysHours", {
-    days: Math.floor(totalSeconds / 86400),
-    hours: Math.floor((totalSeconds % 86400) / 3600),
-  });
 }
 
 export function formatDateTimeInline(

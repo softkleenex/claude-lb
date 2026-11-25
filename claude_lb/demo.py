@@ -40,6 +40,7 @@ ACCOUNTS = [
     ("prod-us", 2.0, 10, 4000, "api", "normal"),
     ("prod-eu", 1.0, 5, 2000, "api", "normal"),
     ("claude-max-5x", 1.0, 8, 1000, "max_5x", "burn_first"),
+    ("claude-pro", 1.0, 6, 500, "pro", "normal"),
 ]
 
 KEYS = [
@@ -48,6 +49,8 @@ KEYS = [
     ("ci-review-bot", {"max_cost_usd_per_window": 25.0, "window_seconds": 3600}),
     ("support-agent", {"max_requests_per_window": 5000, "window_seconds": 3600}),
 ]
+
+USER_AGENTS = ["claude-cli/2.1.3 (external, cli)", "anthropic-python/0.72.0", "ci-review-bot/1.4"]
 
 # Conversations differ in their cacheable prefix (system + tools + first turn); a
 # client keeps adding turns to one, which is what sticky routing keys on.
@@ -277,16 +280,23 @@ async def seed(port: int) -> list[str]:
                 "cache_creation_input_tokens": 0 if hit else prefix,
             }
             status = 200 if rng.random() > 0.015 else 529
+            streaming = rng.random() < 0.7
+            duration_ms = rng.randint(400, 9000)
             session.add(
                 RequestLog(
                     created_at=now - timedelta(seconds=rng.randint(60, 86_000)),
-                    account_id=rng.choices(account_ids, [2, 1, 1])[0],
+                    account_id=rng.choices(account_ids, [2, 1, 1, 1])[0],
                     api_key_id=rng.choices(key_ids, [5, 2, 3])[0],
                     path="/v1/messages",
                     model=model,
                     status_code=status,
-                    streaming=rng.random() < 0.7,
-                    duration_ms=rng.randint(400, 9000),
+                    streaming=streaming,
+                    duration_ms=duration_ms,
+                    ttft_ms=rng.randint(250, min(duration_ms, 2500)) if streaming else None,
+                    session_key=f"{rng.randrange(60):02x}".rjust(64, "d"),
+                    user_agent=rng.choice(USER_AGENTS),
+                    client_ip=f"10.0.0.{rng.randint(2, 40)}",
+                    error="Overloaded" if status == 529 else None,
                     attempts=1 if status == 200 else 3,
                     cost_usd=estimate_cost_usd(model, **usage) if status == 200 else 0.0,
                     **(usage if status == 200 else {}),
@@ -322,7 +332,7 @@ async def seed(port: int) -> list[str]:
             day = (now - timedelta(days=offset)).date().isoformat()
             weekday_factor = 0.45 if (now - timedelta(days=offset)).weekday() >= 5 else 1.0
             growth = 1 - offset / 45
-            for account_id, share in zip(account_ids, (0.5, 0.25, 0.25), strict=True):
+            for account_id, share in zip(account_ids, (0.45, 0.2, 0.2, 0.15), strict=True):
                 for model, model_share in zip(model_ids, weights, strict=True):
                     requests = int(
                         900 * weekday_factor * growth * share * model_share * rng.uniform(0.8, 1.2)
@@ -385,7 +395,11 @@ async def generate_traffic(port: int, keys: list[str], stop: asyncio.Event) -> N
                 await client.post(
                     "/v1/messages",
                     json=body,
-                    headers={"x-api-key": rng.choice(keys), "anthropic-version": "2023-06-01"},
+                    headers={
+                        "x-api-key": rng.choice(keys),
+                        "anthropic-version": "2023-06-01",
+                        "user-agent": rng.choice(USER_AGENTS),
+                    },
                 )
             except httpx.HTTPError:
                 pass

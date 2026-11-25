@@ -344,6 +344,15 @@ def classify_risk(risk: float) -> Literal["safe", "warning", "danger", "critical
     return "safe"
 
 
+def ewma_rate(samples: Sequence[tuple[float, float, float | None]]) -> float | None:
+    """Smoothed burn rate in percent per second over ``(ts, used%, reset_ts)`` samples,
+    or ``None`` when there are too few samples in the current window to tell."""
+    state: EWMAState | None = None
+    for ts, used, rst in samples:
+        state = ewma_update(state, used, ts, reset_at=rst)
+    return state.rate if state is not None else None
+
+
 def _window_risk(
     samples: Sequence[tuple[float, float, float | None]],
     *,
@@ -356,17 +365,40 @@ def _window_risk(
     if current_used >= 100.0:
         return 1.0
 
-    state: EWMAState | None = None
-    for ts, used, rst in samples:
-        state = ewma_update(state, used, ts, reset_at=rst)
-
     reset_aware = as_aware(reset_at)
     if reset_aware is None:
         return min(current_used / 100.0, 1.0)
 
     seconds_left = max(0.0, (reset_aware - now).total_seconds())
-    rate = state.rate if state and state.rate is not None else 0.0
+    rate = ewma_rate(samples) or 0.0
     return compute_depletion_risk(current_used, rate, seconds_left)
+
+
+def window_risk(
+    samples: Sequence[tuple[float, float, float | None]],
+    *,
+    current_used: float | None,
+    reset_at: datetime | None,
+    now: datetime,
+) -> float:
+    """Depletion risk [0..1] of one quota window (5h or 7d)."""
+    return _window_risk(samples, current_used=current_used, reset_at=reset_at, now=now)
+
+
+def history_samples(
+    history: Sequence[QuotaHistory], *, window: Literal["primary", "secondary"], now: datetime | None = None
+) -> list[tuple[float, float, float | None]]:
+    """``(ts, used%, reset_ts)`` samples of one window, oldest first."""
+    current = now or datetime.now(UTC)
+    samples: list[tuple[float, float, float | None]] = []
+    for row in sorted(history, key=lambda h: as_aware(h.recorded_at) or current):
+        rec = as_aware(row.recorded_at)
+        used = row.primary_used_percent if window == "primary" else row.secondary_used_percent
+        if rec is None or used is None:
+            continue
+        rst = as_aware(row.primary_reset_at if window == "primary" else row.secondary_reset_at)
+        samples.append((rec.timestamp(), used, rst.timestamp() if rst else None))
+    return samples
 
 
 def compute_account_risk(

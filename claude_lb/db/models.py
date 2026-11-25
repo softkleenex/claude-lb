@@ -179,10 +179,19 @@ class RequestLog(Base):
 
     error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """Time to the first streamed byte, measured from when the request arrived. Null for
+    non-streaming responses and for rows written before this was recorded."""
+    session_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Conversation key (hash of the cacheable prefix, see ``proxy.sticky.session_key``)."""
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     account: Mapped[Account | None] = relationship(back_populates="request_logs")
 
 
 Index("ix_request_logs_account_created", RequestLog.account_id, RequestLog.created_at)
+Index("ix_request_logs_session_created", RequestLog.session_key, RequestLog.created_at)
 Index("ix_request_logs_key_created", RequestLog.api_key_id, RequestLog.created_at)
 
 

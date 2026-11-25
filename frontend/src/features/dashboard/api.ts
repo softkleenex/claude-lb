@@ -1,143 +1,73 @@
 import { get } from "@/lib/api-client";
 
 import {
-  ConversationDetailsSchema,
-  ConversationsResponseSchema,
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
+  RequestLogDetailSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
-  type ConversationTimeframe,
+  UsageTrendSchema,
   type OverviewTimeframe,
+  type RequestLogTimeframe,
 } from "@/features/dashboard/schemas";
-
-const DASHBOARD_PATH = "/api/dashboard";
-const REQUEST_LOGS_PATH = "/api/request-logs";
-const CONVERSATIONS_PATH = "/api/conversations";
 
 export type RequestLogsListFilters = {
   limit?: number;
   offset?: number;
   search?: string;
+  timeframe?: RequestLogTimeframe;
   accountIds?: string[];
   apiKeyIds?: string[];
+  models?: string[];
   statuses?: string[];
-  modelOptions?: string[];
-  since?: string;
-  until?: string;
-  conversationId?: string;
-};
-
-export type RequestLogFacetFilters = {
-  since?: string;
-  until?: string;
-  accountIds?: string[];
-  apiKeyIds?: string[];
-  modelOptions?: string[];
-};
-
-export type DashboardOverviewParams = {
-  timeframe?: OverviewTimeframe;
+  sessionKey?: string | null;
 };
 
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
-  if (!values || values.length === 0) {
-    return;
-  }
-  for (const value of values) {
-    if (value) {
-      params.append(key, value);
-    }
+  for (const value of values ?? []) {
+    if (value) params.append(key, value);
   }
 }
 
-export function getDashboardOverview(params: DashboardOverviewParams = {}) {
-  const query = new URLSearchParams();
-  query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
-  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
+function withQuery(path: string, query: URLSearchParams): string {
+  const suffix = query.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
+export function getDashboardOverview(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME) {
+  return get(`/api/dashboard/overview?timeframe=${timeframe}`, DashboardOverviewSchema);
 }
 
 export function getDashboardProjections() {
-  return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
+  return get("/api/dashboard/projections", DashboardProjectionsSchema);
+}
+
+/** Daily totals from the rollups, so the chart survives request-log retention. */
+export function getUsageTrend(days = 28) {
+  return get(`/api/usage/trend?days=${days}`, UsageTrendSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {
   const query = new URLSearchParams();
-  if (typeof params.limit === "number") {
-    query.set("limit", String(params.limit));
-  }
-  if (typeof params.offset === "number") {
-    query.set("offset", String(params.offset));
-  }
-  if (params.search) {
-    query.set("search", params.search);
-  }
+  if (typeof params.limit === "number") query.set("limit", String(params.limit));
+  if (typeof params.offset === "number") query.set("offset", String(params.offset));
+  if (params.search?.trim()) query.set("search", params.search.trim());
+  if (params.timeframe && params.timeframe !== "all") query.set("timeframe", params.timeframe);
   appendMany(query, "accountId", params.accountIds);
   appendMany(query, "apiKeyId", params.apiKeyIds);
+  appendMany(query, "model", params.models);
   appendMany(query, "status", params.statuses);
-  appendMany(query, "modelOption", params.modelOptions);
-  if (params.conversationId) {
-    query.set("conversation_id", params.conversationId);
-  }
-  if (params.since) {
-    query.set("since", params.since);
-  }
-  if (params.until) {
-    query.set("until", params.until);
-  }
-  const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema);
+  if (params.sessionKey) query.set("sessionKey", params.sessionKey);
+  return get(withQuery("/api/request-logs", query), RequestLogsResponseSchema);
 }
 
-export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
+export function getRequestLogOptions(params: { timeframe?: RequestLogTimeframe } = {}) {
   const query = new URLSearchParams();
-  if (params.since) {
-    query.set("since", params.since);
-  }
-  if (params.until) {
-    query.set("until", params.until);
-  }
-  appendMany(query, "accountId", params.accountIds);
-  appendMany(query, "apiKeyId", params.apiKeyIds);
-  appendMany(query, "modelOption", params.modelOptions);
-  const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
+  if (params.timeframe && params.timeframe !== "all") query.set("timeframe", params.timeframe);
+  return get(withQuery("/api/request-logs/options", query), RequestLogFilterOptionsSchema);
 }
 
-export type ConversationListFilters = {
-  limit?: number;
-  offset?: number;
-  search?: string;
-  timeframe?: ConversationTimeframe;
-  since?: string;
-};
-
-export function getConversations(params: ConversationListFilters = {}) {
-  const query = new URLSearchParams();
-  if (typeof params.limit === "number") {
-    query.set("limit", String(params.limit));
-  }
-  if (typeof params.offset === "number") {
-    query.set("offset", String(params.offset));
-  }
-  if (params.search) {
-    query.set("search", params.search);
-  }
-  if (params.timeframe) {
-    query.set("timeframe", params.timeframe);
-  }
-  if (params.since) {
-    query.set("since", params.since);
-  }
-  const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${CONVERSATIONS_PATH}${suffix}`, ConversationsResponseSchema);
-}
-
-export function getConversationDetails(conversationId: string) {
-  const opaqueId = conversationId === "." || conversationId === ".."
-    ? ` ${conversationId}`
-    : conversationId;
-  const encoded = encodeURIComponent(opaqueId);
-  return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
+export function getRequestLogDetail(requestId: string) {
+  return get(`/api/request-logs/${encodeURIComponent(requestId)}`, RequestLogDetailSchema);
 }

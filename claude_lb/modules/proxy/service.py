@@ -198,14 +198,17 @@ class ProxyService:
         headers: dict[str, str],
         body: bytes,
         api_key: ApiKey | None,
+        session_key: str | None = None,
     ) -> ProxyOutcome:
+        """``session_key`` is the conversation key when the caller already computed it
+        (it is logged as well); otherwise it is derived here when sticky routing needs it."""
         env = get_settings()
         async with session_scope() as session:
             runtime = await settings_service.load(session)
 
         model, wants_stream = self._peek_request(body)
         sticky_key = (
-            sticky.session_key(body, api_key_id=api_key.id if api_key else None)
+            (session_key or sticky.session_key(body, api_key_id=api_key.id if api_key else None))
             if runtime.sticky_sessions_enabled
             else None
         )
@@ -321,9 +324,7 @@ class ProxyService:
                 logger.info("upstream 403 on account=%s; trying the next account", account_name)
                 continue
 
-            if response.status_code == 400 and is_billing_exhausted(
-                error_body := await response.aread()
-            ):
+            if response.status_code == 400 and is_billing_exhausted(error_body := await response.aread()):
                 # Out of Console credit (or over the org's spend limit) is an account
                 # problem, not a caller problem: take this account out and try the next.
                 await response.aclose()
@@ -483,6 +484,10 @@ async def record_request(
     attempts: int,
     usage: Usage,
     error: str | None = None,
+    ttft_ms: int | None = None,
+    session_key: str | None = None,
+    user_agent: str | None = None,
+    client_ip: str | None = None,
 ) -> None:
     """Write the request log and roll the counters onto the account and API key."""
     logged_model = _clip_model(usage.model or model)
@@ -502,6 +507,10 @@ async def record_request(
                 attempts=attempts,
                 cost_usd=cost,
                 error=error[:512] if error else None,
+                ttft_ms=ttft_ms,
+                session_key=session_key,
+                user_agent=user_agent[:255] if user_agent else None,
+                client_ip=client_ip[:64] if client_ip else None,
                 **usage.as_dict(),
             )
         )
@@ -566,6 +575,9 @@ def wrap_stream_for_accounting(
     started_at: float,
     attempts: int,
     on_finished: Callable[[], None] | None = None,
+    session_key: str | None = None,
+    user_agent: str | None = None,
+    client_ip: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Pass SSE bytes through untouched, then log usage once the stream ends.
 
@@ -577,6 +589,7 @@ def wrap_stream_for_accounting(
     were still billed upstream, but never counted against spend or budgets.
     """
     collector = StreamUsageCollector()
+    first_byte_at: list[float] = []
 
     async def _finalize(error: str | None) -> None:
         try:
@@ -599,6 +612,10 @@ def wrap_stream_for_accounting(
                 attempts=attempts,
                 usage=usage,
                 error=error,
+                ttft_ms=int((first_byte_at[0] - started_at) * 1000) if first_byte_at else None,
+                session_key=session_key,
+                user_agent=user_agent,
+                client_ip=client_ip,
             )
         except Exception:  # noqa: BLE001 - nothing upstream of a finalizer can handle it
             logger.exception("failed to record streamed request")
@@ -610,6 +627,8 @@ def wrap_stream_for_accounting(
         error: str | None = None
         try:
             async for chunk in stream:
+                if not first_byte_at:
+                    first_byte_at.append(time.perf_counter())
                 collector.feed(chunk)
                 yield chunk
         except (asyncio.CancelledError, GeneratorExit):

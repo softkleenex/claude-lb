@@ -22,10 +22,10 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] A. Scaffold: copy frontend, npm, outDir, SPA serving, branding, prune codex-only features, compiles
 - [x] B. Auth gate + shell (nav, status bar, theme, i18n ko/en, privacy blur) + Settings page
 - [x] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
-- [ ] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
+- [x] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
 - [ ] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
 - [ ] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
-- [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, data retention, guest role
+- [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
 - [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
 
 ## Log
@@ -266,3 +266,104 @@ token (oauth/bearer/pro). Console: no errors (only Chrome "form field should hav
   (`["usage","quota"]`, has pool totals too), `accountStatus()` and `useNow()` for countdowns. Mutations invalidate
   `["dashboard"]`, so a Dashboard query under that prefix refreshes after account edits.
 - Selection is the `?selected=` search param. Dates from claude-lb: always `parseServerDate` / `lib/time.ts`.
+
+
+### 2026-11-26 — Step D (dashboard overview, pacing, request logs)
+**Done**
+- **RequestLog columns** (nullable, added to old DBs by `db/schema.py` reconcile; index
+  `ix_request_logs_session_created`): `ttft_ms` (first streamed byte, measured from request arrival in
+  `wrap_stream_for_accounting`; null for buffered responses), `session_key` (the sticky-routing conversation hash
+  `proxy.sticky.session_key(body, api_key_id)`, now computed once in `proxy/api.py` for *every* request and passed into
+  `ProxyService.forward(session_key=…)` so sticky routing reuses it), `user_agent`, `client_ip`
+  (`auth.dependencies.client_ip`). `record_request` / `wrap_stream_for_accounting` take them as optional kwargs.
+  Demo seed rows and demo traffic carry them too; the demo gained a 4th account (`claude-pro`, plan `pro`).
+- **`GET /api/dashboard/overview?timeframe=1h|24h|7d|30d`** (`modules/dashboard/{data_api,overview,timeframes}.py`):
+  `current` and `previous` (equal preceding window) metrics — requests, errors, error_rate, top_error(+count),
+  input/output/cache read/cache write/total tokens, cost, cache_savings_usd, cache_hit_rate, conversations (distinct
+  session_key), avg_duration_ms, avg_ttft_ms — `can_compare` (= previous window had traffic), `trends` (fixed buckets:
+  1h→12×5 min, 24h→24×1 h, 7d→28×6 h, 30d→30×1 d; per bucket requests/tokens/cost/savings/hit rate/error rate/
+  conversations), `by_model` (same totals per model) and `meta` (version, accounts total/available, pool remaining %
+  as `/api/usage/quota` computes it, routing strategy, sticky flag, log retention days, last request). Bucketing is
+  done in SQL with a dialect switch (`julianday` on SQLite, `extract(epoch)`+`floor` on Postgres — Postgres path is
+  untested locally). Reads request logs, so a window longer than retention is truncated (UI says so).
+- **`GET /api/dashboard/projections`**: `primary`/`secondary` window capacity over *enabled subscription* accounts
+  (`plan_type != "api"`; paused/disabled excluded): capacity/remaining credits, remaining %, capacity-weighted safe line
+  (elapsed share of each window) and risk, risk level, EWMA burn rate (credits/h), projected exhaustion, next reset,
+  per-account rows (used %, remaining, reset, safe line, risk, burn, observed_at; unobserved accounts count as full).
+  `weekly_pace` = port of codex-lb `weekly_pace.py` in `modules/dashboard/pace.py` (schedule gap, 30-min smoothed
+  delta, forecast simulation over resets, shortfall, pause-for-break-even hours, throttle %, Pro accounts to cover with
+  Pro = 100 credits, status behind/on_track/ahead/danger, confidence). Difference: idle accounts are not dropped as
+  stale (claude-lb only observes quota on traffic) — staleness (>6 h since `quota_observed_at`) only lowers confidence.
+  `api_accounts` = API-key accounts' lifetime spend vs `spend_cap_usd`. `quota.py` gained public `ewma_rate`,
+  `window_risk`, `history_samples` (refactor, behaviour unchanged).
+- **Request logs** (`modules/request_logs/{api,service}.py`): `GET /api/request-logs?limit&offset&search&timeframe|since
+  &until&account_id*&api_key_id*&model*&status*&session_key` → `{requests, total, limit, offset, has_more}`; rows carry
+  account name/plan, API key name, status category, ttft, cache tokens, total tokens, cost, per-row cache savings,
+  error, session key, UA, IP. Status categories (`STATUS_CATEGORIES`): ok, aborted (2xx with an error, e.g. client
+  hung up), rate_limited (429), overloaded (529), auth_error (401/403), client_error, server_error (5xx/0). Search is a
+  LIKE (escaped) over id, model, error, session key, UA, IP, path, account name, key name. `GET /api/request-logs/options
+  [?timeframe]` → accounts, api_keys (with key_hint), models, statuses present. `GET /api/request-logs/{id}` adds
+  `cost_breakdown` (new `pricing.cost_breakdown_usd`; cache writes priced at the 5-min rate) and a `conversation`
+  summary. `/api/usage/requests` unchanged.
+- **Frontend `features/dashboard`** rewritten on these shapes: `schemas.ts`, `api.ts`, `utils.ts` (`buildStats`,
+  `formatUsd`, `compareValues` %, `comparePoints` pp, `formatMs`, `formatHours`, `toIso` for naive UTC),
+  `hooks/use-dashboard.ts` (overview/projections/cost-trend/detail; 30 s refetch, paused while the tab is hidden via
+  React Query `refetchIntervalInBackground: false`), `hooks/use-request-logs.ts` (filters in the URL: `search`,
+  `timeframe`, `accountId`, `apiKeyId`, `model`, `status`, `session`, `limit`, `offset`; overview window is `window`).
+  Components: header meta line + window select + refresh; `StatsGrid` (6 cards: requests, tokens, cost, cache
+  savings + hit rate, error rate + top error, active conversations; sparklines + deltas); `CapacityDonuts`
+  (`usage-donuts.tsx`, 5h/7d, a segment per account, remaining in the centre, safe-line tick, risk badge, footer with
+  safe line/next reset/burn/runs-out; hidden without subscription accounts); `WeeklyCreditsPaceCard`; `ApiSpendCard`;
+  `account-section.tsx` (`AccountCards` reusing Step C `AccountListItem` + `AccountList` sortable table, summary line,
+  quick actions pause/resume, probe, open in Accounts; view mode + sort persisted, sort key `…-account-list-sort:v2`);
+  `UsageByModelTable` (requests, tokens, cache hit, saved, cost); `CostTrendChart` (28-day `/api/usage/trend`
+  rollups); `RecentRequestsTable` (columns time, account, plan, API key, model, status, latency, TTFT, tokens incl.
+  cached, cost incl. saved, attempts, details; plan/attempts hidden by default; chooser + resizable widths persisted
+  under `claude-lb-dashboard-request-log-columns:v2`; row click opens details); `RequestFilters` (300 ms debounced
+  search, timeframe all/1h/24h/7d/30d, multi-selects, conversation badge, reset); `RequestDetailsDialog` (fetches
+  `/api/request-logs/{id}`; copy buttons for id/account/key/model/IP/UA/conversation key/error; token + cost table;
+  "show this conversation's requests" sets the `session` filter); `RequestStatusBadge`. `DonutChart` gained
+  `headerAction`/`footer` props and `min-w-0` (mobile overflow fix).
+- **Removed**: `legacy-account-schemas.ts`, `account-credit-display`, codex account-card/cards/list/summary-line,
+  conversations view/table/details/hooks/timeframe select, dashboard view selector, `components/status-badge.tsx`,
+  `REQUEST_STATUS_LABELS`, `formatModelLabel` (reasoning effort/service tier), `formatConversationDuration`, the old
+  dashboard tests and `__integration__/dashboard-flow.test.tsx`, MSW conversation handlers and legacy dashboard
+  factories. Reports page reads `apiKeys[].keyHint` from the new options endpoint.
+- **i18n**: all `dashboard.*` keys replaced (en 212, ko 198 — ko has no `_one`), 128 old keys removed per locale;
+  zh-CN keeps 72 old translations whose key and placeholders still match, the rest falls back to English.
+- **MSW**: new wire factories `createDashboardOverviewWire`, `createDashboardProjectionsWire`, `createWindowCapacityWire`,
+  `createWeeklyPaceWire`, `createUsageTrendWire`, `createRequestLogWire`, `createDefaultRequestLogWires`; handlers for
+  overview (422 on bad timeframe), projections, `/api/usage/trend`, request logs (filters mirror the backend on the
+  snake_case query), options, detail; helpers `setMockRequestLogs()`, `setMockProjections()`.
+
+**Results**: `pytest` 496 passed (+40, `tests/test_dashboard_api.py`: recorded columns incl. streaming TTFT and
+exhausted requests, schema reconcile of an old `request_logs` table, overview totals/deltas/buckets for all four
+timeframes, projections + weekly pace, request-log paging/filters/search/options/detail, status categories); `ruff`
+clean; `npm test` 89 files / 597 tests pass (new: `dashboard-page.test.tsx` 12, `utils.test.ts`,
+`weekly-credits-pace-card.test.tsx`, `use-request-logs.test.ts`, `api.test.ts`); `npm run lint` clean; `npm run build` OK.
+Browser (demo on :2461, fresh data dir): all widgets render with data (6 stat cards with sparklines, deltas on the 1h
+window, 5h/7d donuts with 2 subscription segments + safe-line tick at "warning", weekly pace, API key spend, 4 account
+cards → list view, model table, 28-day cost chart, 904 request rows); `?status=overloaded&timeframe=24h` → 9 rows all
+Overloaded 529; `?search=prod-eu` → 180 rows, Next page → 26–50 of 180; details dialog with copy buttons, "show this
+conversation" → `?session=…`, 2 rows; probe quick action → toast; Korean + dark mode at 390 px: no horizontal page
+scroll (scrollWidth 390); no console errors or warnings.
+
+**Known issues**
+- Overview/sparklines read request logs only; windows longer than `request_log_retention_days` are truncated (a note
+  is shown). The cost chart uses rollups and is not.
+- Burn rate often reads "Idle": the EWMA restarts whenever utilization drops (window reset or the demo's cycling fake
+  utilization), so short-lived histories give no rate. Weekly pace then says "not enough recent readings".
+- Postgres bucket SQL (`extract(epoch)`/`floor`) and the `GROUP BY` on a label in the options query are untested here.
+- Cost breakdown prices all cache writes at the 5-min rate (the 1-h share is not logged); the total is authoritative.
+- `formatHours` drops minutes once a duration exceeds a day ("1d" for 24.5 h).
+- zh-CN lacks most new dashboard strings (English fallback).
+
+**Notes for next agents (Step E Reports)**
+- Reuse `modules/request_logs/service.py` (`LogFilters`, `_apply`, `status_category`, `STATUS_CATEGORIES`) for report
+  filters, and the new RequestLog columns (`ttft_ms`, `duration_ms` → TPS = output_tokens / (duration − ttft),
+  `session_key`, `user_agent`, `client_ip`). Bucketing helper `_bucket_index(dialect, since, seconds)` in
+  `modules/dashboard/overview.py` works for any bucket size.
+- Frontend: `getRequestLogOptions` (dashboard api) now returns `{accounts, apiKeys{id,name,keyHint}, models, statuses}`;
+  `MultiSelectFilter`, `PaginationControls`, `TimeframeSelect`, `CostTrendChart`, `UsageByModelTable`,
+  `RequestStatusBadge`, `formatUsd`/`formatMs` are reusable. Reports page still calls codex-lb `/api/reports*`.
+

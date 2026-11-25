@@ -6,7 +6,7 @@ import {
   useRequestLogTablePreferences,
 } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import {
-  ALL_REQUEST_LOG_COLUMNS,
+  DEFAULT_REQUEST_LOG_COLUMNS,
   MAX_REQUEST_LOG_COLUMN_WIDTH,
   MIN_REQUEST_LOG_COLUMN_WIDTH,
 } from "@/features/dashboard/request-log-columns";
@@ -16,10 +16,12 @@ describe("useRequestLogTablePreferences", () => {
     window.localStorage.removeItem(REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY);
   });
 
-  it("shows every request-log column by default", () => {
+  it("shows the default request-log columns (all but plan and attempts)", () => {
     const { result } = renderHook(() => useRequestLogTablePreferences());
 
-    expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
+    expect(result.current.visibleColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
+    expect(result.current.visibleColumns).not.toContain("plan");
+    expect(result.current.visibleColumns).not.toContain("attempts");
     expect(result.current.columnWidths).toEqual({});
   });
 
@@ -27,16 +29,19 @@ describe("useRequestLogTablePreferences", () => {
     const { result, unmount } = renderHook(() => useRequestLogTablePreferences());
 
     act(() => {
-      result.current.toggleColumn("plan");
+      result.current.toggleColumn("apiKey");
+      result.current.toggleColumn("attempts");
       result.current.setColumnWidth("account", 284);
     });
 
-    expect(result.current.visibleColumns).not.toContain("plan");
+    expect(result.current.visibleColumns).not.toContain("apiKey");
+    expect(result.current.visibleColumns).toContain("attempts");
     expect(result.current.columnWidths.account).toBe(284);
 
     unmount();
     const restored = renderHook(() => useRequestLogTablePreferences());
-    expect(restored.result.current.visibleColumns).not.toContain("plan");
+    expect(restored.result.current.visibleColumns).not.toContain("apiKey");
+    expect(restored.result.current.visibleColumns).toContain("attempts");
     expect(restored.result.current.columnWidths.account).toBe(284);
   });
 
@@ -85,7 +90,7 @@ describe("useRequestLogTablePreferences", () => {
 
     const { result } = renderHook(() => useRequestLogTablePreferences());
 
-    expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
+    expect(result.current.visibleColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
   });
 
   it("restores default widths too when stored visibility is stale", () => {
@@ -99,7 +104,7 @@ describe("useRequestLogTablePreferences", () => {
 
     const { result } = renderHook(() => useRequestLogTablePreferences());
 
-    expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
+    expect(result.current.visibleColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
     expect(result.current.columnWidths).toEqual({});
   });
 
@@ -113,7 +118,7 @@ describe("useRequestLogTablePreferences", () => {
       result.current.restoreDefaultLayout();
     });
 
-    expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
+    expect(result.current.visibleColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
     expect(result.current.columnWidths).toEqual({});
     expect(
       window.localStorage.getItem(REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY),

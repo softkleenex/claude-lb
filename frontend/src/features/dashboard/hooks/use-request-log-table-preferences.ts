@@ -9,7 +9,7 @@ import {
 } from "@/features/dashboard/request-log-columns";
 
 export const REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY =
-  "claude-lb-dashboard-request-log-columns:v1";
+  "claude-lb-dashboard-request-log-columns:v2";
 
 type RequestLogTablePreferences = {
   visibleColumns: RequestLogColumnId[];

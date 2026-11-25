@@ -1,10 +1,10 @@
 import { create } from "zustand";
 
-import type { AccountListSort, AccountListSortKey } from "@/features/dashboard/components/account-list";
+import type { AccountListSort, AccountListSortKey } from "@/features/dashboard/components/account-section";
 
 const ACCOUNT_BURNRATE_STORAGE_KEY = "claude-lb-account-burnrate-enabled";
 const ACCOUNT_VIEW_MODE_STORAGE_KEY = "claude-lb-dashboard-account-view-mode";
-const ACCOUNT_LIST_SORT_STORAGE_KEY = "claude-lb-dashboard-account-list-sort";
+const ACCOUNT_LIST_SORT_STORAGE_KEY = "claude-lb-dashboard-account-list-sort:v2";
 
 export type DashboardAccountViewMode = "cards" | "list";
 
@@ -19,15 +19,7 @@ type DashboardPreferencesState = {
   setAccountListSort: (sort: AccountListSort) => void;
 };
 
-const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = [
-  "account",
-  "status",
-  "plan",
-  "quota",
-  "subscriptionCredits",
-  "purchasedCredits",
-  "warmup",
-];
+const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = ["name", "status", "fiveHour", "sevenDay", "cost"];
 
 function isAccountListSortKey(value: unknown): value is AccountListSortKey {
   return typeof value === "string" && ACCOUNT_LIST_SORT_KEYS.includes(value as AccountListSortKey);
@@ -65,9 +57,6 @@ function readStoredAccountListSort(): AccountListSort {
   }
   try {
     const parsed = JSON.parse(stored) as { key?: unknown; direction?: unknown };
-    if (parsed.key === "credits") {
-      parsed.key = "purchasedCredits";
-    }
     if (
       isAccountListSortKey(parsed.key) &&
       (parsed.direction === "asc" || parsed.direction === "desc")

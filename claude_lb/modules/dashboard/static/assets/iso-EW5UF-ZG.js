@@ -1,1 +1,0 @@
-import{_ as e,c as t}from"./api-client-DJYpPJPc.js";function n(n){return e(t,n)}export{n as t};

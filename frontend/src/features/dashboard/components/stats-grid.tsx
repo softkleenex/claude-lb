@@ -29,17 +29,16 @@ export type StatsGridProps = {
 };
 
 export function StatsGrid({ stats }: StatsGridProps) {
-  const columnsClass = stats.length >= 5 ? "xl:grid-cols-5" : "xl:grid-cols-4";
-
   return (
-    <div className={cn("grid gap-3 sm:grid-cols-2", columnsClass)}>
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
       {stats.map((stat, index) => {
         const Icon = stat.icon;
         const accent = ACCENT_STYLES[index % ACCENT_STYLES.length];
         return (
           <div
-            key={stat.label}
-            className="animate-fade-in-up card-hover rounded-xl border bg-card p-4"
+            key={stat.id}
+            data-testid={`stat-${stat.id}`}
+            className="animate-fade-in-up card-hover min-w-0 rounded-xl border bg-card p-4"
             style={{ animationDelay: `${index * 75}ms` }}
           >
             <div className="flex items-center justify-between">
@@ -50,7 +49,7 @@ export function StatsGrid({ stats }: StatsGridProps) {
             </div>
             <div className="mt-1">
               <div data-testid="stat-value-row" className="flex items-baseline gap-2">
-                <p className="text-[1.625rem] font-semibold tracking-[-0.02em]">{stat.value}</p>
+                <p className="text-[1.625rem] font-semibold tabular-nums tracking-[-0.02em]">{stat.value}</p>
                 {stat.comparison ? (
                   <p className={cn("text-xs font-medium", COMPARISON_STYLES[stat.comparison.tone])}>
                     {stat.comparison.text}
@@ -58,7 +57,7 @@ export function StatsGrid({ stats }: StatsGridProps) {
                 ) : null}
               </div>
               {stat.meta ? (
-                <p className="mt-1 text-xs text-muted-foreground">{stat.meta}</p>
+                <p className="mt-1 truncate text-xs text-muted-foreground" title={stat.meta}>{stat.meta}</p>
               ) : null}
             </div>
             {stat.trend.length > 0 ? (

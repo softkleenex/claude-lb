@@ -144,3 +144,31 @@ def cache_read_savings_usd(model: str | None, cache_read_input_tokens: int, prom
         return 0.0
     price = price.for_prompt(prompt_tokens)
     return cache_read_input_tokens * (price.input_per_mtok - price.cache_read_rate) / 1_000_000
+
+
+def cost_breakdown_usd(
+    model: str | None,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+) -> dict[str, float]:
+    """Per-component USD for one logged request.
+
+    Request logs do not keep the 1-hour share of cache writes, so every write is priced
+    at the 5-minute rate here; the logged total (``cost_usd``) stays authoritative.
+    """
+    price = lookup(model)
+    prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    price = price.for_prompt(prompt_tokens)
+    parts = {
+        "input_usd": input_tokens * price.input_per_mtok / 1_000_000,
+        "cache_write_usd": cache_creation_input_tokens
+        * price.input_per_mtok
+        * CACHE_WRITE_5M_MULTIPLIER
+        / 1_000_000,
+        "cache_read_usd": cache_read_input_tokens * price.cache_read_rate / 1_000_000,
+        "output_usd": output_tokens * price.output_per_mtok / 1_000_000,
+    }
+    return {key: round(value, 8) for key, value in parts.items()}

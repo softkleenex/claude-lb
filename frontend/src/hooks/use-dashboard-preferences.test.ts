@@ -33,7 +33,7 @@ describe("useDashboardPreferencesStore", () => {
     expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("cards");
     expect(useDashboardPreferencesStore.getState().accountListSort).toBeNull();
     expect(window.localStorage.getItem("claude-lb-dashboard-account-view-mode")).toBe("cards");
-    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort")).toBeNull();
+    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort:v2")).toBeNull();
   });
 
   it("persists account view mode updates", async () => {
@@ -48,32 +48,29 @@ describe("useDashboardPreferencesStore", () => {
   it("persists account list sort updates", async () => {
     const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
 
-    useDashboardPreferencesStore.getState().setAccountListSort({ key: "quota", direction: "asc" });
+    useDashboardPreferencesStore.getState().setAccountListSort({ key: "sevenDay", direction: "asc" });
 
-    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "quota", direction: "asc" });
-    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort")).toBe(
-      JSON.stringify({ key: "quota", direction: "asc" }),
+    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "sevenDay", direction: "asc" });
+    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort:v2")).toBe(
+      JSON.stringify({ key: "sevenDay", direction: "asc" }),
     );
   });
 
-  it("migrates the legacy credits sort to purchased credits", async () => {
+  it("restores a stored account list sort", async () => {
     window.localStorage.setItem(
-      "claude-lb-dashboard-account-list-sort",
-      JSON.stringify({ key: "credits", direction: "desc" }),
+      "claude-lb-dashboard-account-list-sort:v2",
+      JSON.stringify({ key: "cost", direction: "desc" }),
     );
     const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
 
     useDashboardPreferencesStore.getState().initializePreferences();
 
-    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "purchasedCredits", direction: "desc" });
-    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort")).toBe(
-      JSON.stringify({ key: "purchasedCredits", direction: "desc" }),
-    );
+    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "cost", direction: "desc" });
   });
 
   it("ignores invalid stored account list sort", async () => {
     window.localStorage.setItem(
-      "claude-lb-dashboard-account-list-sort",
+      "claude-lb-dashboard-account-list-sort:v2",
       JSON.stringify({ key: "invalid", direction: "desc" }),
     );
     const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
@@ -81,6 +78,6 @@ describe("useDashboardPreferencesStore", () => {
     useDashboardPreferencesStore.getState().initializePreferences();
 
     expect(useDashboardPreferencesStore.getState().accountListSort).toBeNull();
-    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort")).toBeNull();
+    expect(window.localStorage.getItem("claude-lb-dashboard-account-list-sort:v2")).toBeNull();
   });
 });

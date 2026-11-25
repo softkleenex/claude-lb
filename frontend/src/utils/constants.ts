@@ -88,12 +88,4 @@ export const MESSAGE_TONE_META = {
   },
 } as const;
 
-export const REQUEST_STATUS_LABELS: Record<string, string> = {
-  ok: "OK",
-  cancelled: "Cancelled",
-  rate_limit: "Rate limit",
-  quota: "Quota",
-  error: "Error",
-};
-
 export const RESET_ERROR_LABEL = "--";

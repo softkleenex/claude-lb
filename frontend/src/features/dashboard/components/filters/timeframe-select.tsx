@@ -8,8 +8,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const TIMEFRAME_VALUES = ["all", "1h", "24h", "7d"] as const;
-export type TimeframeValue = (typeof TIMEFRAME_VALUES)[number];
+import { REQUEST_LOG_TIMEFRAMES, type RequestLogTimeframe } from "@/features/dashboard/schemas";
+
+const TIMEFRAME_VALUES = REQUEST_LOG_TIMEFRAMES;
+export type TimeframeValue = RequestLogTimeframe;
 
 function isTimeframeValue(value: string): value is TimeframeValue {
   return (TIMEFRAME_VALUES as readonly string[]).includes(value);
@@ -25,14 +27,16 @@ export function TimeframeSelect({ value, onChange }: TimeframeSelectProps) {
 
   return (
     <Select value={value} onValueChange={(next) => { if (isTimeframeValue(next)) onChange(next); }}>
-      <SelectTrigger size="sm" className="w-28">
+      <SelectTrigger size="sm" className="w-28" aria-label={t("dashboard.filters.timeframe")}>
         <SelectValue placeholder={t("dashboard.filters.timeframe")} />
       </SelectTrigger>
       <SelectContent align="start">
         <SelectItem value="all">{t("common.time.all")}</SelectItem>
-        <SelectItem value="1h">1h</SelectItem>
-        <SelectItem value="24h">24h</SelectItem>
-        <SelectItem value="7d">7d</SelectItem>
+        {TIMEFRAME_VALUES.filter((value) => value !== "all").map((value) => (
+          <SelectItem key={value} value={value}>
+            {t(`dashboard.timeframes.${value}`)}
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   );

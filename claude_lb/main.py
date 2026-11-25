@@ -23,9 +23,11 @@ from claude_lb.modules.auth import service as auth_service
 from claude_lb.modules.auth.api import router as auth_router
 from claude_lb.modules.auth.dependencies import require_management_auth
 from claude_lb.modules.dashboard.api import router as dashboard_router
+from claude_lb.modules.dashboard.data_api import router as dashboard_data_router
 from claude_lb.modules.health.api import router as health_router
 from claude_lb.modules.health.service import Scheduler
 from claude_lb.modules.proxy.api import router as proxy_router
+from claude_lb.modules.request_logs.api import router as request_logs_router
 from claude_lb.modules.settings.api import router as settings_router
 from claude_lb.modules.usage import metrics as usage_metrics
 from claude_lb.modules.usage.api import prune_request_logs
@@ -132,6 +134,8 @@ def create_app() -> FastAPI:
         accounts_router,
         api_keys_router,
         usage_router,
+        dashboard_data_router,
+        request_logs_router,
         settings_router,
         audit_router,
         health_router,

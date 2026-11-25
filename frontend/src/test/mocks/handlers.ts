@@ -9,35 +9,28 @@ import {
   TRAFFIC_CLASSES,
 } from "@/features/api-keys/schemas";
 import {
-  type AccountSummary,
   type ApiKey,
-  type ConversationDetails,
-  type ConversationEntry,
   createApiKey,
   createApiKeyCreateResponse,
   createApiKeyTrends,
   createApiKeyUsage7Day,
-  createConversationDetails,
-  createConversationsResponse,
   createAuthStatus,
-  createDashboardOverview,
-  createDashboardProjections,
   createRuntimeSettings,
-  createDefaultAccounts,
   createDefaultAccountWires,
   createAccountWire,
   createAccountTrendsWire,
   createPoolQuotaWire,
   type AccountWire,
+  createDashboardOverviewWire,
+  createDashboardProjectionsWire,
+  createDefaultRequestLogWires,
+  createUsageTrendWire,
+  type RequestLogWire,
   createDefaultApiKeys,
-  createDefaultConversations,
-  createDefaultRequestLogs,
   createQuotaPlannerDecision,
   createQuotaPlannerForecast,
   createQuotaPlannerSettings,
   createQuotaPlannerWarmupActionResponse,
-  createRequestLogFilterOptions,
-  createRequestLogsResponse,
   type AuthStatusWire,
   MOCK_BOOTSTRAP_TOKEN,
   MOCK_DASHBOARD_PASSWORD,
@@ -47,11 +40,17 @@ import {
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
-  type RequestLogEntry,
 } from "@/test/mocks/factories";
 
-const MODEL_OPTION_DELIMITER = ":::";
-const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as const;
+const REQUEST_STATUS_ORDER = [
+  "ok",
+  "aborted",
+  "rate_limited",
+  "overloaded",
+  "auth_error",
+  "client_error",
+  "server_error",
+] as const;
 
 // ── Zod schemas for mock request bodies ──
 
@@ -142,11 +141,10 @@ async function parseJsonBody<T>(
 type MockState = {
   /** claude-lb `GET /api/accounts` rows (snake_case wire shape). */
   accounts: AccountWire[];
-  /** LEGACY codex-lb account summaries for `/api/dashboard/overview` (until Step D). */
-  legacyAccounts: AccountSummary[];
-  requestLogs: RequestLogEntry[];
-  conversations: ConversationEntry[];
-  conversationDetails: ConversationDetails[];
+  /** claude-lb `GET /api/request-logs` rows, newest first (snake_case wire shape). */
+  requestLogs: RequestLogWire[];
+  /** Overrides merged into `GET /api/dashboard/projections`. */
+  projections: Record<string, unknown>;
   authStatus: AuthStatusWire;
   /** Password the mock auth endpoints accept once `authStatus.configured` is true. */
   password: string | null;
@@ -172,17 +170,8 @@ type MockState = {
 function createInitialState(): MockState {
   return {
     accounts: createDefaultAccountWires(),
-    legacyAccounts: createDefaultAccounts(),
-    requestLogs: createDefaultRequestLogs(),
-    conversations: createDefaultConversations(),
-    conversationDetails: [
-      createConversationDetails({ conversationId: "conv_abc" }),
-      createConversationDetails({
-        conversationId: "conv_def",
-        accountCount: 1,
-        dominantUseragentGroup: "codex",
-      }),
-    ],
+    requestLogs: createDefaultRequestLogWires(),
+    projections: {},
     authStatus: createAuthStatus(),
     password: MOCK_DASHBOARD_PASSWORD,
     totpEnabled: false,
@@ -218,167 +207,47 @@ export function resetMockState(): void {
   state = createInitialState();
 }
 
-function parseDateValue(value: string | null): number | null {
-  if (!value) {
-    return null;
-  }
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
+export function setMockRequestLogs(rows: RequestLogWire[]): void {
+  state.requestLogs = rows;
 }
 
-function filterRequestLogs(
-  url: URL,
-  options?: { includeStatuses?: boolean; ignoreApiKeyIds?: boolean },
-): RequestLogEntry[] {
-  const includeStatuses = options?.includeStatuses ?? true;
-  const ignoreApiKeyIds = options?.ignoreApiKeyIds ?? false;
-  const accountIds = new Set(url.searchParams.getAll("accountId"));
-  const apiKeyIds = new Set(url.searchParams.getAll("apiKeyId"));
-  const statuses = new Set(
-    url.searchParams.getAll("status").map((value) => value.toLowerCase()),
-  );
-  const models = new Set(url.searchParams.getAll("model"));
-  const reasoningEfforts = new Set(url.searchParams.getAll("reasoningEffort"));
-  const modelOptions = new Set(url.searchParams.getAll("modelOption"));
-  const search = (url.searchParams.get("search") || "").trim().toLowerCase();
-  const since = parseDateValue(url.searchParams.get("since"));
-  const until = parseDateValue(url.searchParams.get("until"));
+export function setMockProjections(overrides: Record<string, unknown>): void {
+  state.projections = overrides;
+}
 
-  return state.requestLogs.filter((entry) => {
-    if (
-      accountIds.size > 0 &&
-      (!entry.accountId || !accountIds.has(entry.accountId))
-    ) {
-      return false;
-    }
-    if (
-      !ignoreApiKeyIds &&
-      apiKeyIds.size > 0 &&
-      (!entry.apiKeyId || !apiKeyIds.has(entry.apiKeyId))
-    ) {
-      return false;
-    }
+const TIMEFRAME_MS: Record<string, number> = {
+  "1h": 3_600_000,
+  "24h": 86_400_000,
+  "7d": 7 * 86_400_000,
+  "30d": 30 * 86_400_000,
+};
 
-    if (
-      includeStatuses &&
-      statuses.size > 0 &&
-      !statuses.has("all") &&
-      !statuses.has(entry.status)
-    ) {
-      return false;
-    }
-
-    if (models.size > 0 && !models.has(entry.model)) {
-      return false;
-    }
-
-    if (reasoningEfforts.size > 0) {
-      const effort = entry.reasoningEffort ?? "";
-      if (!reasoningEfforts.has(effort)) {
-        return false;
-      }
-    }
-
-    if (modelOptions.size > 0) {
-      const key = `${entry.model}${MODEL_OPTION_DELIMITER}${entry.reasoningEffort ?? ""}`;
-      const matchNoEffort = modelOptions.has(entry.model);
-      if (!modelOptions.has(key) && !matchNoEffort) {
-        return false;
-      }
-    }
-
-    const timestamp = new Date(entry.requestedAt).getTime();
-    if (since !== null && timestamp < since) {
-      return false;
-    }
-    if (until !== null && timestamp > until) {
-      return false;
-    }
-
-    if (search.length > 0) {
-      const haystack = [
-        entry.accountId,
-        entry.apiKeyId,
-        entry.apiKeyName,
-        entry.requestId,
-        entry.model,
-        entry.reasoningEffort,
-        entry.errorCode,
-        entry.errorMessage,
-        entry.status,
-      ]
+/** Mirrors `claude_lb/modules/request_logs/service.py` filtering on the snake_case query. */
+function filterRequestLogWires(url: URL): RequestLogWire[] {
+  const params = url.searchParams;
+  const search = (params.get("search") ?? "").trim().toLowerCase();
+  const accountIds = params.getAll("account_id");
+  const apiKeyIds = params.getAll("api_key_id");
+  const models = params.getAll("model");
+  const statuses = params.getAll("status");
+  const sessionKey = params.get("session_key");
+  const timeframe = params.get("timeframe");
+  const since = timeframe && TIMEFRAME_MS[timeframe] ? Date.now() - TIMEFRAME_MS[timeframe] : null;
+  return state.requestLogs.filter((row) => {
+    if (since !== null && new Date(`${row.created_at}Z`).getTime() < since) return false;
+    if (accountIds.length && !accountIds.includes(row.account_id ?? "")) return false;
+    if (apiKeyIds.length && !apiKeyIds.includes(row.api_key_id ?? "")) return false;
+    if (models.length && !models.includes(row.model ?? "")) return false;
+    if (statuses.length && !statuses.includes(row.status)) return false;
+    if (sessionKey && row.session_key !== sessionKey) return false;
+    if (search) {
+      const haystack = [row.id, row.model, row.error, row.account_name, row.api_key_name, row.session_key, row.user_agent, row.client_ip]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      if (!haystack.includes(search)) {
-        return false;
-      }
+      if (!haystack.includes(search)) return false;
     }
-
     return true;
-  });
-}
-
-function requestLogOptionsFromEntries(
-  entries: RequestLogEntry[],
-  apiKeyEntries: RequestLogEntry[] = entries,
-) {
-  const accountIds = [
-    ...new Set(
-      entries
-        .map((entry) => entry.accountId)
-        .filter((id): id is string => id != null),
-    ),
-  ].sort();
-
-  const modelMap = new Map<
-    string,
-    { model: string; reasoningEffort: string | null }
-  >();
-  for (const entry of entries) {
-    const key = `${entry.model}${MODEL_OPTION_DELIMITER}${entry.reasoningEffort ?? ""}`;
-    if (!modelMap.has(key)) {
-      modelMap.set(key, {
-        model: entry.model,
-        reasoningEffort: entry.reasoningEffort ?? null,
-      });
-    }
-  }
-  const modelOptionsList = [...modelMap.values()].sort((a, b) => {
-    if (a.model !== b.model) {
-      return a.model.localeCompare(b.model);
-    }
-    return (a.reasoningEffort ?? "").localeCompare(b.reasoningEffort ?? "");
-  });
-
-  const apiKeyMap = new Map<
-    string,
-    { id: string; name: string; keyPrefix: string | null }
-  >();
-  for (const entry of apiKeyEntries) {
-    if (!entry.apiKeyId) continue;
-    const apiKey = findApiKey(entry.apiKeyId);
-    apiKeyMap.set(entry.apiKeyId, {
-      id: entry.apiKeyId,
-      name: apiKey?.name ?? entry.apiKeyName ?? entry.apiKeyId,
-      keyPrefix: apiKey?.keyPrefix ?? null,
-    });
-  }
-  const apiKeys = [...apiKeyMap.values()].sort((a, b) => {
-    if (a.name !== b.name) {
-      return a.name.localeCompare(b.name);
-    }
-    return (a.keyPrefix ?? "").localeCompare(b.keyPrefix ?? "");
-  });
-
-  const presentStatuses = new Set(entries.map((entry) => entry.status));
-  const statuses = STATUS_ORDER.filter((status) => presentStatuses.has(status));
-
-  return createRequestLogFilterOptions({
-    accountIds,
-    modelOptions: modelOptionsList,
-    apiKeys,
-    statuses: [...statuses],
   });
 }
 
@@ -805,89 +674,97 @@ export const handlers = [
   ...claudeLbHandlers,
   ...accountHandlers,
 
-  http.get("/api/dashboard/overview", () => {
-    return HttpResponse.json(
-      createDashboardOverview({
-        accounts: state.legacyAccounts,
-      }),
-    );
+  http.get("/api/dashboard/overview", ({ request }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const timeframe = new URL(request.url).searchParams.get("timeframe") ?? "24h";
+    if (!["1h", "24h", "7d", "30d"].includes(timeframe)) {
+      return detail(422, "timeframe must be one of 1h, 24h, 7d, 30d");
+    }
+    return HttpResponse.json(createDashboardOverviewWire(timeframe as "1h" | "24h" | "7d" | "30d"));
   }),
 
   http.get("/api/dashboard/projections", () => {
-    return HttpResponse.json(createDashboardProjections());
+    const authError = managementAuthError();
+    if (authError) return authError;
+    return HttpResponse.json({ ...createDashboardProjectionsWire(), ...state.projections });
+  }),
+
+  http.get("/api/usage/trend", ({ request }) => {
+    const days = Number(new URL(request.url).searchParams.get("days") ?? 28);
+    return HttpResponse.json(createUsageTrendWire(days));
   }),
 
   http.get("/api/request-logs", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const filtered = filterRequestLogs(url);
-    const total = filtered.length;
-    const limitRaw = Number(url.searchParams.get("limit") ?? 50);
-    const offsetRaw = Number(url.searchParams.get("offset") ?? 0);
-    const limit =
-      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50;
-    const offset =
-      Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
-    const requests = filtered.slice(offset, offset + limit);
-    return HttpResponse.json(
-      createRequestLogsResponse(requests, total, offset + limit < total),
-    );
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const url = new URL(request.url);
+    const unknown = url.searchParams.getAll("status").filter((s) => !(REQUEST_STATUS_ORDER as readonly string[]).includes(s));
+    if (unknown.length) return detail(422, `unknown status: ${unknown.join(", ")}`);
+    const filtered = filterRequestLogWires(url);
+    const limit = Number(url.searchParams.get("limit") ?? 25);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const page = filtered.slice(offset, offset + limit);
+    return HttpResponse.json({
+      requests: page,
+      total: filtered.length,
+      limit,
+      offset,
+      has_more: offset + page.length < filtered.length,
+    });
   }),
 
   http.get("/api/request-logs/options", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const filtered = filterRequestLogs(url, {
-      includeStatuses: false,
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const url = new URL(request.url);
+    const scoped = new URL(url);
+    scoped.search = "";
+    const timeframe = url.searchParams.get("timeframe");
+    if (timeframe) scoped.searchParams.set("timeframe", timeframe);
+    const rows = filterRequestLogWires(scoped);
+    const accounts = new Map<string, string>();
+    const keys = new Map<string, string>();
+    for (const row of rows) {
+      if (row.account_id) accounts.set(row.account_id, row.account_name ?? "(deleted)");
+      if (row.api_key_id) keys.set(row.api_key_id, row.api_key_name ?? "(deleted)");
+    }
+    const present = new Set(rows.map((row) => row.status));
+    return HttpResponse.json({
+      accounts: [...accounts].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)),
+      api_keys: [...keys]
+        .map(([id, name]) => ({ id, name, key_hint: `clb-…${id.slice(-4)}` }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      models: [...new Set(rows.map((row) => row.model).filter((m): m is string => !!m))].sort(),
+      statuses: REQUEST_STATUS_ORDER.filter((status) => present.has(status)),
     });
-    const apiKeyFiltered = filterRequestLogs(url, {
-      includeStatuses: false,
-      ignoreApiKeyIds: true,
-    });
-    return HttpResponse.json(
-      requestLogOptionsFromEntries(filtered, apiKeyFiltered),
-    );
   }),
 
-  http.get("/api/conversations", ({ request }) => {
-    const url = legacyRequestUrl(request);
-    const search = (url.searchParams.get("search") || "").trim().toLowerCase();
-    const filtered = state.conversations.filter((entry) => {
-      if (search.length === 0) {
-        return true;
-      }
-      return entry.conversationId.toLowerCase().includes(search);
+  http.get("/api/request-logs/:requestId", ({ params }) => {
+    const authError = managementAuthError();
+    if (authError) return authError;
+    const row = state.requestLogs.find((entry) => entry.id === params.requestId);
+    if (!row) return detail(404, "request log not found");
+    const conversation = row.session_key
+      ? state.requestLogs.filter((entry) => entry.session_key === row.session_key)
+      : [];
+    return HttpResponse.json({
+      ...row,
+      cost_breakdown: {
+        input_usd: row.input_tokens * 4e-6,
+        cache_write_usd: row.cache_creation_input_tokens * 5e-6,
+        cache_read_usd: row.cache_read_input_tokens * 2e-7,
+        output_usd: row.output_tokens * 2e-5,
+      },
+      conversation: row.session_key
+        ? {
+            requests: conversation.length,
+            cost_usd: conversation.reduce((sum, entry) => sum + entry.cost_usd, 0),
+            first_at: conversation[conversation.length - 1].created_at,
+            last_at: conversation[0].created_at,
+          }
+        : null,
     });
-    const total = filtered.length;
-    const limitRaw = Number(url.searchParams.get("limit") ?? 50);
-    const offsetRaw = Number(url.searchParams.get("offset") ?? 0);
-    const limit =
-      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50;
-    const offset =
-      Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
-    const conversations = filtered.slice(offset, offset + limit);
-    return HttpResponse.json(
-      createConversationsResponse(conversations, total, offset + limit < total),
-    );
-  }),
-
-  http.get("/api/conversations/:conversationId", ({ params }) => {
-    const rawId = decodeURIComponent(String(params.conversationId));
-    const trimmed = rawId.trim();
-    if (!trimmed) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "Conversation not found" } },
-        { status: 404 },
-      );
-    }
-    const details = state.conversationDetails.find(
-      (item) => item.conversationId === trimmed,
-    );
-    if (!details) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "Conversation not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json(details);
   }),
 
   http.get("/api/firewall/ips", () => {

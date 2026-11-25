@@ -154,7 +154,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     () =>
       (apiKeysOptionsData?.apiKeys ?? []).map((key) => ({
         value: key.id,
-        label: key.keyPrefix ? `${key.name} · ${key.keyPrefix}` : key.name,
+        label: key.keyHint ? `${key.name} · ${key.keyHint}` : key.name,
       })),
     [apiKeysOptionsData],
   );

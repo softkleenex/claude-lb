@@ -1,6 +1,4 @@
 import type { z } from "zod";
-import type { AccountSummary } from "@/features/dashboard/legacy-account-schemas";
-import { AccountSummarySchema } from "@/features/dashboard/legacy-account-schemas";
 import type { ApiKey, ApiKeyCreateResponse } from "@/features/api-keys/schemas";
 import {
 	ApiKeyCreateResponseSchema,
@@ -15,26 +13,6 @@ import {
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
 import type {
-	DashboardOverview,
-	DashboardProjections,
-	RequestLog,
-	RequestLogFilterOptions,
-	RequestLogsResponse,
-	OverviewTimeframe,
-} from "@/features/dashboard/schemas";
-import {
-	ConversationDetailsSchema,
-	ConversationEntrySchema,
-	ConversationsResponseSchema,
-	ConversationModelStatSchema,
-	DEFAULT_OVERVIEW_TIMEFRAME,
-	DashboardOverviewSchema,
-	DashboardProjectionsSchema,
-	RequestLogFilterOptionsSchema,
-	RequestLogSchema,
-	RequestLogsResponseSchema,
-} from "@/features/dashboard/schemas";
-import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
 	QuotaPlannerSettings,
@@ -46,21 +24,10 @@ import {
 	QuotaPlannerWarmupActionResponseSchema,
 } from "@/features/quota-planner/schemas";
 
-// Backward-compatible type aliases
-export type RequestLogEntry = RequestLog;
-export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
-export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
-export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
-export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
 
 export type {
-	AccountSummary,
-	DashboardOverview,
-	DashboardProjections,
-	RequestLogsResponse,
-	RequestLogFilterOptions,
 	ApiKey,
 	ApiKeyCreateResponse,
 	ApiKeyTrendsResponse,
@@ -71,324 +38,6 @@ const BASE_TIME = new Date("2026-01-01T12:00:00Z");
 
 function offsetIso(minutes: number): string {
 	return new Date(BASE_TIME.getTime() + minutes * 60_000).toISOString();
-}
-
-export function createAccountSummary(
-	overrides: Partial<AccountSummary> = {},
-): AccountSummary {
-	return AccountSummarySchema.parse({
-		accountId: "acc_primary",
-		chatgptAccountId: "chatgpt_acc_primary",
-		email: "primary@example.com",
-		alias: null,
-		displayName: "primary@example.com",
-		planType: "plus",
-		routingPolicy: "normal",
-		status: "active",
-		securityWorkAuthorized: false,
-		usage: {
-			primaryRemainingPercent: 82,
-			secondaryRemainingPercent: 67,
-			monthlyRemainingPercent: null,
-		},
-		resetAtPrimary: offsetIso(60),
-		resetAtSecondary: offsetIso(24 * 60),
-		resetAtMonthly: null,
-		windowMinutesPrimary: 300,
-		windowMinutesSecondary: 10_080,
-		windowMinutesMonthly: null,
-		capacityCreditsPrimary: 225,
-		remainingCreditsPrimary: 184.5,
-		capacityCreditsSecondary: 7_560,
-		remainingCreditsSecondary: 5_065.2,
-		capacityCreditsMonthly: null,
-		remainingCreditsMonthly: null,
-		creditsHas: true,
-		creditsUnlimited: false,
-		creditsBalance: 932,
-		auth: {
-			access: { expiresAt: offsetIso(30), state: null },
-			refresh: { state: "stored" },
-			idToken: { state: "parsed" },
-		},
-		limitWarmupEnabled: false,
-		limitWarmup: null,
-		...overrides,
-	});
-}
-
-export function createDefaultAccounts(): AccountSummary[] {
-	return [
-		createAccountSummary(),
-		createAccountSummary({
-			accountId: "acc_secondary",
-			email: "secondary@example.com",
-			displayName: "secondary@example.com",
-			status: "paused",
-			usage: {
-				primaryRemainingPercent: 45,
-				secondaryRemainingPercent: 12,
-			},
-		}),
-	];
-}
-
-function createTrendPoints(
-	baseValue: number,
-	count = 28,
-	bucketSeconds = 6 * 3600,
-): Array<{ t: string; v: number }> {
-	return Array.from({ length: count }, (_, i) => ({
-		t: new Date(BASE_TIME.getTime() - (count - i) * bucketSeconds * 1000).toISOString(),
-		v: Math.max(0, baseValue + Math.sin(i) * baseValue * 0.3),
-	}));
-}
-
-function createOverviewTimeframe(
-	key: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME,
-) {
-	switch (key) {
-		case "1d":
-			return {
-				key,
-				windowMinutes: 1_440,
-				bucketSeconds: 3_600,
-				bucketCount: 24,
-			};
-		case "30d":
-			return {
-				key,
-				windowMinutes: 43_200,
-				bucketSeconds: 86_400,
-				bucketCount: 30,
-			};
-		case "7d":
-		default:
-			return {
-				key: "7d" as const,
-				windowMinutes: 10_080,
-				bucketSeconds: 21_600,
-				bucketCount: 28,
-			};
-	}
-}
-
-export function createDashboardOverview(
-	overrides: Partial<DashboardOverview> = {},
-): DashboardOverview {
-	const timeframe = overrides.timeframe ?? createOverviewTimeframe();
-	const accounts = overrides.accounts ?? createDefaultAccounts();
-	const response = {
-		lastSyncAt: offsetIso(-5),
-		timeframe,
-		accounts,
-		summary: {
-			primaryWindow: {
-				remainingPercent: 63.5,
-				capacityCredits: 225,
-				remainingCredits: 142.875,
-				resetAt: offsetIso(60),
-				windowMinutes: 300,
-			},
-			secondaryWindow: {
-				remainingPercent: 55.2,
-				capacityCredits: 7560,
-				remainingCredits: 4173.12,
-				resetAt: offsetIso(24 * 60),
-				windowMinutes: 10_080,
-			},
-			cost: {
-				currency: "USD",
-				totalUsd: 1.82,
-			},
-			metrics: {
-				requests: 228,
-				tokens: 45_000,
-				cachedInputTokens: 8_200,
-				errorRate: 0.028,
-				errorCount: 6,
-				topError: "rate_limit_exceeded",
-				conversationRequests: 0,
-			},
-		},
-		windows: {
-			primary: {
-				windowKey: "primary",
-				windowMinutes: 300,
-				accounts: accounts.map((account) => ({
-					accountId: account.accountId,
-					remainingPercentAvg: account.usage?.primaryRemainingPercent ?? 0,
-					capacityCredits: 225,
-					remainingCredits:
-						((account.usage?.primaryRemainingPercent ?? 0) / 100) * 225,
-				})),
-			},
-			secondary: {
-				windowKey: "secondary",
-				windowMinutes: 10_080,
-				accounts: accounts.map((account) => ({
-					accountId: account.accountId,
-					remainingPercentAvg: account.usage?.secondaryRemainingPercent ?? 0,
-					capacityCredits: account.capacityCreditsSecondary ?? 7560,
-					remainingCredits:
-						account.remainingCreditsSecondary ??
-						((account.usage?.secondaryRemainingPercent ?? 0) / 100) *
-							(account.capacityCreditsSecondary ?? 7560),
-				})),
-			},
-		},
-		trends: {
-			requests: createTrendPoints(8, timeframe.bucketCount, timeframe.bucketSeconds),
-			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
-			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
-			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
-			conversations: createTrendPoints(1, timeframe.bucketCount, timeframe.bucketSeconds),
-		},
-		depletionPrimary: {
-			risk: 0.55,
-			riskLevel: "warning" as const,
-			burnRate: 1.1,
-			safeUsagePercent: 72.0,
-			projectedExhaustionAt: null,
-			secondsUntilExhaustion: null,
-		},
-		depletionSecondary: {
-			risk: 0.65,
-			riskLevel: "warning" as const,
-			burnRate: 1.4,
-			safeUsagePercent: 58.0,
-			projectedExhaustionAt: null,
-			secondsUntilExhaustion: null,
-		},
-		...overrides,
-	};
-	return DashboardOverviewSchema.parse(response);
-}
-
-export function createDashboardProjections(
-	overrides: Partial<DashboardProjections> = {},
-): DashboardProjections {
-	return DashboardProjectionsSchema.parse({
-		depletionPrimary: {
-			risk: 0.55,
-			riskLevel: "warning" as const,
-			burnRate: 1.1,
-			safeUsagePercent: 72.0,
-			projectedExhaustionAt: null,
-			secondsUntilExhaustion: null,
-		},
-		depletionSecondary: {
-			risk: 0.65,
-			riskLevel: "warning" as const,
-			burnRate: 1.4,
-			safeUsagePercent: 58.0,
-			projectedExhaustionAt: null,
-			secondsUntilExhaustion: null,
-		},
-		weeklyCreditPace: null,
-		...overrides,
-	});
-}
-
-export function createRequestLogEntry(
-	overrides: Partial<RequestLogEntry> = {},
-): RequestLogEntry {
-	return RequestLogSchema.parse({
-		requestedAt: offsetIso(-1),
-		accountId: "acc_primary",
-		apiKeyId: "key_1",
-		apiKeyName: "Primary Key",
-		requestId: "req_1",
-		requestKind: "normal",
-		model: "gpt-5.1",
-		source: null,
-		transport: "http",
-		useragent: null,
-		useragentGroup: null,
-		clientIp: null,
-		conversationId: null,
-		serviceTier: null,
-		requestedServiceTier: null,
-		actualServiceTier: null,
-		status: "ok",
-		errorCode: null,
-		errorMessage: null,
-		tokens: 1800,
-		inputTokens: 1200,
-		outputTokens: 600,
-		cachedInputTokens: 320,
-		reasoningEffort: null,
-		costUsd: 0.0132,
-		costBreakdown: {
-			inputUsd: 0.0054,
-			cachedInputUsd: 0.0012,
-			outputUsd: 0.0066,
-			totalUsd: 0.0132,
-		},
-		latencyMs: 920,
-		...overrides,
-	});
-}
-
-export function createDefaultRequestLogs(): RequestLogEntry[] {
-	return [
-		createRequestLogEntry(),
-		createRequestLogEntry({
-			requestId: "req_2",
-			accountId: "acc_secondary",
-			apiKeyId: "key_2",
-			apiKeyName: "Secondary Key",
-			status: "rate_limit",
-			errorCode: "rate_limit_exceeded",
-			errorMessage: "Rate limit reached",
-			tokens: 0,
-			cachedInputTokens: null,
-			costUsd: 0,
-			requestedAt: offsetIso(-2),
-		}),
-		createRequestLogEntry({
-			requestId: "req_3",
-			apiKeyId: null,
-			apiKeyName: null,
-			status: "quota",
-			errorCode: "insufficient_quota",
-			errorMessage: "Quota exceeded",
-			tokens: 0,
-			cachedInputTokens: null,
-			costUsd: 0,
-			requestedAt: offsetIso(-3),
-		}),
-	];
-}
-
-export function createRequestLogsResponse(
-	requests: RequestLogEntry[],
-	total: number,
-	hasMore: boolean,
-): RequestLogsResponse {
-	return RequestLogsResponseSchema.parse({
-		requests,
-		total,
-		hasMore,
-	});
-}
-
-export function createRequestLogFilterOptions(
-	overrides: Partial<RequestLogFilterOptions> = {},
-): RequestLogFilterOptions {
-	return RequestLogFilterOptionsSchema.parse({
-		accountIds: ["acc_primary", "acc_secondary"],
-		modelOptions: [
-			{ model: "gpt-5.1", reasoningEffort: null },
-			{ model: "gpt-5.1", reasoningEffort: "high" },
-		],
-		apiKeys: [
-			{ id: "key_1", name: "Default key", keyPrefix: "sk-test" },
-			{ id: "key_2", name: "Read only key", keyPrefix: "sk-second" },
-		],
-		statuses: ["ok", "rate_limit", "quota"],
-		...overrides,
-	});
 }
 
 export function createQuotaPlannerSettings(
@@ -571,102 +220,6 @@ export function createApiKeyUsage7Day(
 		...overrides,
 	});
 }
-
-export function createConversationEntry(
-	overrides: Partial<ConversationEntry> = {},
-): ConversationEntry {
-	return ConversationEntrySchema.parse({
-		conversationId: "conv_abc",
-		firstRequest: offsetIso(-2),
-		lastRequest: offsetIso(-1),
-		requestCount: 1,
-		representativeAccount: "acc_primary",
-		remainingAccountCount: 1,
-		apiKeyId: "key_1",
-		apiKeyName: "Primary Key",
-		representativeModel: "gpt-5.1",
-		remainingModelCount: 1,
-		totalTokens: 1800,
-		cachedInputTokens: 320,
-		totalCostUsd: 0.0132,
-		...overrides,
-	});
-}
-
-export function createDefaultConversations(): ConversationEntry[] {
-	return [
-		createConversationEntry(),
-		createConversationEntry({
-			conversationId: "conv_def",
-			lastRequest: offsetIso(-2),
-			representativeAccount: "acc_secondary",
-			remainingAccountCount: 0,
-			apiKeyId: "key_2",
-			apiKeyName: "Secondary Key",
-			representativeModel: "gpt-5.1-codex",
-			remainingModelCount: 0,
-			totalTokens: 4200,
-			cachedInputTokens: 0,
-			totalCostUsd: 0.04,
-		}),
-	];
-}
-
-export function createConversationsResponse(
-	conversations: ConversationEntry[],
-	total: number,
-	hasMore: boolean,
-): ConversationsResponse {
-	return ConversationsResponseSchema.parse({
-		conversations,
-		total,
-		hasMore,
-	});
-}
-
-export function createConversationModelStat(
-	overrides: Partial<ConversationModelStat> = {},
-): ConversationModelStat {
-	return ConversationModelStatSchema.parse({
-		modelEffort: { model: "gpt-5.1", reasoningEffort: "high" },
-		reqs: 4,
-		totalElapsedTime: 1200,
-		totalInputTokens: 1000,
-		cachedInputTokens: 200,
-		totalOutputTokens: 300,
-		totalCostUsd: 0.05,
-		...overrides,
-	});
-}
-
-export function createConversationDetails(
-	overrides: Partial<ConversationDetails> = {},
-): ConversationDetails {
-	return ConversationDetailsSchema.parse({
-		conversationId: "conv_abc",
-		start: offsetIso(-10),
-		latest: offsetIso(-1),
-		accountCount: 2,
-		totalElapsedTime: 4200,
-		dominantUseragentGroup: "opencode",
-		modelStats: [
-			createConversationModelStat(),
-			createConversationModelStat({
-				modelEffort: { model: "gpt-5.1", reasoningEffort: null },
-				reqs: 2,
-				totalElapsedTime: 600,
-				totalInputTokens: 500,
-				cachedInputTokens: 0,
-				totalOutputTokens: 100,
-				totalCostUsd: 0.02,
-			}),
-		],
-		...overrides,
-	});
-}
-
-// ── claude-lb wire shapes (snake_case, exactly as the FastAPI backend sends them) ──
-// Handlers for claude-lb endpoints return these raw; the api-client camelizes them.
 
 export const MOCK_DASHBOARD_PASSWORD = "correct-horse-battery";
 export const MOCK_BOOTSTRAP_TOKEN = "bootstrap-token-from-log";
@@ -975,4 +528,327 @@ export function createPoolQuotaWire(accounts: AccountWire[]) {
 			risk_level: account.plan_type === "api" ? "safe" : "warning",
 		})),
 	};
+}
+
+// ── Dashboard (claude-lb wire shapes, snake_case) ──
+
+export type MetricsWire = {
+	requests: number;
+	errors: number;
+	error_rate: number;
+	top_error: string | null;
+	top_error_count: number;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_input_tokens: number;
+	cache_creation_input_tokens: number;
+	total_tokens: number;
+	cost_usd: number;
+	cache_savings_usd: number;
+	cache_hit_rate: number;
+	conversations: number;
+	avg_duration_ms: number | null;
+	avg_ttft_ms: number | null;
+};
+
+export function createMetricsWire(overrides: Partial<MetricsWire> = {}): MetricsWire {
+	return {
+		requests: 1200,
+		errors: 18,
+		error_rate: 0.015,
+		top_error: "Overloaded",
+		top_error_count: 12,
+		input_tokens: 540_000,
+		output_tokens: 960_000,
+		cache_read_input_tokens: 14_000_000,
+		cache_creation_input_tokens: 2_100_000,
+		total_tokens: 17_600_000,
+		cost_usd: 84.21,
+		cache_savings_usd: 51.3,
+		cache_hit_rate: 0.84,
+		conversations: 140,
+		avg_duration_ms: 2400,
+		avg_ttft_ms: 610,
+		...overrides,
+	};
+}
+
+const OVERVIEW_FRAMES = {
+	"1h": { window_minutes: 60, bucket_seconds: 300, bucket_count: 12 },
+	"24h": { window_minutes: 1440, bucket_seconds: 3600, bucket_count: 24 },
+	"7d": { window_minutes: 10_080, bucket_seconds: 21_600, bucket_count: 28 },
+	"30d": { window_minutes: 43_200, bucket_seconds: 86_400, bucket_count: 30 },
+} as const;
+
+export function createDashboardOverviewWire(
+	timeframe: keyof typeof OVERVIEW_FRAMES = "24h",
+	overrides: Record<string, unknown> = {},
+) {
+	const frame = OVERVIEW_FRAMES[timeframe];
+	const since = new Date(BASE_TIME.getTime() - frame.window_minutes * 60_000);
+	return {
+		generated_at: BASE_TIME.toISOString(),
+		timeframe: { key: timeframe, ...frame },
+		since: since.toISOString(),
+		current: createMetricsWire(),
+		previous: createMetricsWire({
+			requests: 1000,
+			errors: 30,
+			error_rate: 0.03,
+			cost_usd: 90,
+			cache_hit_rate: 0.8,
+			conversations: 120,
+		}),
+		can_compare: true,
+		trends: Array.from({ length: frame.bucket_count }, (_, i) => ({
+			t: new Date(since.getTime() + i * frame.bucket_seconds * 1000).toISOString(),
+			requests: 40 + i,
+			tokens: 600_000 + i * 1000,
+			cost_usd: 3 + i * 0.1,
+			cache_savings_usd: 2 + i * 0.05,
+			cache_hit_rate: 0.84,
+			error_rate: i % 5 === 0 ? 0.05 : 0,
+			conversations: 6,
+		})),
+		by_model: [
+			{
+				model: "claude-opus-5-5",
+				requests: 700,
+				errors: 10,
+				error_rate: 0.014,
+				input_tokens: 300_000,
+				output_tokens: 500_000,
+				cache_read_input_tokens: 9_000_000,
+				cache_creation_input_tokens: 1_200_000,
+				total_tokens: 11_000_000,
+				cost_usd: 60.5,
+				cache_savings_usd: 34.2,
+				cache_hit_rate: 0.86,
+			},
+			{
+				model: "claude-haiku-5-5",
+				requests: 500,
+				errors: 0,
+				error_rate: 0,
+				input_tokens: 240_000,
+				output_tokens: 460_000,
+				cache_read_input_tokens: 5_000_000,
+				cache_creation_input_tokens: 900_000,
+				total_tokens: 6_600_000,
+				cost_usd: 23.71,
+				cache_savings_usd: 17.1,
+				cache_hit_rate: 0.81,
+			},
+		],
+		meta: {
+			version: "0.6.1",
+			accounts_total: 3,
+			accounts_available: 2,
+			pool_remaining_percent: 71.4,
+			routing_strategy: "capacity_weighted",
+			sticky_sessions_enabled: true,
+			request_log_retention_days: 30,
+			last_request_at: offsetIso(-1),
+		},
+		...overrides,
+	};
+}
+
+export function createWindowCapacityWire(window: "primary" | "secondary", overrides: Record<string, unknown> = {}) {
+	const primary = window === "primary";
+	return {
+		capacity_credits: 500,
+		remaining_credits: primary ? 290 : 160,
+		remaining_percent: primary ? 58 : 32,
+		safe_used_percent: primary ? 40 : 55,
+		risk: primary ? 0.42 : 0.83,
+		risk_level: primary ? "safe" : "danger",
+		burn_rate_credits_per_hour: primary ? 24 : 6.5,
+		projected_exhaustion_at: offsetIso(primary ? 12 * 60 : 24 * 60),
+		next_reset_at: offsetIso(primary ? 90 : 3 * 24 * 60),
+		accounts: [
+			{
+				account_id: "acc_alice",
+				account_name: "alice-max",
+				plan_type: "max_5x",
+				capacity_credits: 500,
+				used_percent: primary ? 42 : 68,
+				remaining_credits: primary ? 290 : 160,
+				reset_at: offsetIso(primary ? 90 : 3 * 24 * 60),
+				window_minutes: primary ? 300 : 10_080,
+				safe_used_percent: primary ? 40 : 55,
+				risk: primary ? 0.42 : 0.83,
+				risk_level: primary ? "safe" : "danger",
+				burn_rate_credits_per_hour: primary ? 24 : 6.5,
+				observed_at: offsetIso(-2),
+			},
+		],
+		...overrides,
+	};
+}
+
+export function createWeeklyPaceWire(overrides: Record<string, unknown> = {}) {
+	return {
+		total_full_credits: 500,
+		total_actual_remaining_credits: 160,
+		total_expected_remaining_credits: 225,
+		actual_used_percent: 68,
+		scheduled_used_percent: 55,
+		delta_percent: 13,
+		smoothed_delta_percent: 13,
+		schedule_gap_credits: 65,
+		smoothed_schedule_gap_credits: 65,
+		smoothing_minutes: 30,
+		projected_shortfall_credits: 140,
+		projected_depletion_hours: 24.5,
+		projected_minimum_remaining_credits: 0,
+		forecast_burn_rate_credits_per_hour: 6.5,
+		scheduled_burn_rate_credits_per_hour: 2.98,
+		pace_multiplier: 2.2,
+		pause_for_break_even_hours: 21.5,
+		throttle_to_percent: 45.8,
+		reduce_by_percent: 54.2,
+		pro_account_equivalent: 1.4,
+		pro_accounts_to_cover: 2,
+		status: "danger",
+		account_count: 1,
+		stale_account_count: 0,
+		inactive_account_count: 0,
+		confidence: "high",
+		...overrides,
+	};
+}
+
+export function createDashboardProjectionsWire(overrides: Record<string, unknown> = {}) {
+	return {
+		generated_at: BASE_TIME.toISOString(),
+		subscription_accounts: 1,
+		primary: createWindowCapacityWire("primary"),
+		secondary: createWindowCapacityWire("secondary"),
+		weekly_pace: createWeeklyPaceWire(),
+		api_accounts: [
+			{
+				account_id: "acc_console",
+				account_name: "console-key",
+				enabled: true,
+				available: true,
+				spend_usd: 4.2,
+				spend_cap_usd: 10,
+				cap_used_percent: 42,
+			},
+		],
+		...overrides,
+	};
+}
+
+export function createUsageTrendWire(days = 28) {
+	return Array.from({ length: days }, (_, i) => ({
+		day: new Date(BASE_TIME.getTime() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10),
+		requests: 100 + i * 3,
+		errors: 1,
+		input_tokens: 40_000,
+		output_tokens: 80_000,
+		cache_read_input_tokens: 900_000,
+		cost_usd: 5 + i * 0.25,
+	}));
+}
+
+export type RequestLogWire = {
+	id: string;
+	created_at: string;
+	account_id: string | null;
+	account_name: string | null;
+	plan_type: string | null;
+	api_key_id: string | null;
+	api_key_name: string | null;
+	path: string;
+	model: string | null;
+	status_code: number;
+	status: string;
+	streaming: boolean;
+	duration_ms: number;
+	ttft_ms: number | null;
+	attempts: number;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_input_tokens: number;
+	cache_creation_input_tokens: number;
+	total_tokens: number;
+	cost_usd: number;
+	cache_savings_usd: number;
+	error: string | null;
+	session_key: string | null;
+	user_agent: string | null;
+	client_ip: string | null;
+};
+
+export function createRequestLogWire(overrides: Partial<RequestLogWire> = {}): RequestLogWire {
+	return {
+		id: "req_0001",
+		created_at: offsetIso(-1).replace("Z", ""),
+		account_id: "acc_alice",
+		account_name: "alice-max",
+		plan_type: "max_5x",
+		api_key_id: "key_team",
+		api_key_name: "claude-code-team",
+		path: "/v1/messages",
+		model: "claude-opus-5-5",
+		status_code: 200,
+		status: "ok",
+		streaming: true,
+		duration_ms: 2140,
+		ttft_ms: 480,
+		attempts: 1,
+		input_tokens: 420,
+		output_tokens: 880,
+		cache_read_input_tokens: 18_000,
+		cache_creation_input_tokens: 0,
+		total_tokens: 19_300,
+		cost_usd: 0.0222,
+		cache_savings_usd: 0.0684,
+		error: null,
+		session_key: "a".repeat(64),
+		user_agent: "claude-cli/2.1.3 (external, cli)",
+		client_ip: "10.0.0.7",
+		...overrides,
+	};
+}
+
+export function createDefaultRequestLogWires(): RequestLogWire[] {
+	return [
+		createRequestLogWire(),
+		createRequestLogWire({
+			id: "req_0002",
+			created_at: offsetIso(-2).replace("Z", ""),
+			account_id: "acc_console",
+			account_name: "console-key",
+			plan_type: "api",
+			api_key_id: "key_ci",
+			api_key_name: "ci-review-bot",
+			model: "claude-haiku-5-5",
+			status_code: 529,
+			status: "overloaded",
+			streaming: false,
+			ttft_ms: null,
+			attempts: 3,
+			cost_usd: 0,
+			cache_savings_usd: 0,
+			cache_read_input_tokens: 0,
+			total_tokens: 0,
+			input_tokens: 0,
+			output_tokens: 0,
+			error: "Overloaded",
+			session_key: "b".repeat(64),
+			user_agent: "ci-review-bot/1.4",
+		}),
+		createRequestLogWire({
+			id: "req_0003",
+			created_at: offsetIso(-3).replace("Z", ""),
+			status: "rate_limited",
+			status_code: 429,
+			error: "rate limited by upstream",
+			cost_usd: 0,
+			cache_savings_usd: 0,
+		}),
+	];
 }

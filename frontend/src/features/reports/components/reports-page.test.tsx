@@ -17,7 +17,7 @@ vi.mock("@/features/accounts/api", () => ({
 }));
 
 vi.mock("@/features/dashboard/api", () => ({
-  getRequestLogOptions: vi.fn().mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] }),
+  getRequestLogOptions: vi.fn().mockResolvedValue({ accounts: [], apiKeys: [], models: [], statuses: [] }),
 }));
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
@@ -93,7 +93,7 @@ describe("ReportsPage", () => {
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue([]);
-    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+    getRequestLogOptionsMock.mockResolvedValue({ accounts: [], apiKeys: [], models: [], statuses: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -796,7 +796,7 @@ describe("ReportsPage", () => {
     );
     getRequestLogOptionsMock
       .mockRejectedValueOnce(new Error("api keys backend timeout"))
-      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+      .mockResolvedValueOnce({ accounts: [], apiKeys: [], models: [], statuses: [] });
 
     renderWithProviders(<ReportsPage />);
 
@@ -833,12 +833,12 @@ describe("ReportsPage", () => {
       }),
     );
     getRequestLogOptionsMock.mockResolvedValue({
-      accountIds: [],
+      accounts: [],
       apiKeys: [
-        { id: "key_active", name: "Active Key", keyPrefix: "sk-active" },
-        { id: "key_deleted", name: "key_deleted", keyPrefix: null },
+        { id: "key_active", name: "Active Key", keyHint: "sk-active" },
+        { id: "key_deleted", name: "key_deleted", keyHint: "" },
       ],
-      modelOptions: [],
+      models: [],
       statuses: [],
     });
 
