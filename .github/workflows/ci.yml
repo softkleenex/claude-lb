@@ -24,10 +24,13 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Install
-        run: uv pip install -e ".[postgres]" pytest pytest-asyncio ruff
+        # --locked fails if uv.lock is out of date with pyproject.toml.
+        run: uv sync --locked --extra postgres
 
       - name: Lint
         run: |
@@ -57,10 +60,12 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Install
-        run: uv pip install -e ".[postgres]" pytest pytest-asyncio
+        run: uv sync --locked --extra postgres
 
       - name: Test
         env:
@@ -78,7 +83,9 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Install
         run: uv pip install .
