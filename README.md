@@ -42,9 +42,6 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 > any provider — no client ids, no authorize/token endpoints, no impersonated
 > first-party identity. An `anthropic_api_key` account takes a Console key; an `oauth`
 > account takes an access token plus, optionally, the refresh material *you* provide.
-> Whatever you point it at, staying inside that provider's terms is on you: pooling
-> consumer subscriptions to exceed per-account limits is against Anthropic's consumer
-> terms and is a documented way to get accounts suspended.
 
 ## Features
 
