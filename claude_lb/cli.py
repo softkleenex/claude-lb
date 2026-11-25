@@ -101,6 +101,9 @@ def serve(
 @app.command()
 def demo(
     port: Annotated[int, typer.Option(help="Port for the demo server.")] = 2457,
+    host: Annotated[
+        str | None, typer.Option(help="Bind address (default 127.0.0.1; 0.0.0.0 inside Docker).")
+    ] = None,
     traffic: Annotated[bool, typer.Option(help="Send simulated requests continuously.")] = True,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the dashboard.")] = True,
 ) -> None:
@@ -111,12 +114,15 @@ def demo(
     """
     from claude_lb import demo as demo_mode
 
-    data_dir = demo_mode.prepare_environment(port)
+    host = host or demo_mode.default_host()
+    data_dir = demo_mode.prepare_environment(port, host)
     url = f"http://127.0.0.1:{port}"
 
     def ready(keys: list[str]) -> None:
         console.print(f"\n[bold green]claude-lb demo[/bold green] running at [bold]{url}[/bold]")
         console.print("  Upstream is simulated, so no request leaves this machine.")
+        if not demo_mode.is_loopback_bind(host):
+            console.print(f"  Bound to {host}: dashboard auth is off (demo data only).")
         console.print(f"  Data: {data_dir} (throwaway)", soft_wrap=True)
         console.print(
             "  Watch [green]Saved by prompt cache[/green] grow as sticky routing keeps caches warm."
@@ -129,7 +135,7 @@ def demo(
             _open_browser(url)
 
     try:
-        asyncio.run(demo_mode.run(port, traffic=traffic, on_ready=ready))
+        asyncio.run(demo_mode.run(port, traffic=traffic, on_ready=ready, host=host))
     except KeyboardInterrupt:
         pass
 

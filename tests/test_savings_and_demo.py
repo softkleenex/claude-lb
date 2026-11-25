@@ -121,3 +121,17 @@ class TestSetupClaudeCode:
 
         again = CliRunner().invoke(app, ["setup", "claude-code"])
         assert again.exit_code == 1, "a second key under the same name is refused"
+
+
+class TestDemoBinding:
+    def test_binds_where_a_published_container_port_can_reach_it(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_LB_IN_DOCKER", "1")
+        assert demo.default_host() == "0.0.0.0"
+        monkeypatch.delenv("CLAUDE_LB_IN_DOCKER")
+        assert demo.default_host() == "127.0.0.1"
+
+    def test_dashboard_auth_only_relaxes_off_loopback(self):
+        # prepare_environment opens the dashboard exactly when this is False.
+        assert demo.is_loopback_bind("127.0.0.1")
+        assert demo.is_loopback_bind("localhost")
+        assert not demo.is_loopback_bind("0.0.0.0")
