@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import delete
 
-from app.db.models import RequestLog, UsageDaily
-from app.db.session import session_scope
-from app.modules.usage import reports
+from claude_lb.db.models import RequestLog, UsageDaily
+from claude_lb.db.session import session_scope
+from claude_lb.modules.usage import reports
 from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
 
 

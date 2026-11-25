@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.crypto import (
+from claude_lb.core.crypto import (
     decrypt,
     encrypt,
     generate_local_api_key,

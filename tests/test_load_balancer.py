@@ -4,8 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.db.models import Account
-from app.modules.proxy import load_balancer as lb
+from claude_lb.db.models import Account
+from claude_lb.modules.proxy import load_balancer as lb
 
 
 def make_account(name: str, **kwargs) -> Account:

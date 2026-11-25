@@ -12,7 +12,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project --extra postgres
 
-COPY app ./app
+COPY claude_lb ./claude_lb
 RUN uv sync --locked --no-dev --no-editable --extra postgres
 
 

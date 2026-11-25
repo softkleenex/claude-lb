@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from app.modules.accounts import oauth_flow
+from claude_lb.modules.accounts import oauth_flow
 
 AUTHORIZE = "https://issuer.example.test/oauth/authorize"
 TOKEN = "https://issuer.example.test/oauth/token"

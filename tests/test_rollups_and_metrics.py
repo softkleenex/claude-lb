@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 
-from app.db.models import RequestLog, UsageDaily
-from app.db.session import session_scope
-from app.modules.usage import rollup
+from claude_lb.db.models import RequestLog, UsageDaily
+from claude_lb.db.session import session_scope
+from claude_lb.modules.usage import rollup
 from tests.test_proxy_api import MESSAGE_BODY, add_account, make_client, ok_json
 
 

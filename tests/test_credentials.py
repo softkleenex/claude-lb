@@ -7,10 +7,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.core.crypto import decrypt, encrypt
-from app.db.models import Account
-from app.db.session import session_scope
-from app.modules.accounts import credentials
+from claude_lb.core.crypto import decrypt, encrypt
+from claude_lb.db.models import Account
+from claude_lb.db.session import session_scope
+from claude_lb.modules.accounts import credentials
 from tests.test_load_balancer import make_account
 from tests.test_proxy_api import MESSAGE_BODY, add_account, get_account, make_client
 
