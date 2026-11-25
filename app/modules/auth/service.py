@@ -11,11 +11,14 @@ at startup — is required to set the first password from anywhere else.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import ipaddress
 import logging
 import secrets
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -23,8 +26,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
-from app.core.totp import generate_secret, provisioning_uri
-from app.core.totp import verify as verify_totp
+from app.core.totp import generate_secret, matched_step, provisioning_uri
 from app.db.models import DashboardCredential, DashboardSession
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,12 @@ def hash_password(password: str, salt: str) -> str:
     return derived.hex()
 
 
+async def _hash_off_loop(password: str, salt: str) -> str:
+    """scrypt costs ~20 ms of CPU by design. Run inline, an unauthenticated burst of
+    login attempts would stall the event loop — and with it every proxied request."""
+    return await asyncio.to_thread(hash_password, password, salt)
+
+
 async def get_credential(session: AsyncSession) -> DashboardCredential | None:
     global _password_ever_seen
     credential = await session.get(DashboardCredential, _SINGLETON)
@@ -113,15 +121,12 @@ async def set_password(session: AsyncSession, password: str) -> None:
 
     global _password_ever_seen
     salt = secrets.token_bytes(16).hex()
+    password_hash = await _hash_off_loop(password, salt)
     credential = await get_credential(session)
     if credential is None:
-        session.add(
-            DashboardCredential(
-                id=_SINGLETON, password_hash=hash_password(password, salt), password_salt=salt
-            )
-        )
+        session.add(DashboardCredential(id=_SINGLETON, password_hash=password_hash, password_salt=salt))
     else:
-        credential.password_hash = hash_password(password, salt)
+        credential.password_hash = password_hash
         credential.password_salt = salt
     _password_ever_seen = True
     await session.flush()
@@ -131,7 +136,8 @@ async def verify_password(session: AsyncSession, password: str) -> bool:
     credential = await get_credential(session)
     if credential is None:
         return False
-    return hmac.compare_digest(hash_password(password, credential.password_salt), credential.password_hash)
+    candidate = await _hash_off_loop(password, credential.password_salt)
+    return hmac.compare_digest(candidate, credential.password_hash)
 
 
 # ---- TOTP ----------------------------------------------------------------
@@ -144,19 +150,22 @@ async def begin_totp_enrollment(session: AsyncSession, *, account_name: str) -> 
         raise AuthError("set a password before enabling TOTP", status_code=409)
 
     secret = generate_secret()
-    credential.totp_secret_encrypted = encrypt(secret)
-    credential.totp_enabled = False
+    credential.totp_pending_secret_encrypted = encrypt(secret)
     await session.flush()
     return secret, provisioning_uri(secret, account_name=account_name)
 
 
 async def confirm_totp_enrollment(session: AsyncSession, code: str) -> None:
     credential = await get_credential(session)
-    if credential is None or not credential.totp_secret_encrypted:
+    if credential is None or not credential.totp_pending_secret_encrypted:
         raise AuthError("no TOTP enrollment in progress", status_code=409)
-    if not verify_totp(decrypt(credential.totp_secret_encrypted), code):
+    step = matched_step(decrypt(credential.totp_pending_secret_encrypted), code)
+    if step is None:
         raise AuthError("that code did not match", status_code=403)
+    credential.totp_secret_encrypted = credential.totp_pending_secret_encrypted
+    credential.totp_pending_secret_encrypted = None
     credential.totp_enabled = True
+    credential.totp_last_step = step
     await session.flush()
 
 
@@ -165,6 +174,8 @@ async def disable_totp(session: AsyncSession) -> None:
     if credential is None:
         return
     credential.totp_secret_encrypted = None
+    credential.totp_pending_secret_encrypted = None
+    credential.totp_last_step = None
     credential.totp_enabled = False
     await session.flush()
 
@@ -180,13 +191,21 @@ async def login(session: AsyncSession, *, password: str, totp_code: str | None, 
     password_ok = await verify_password(session, password)
 
     totp_ok = True
+    step: int | None = None
     if credential.totp_enabled:
         secret = decrypt(credential.totp_secret_encrypted or "")
-        totp_ok = bool(totp_code) and verify_totp(secret, totp_code or "")
+        step = matched_step(secret, totp_code or "")
+        # A code is single-use: one already accepted (or older) is a replay, even
+        # though it is still inside the clock-drift window.
+        last = credential.totp_last_step
+        totp_ok = step is not None and (last is None or step > last)
 
     if not (password_ok and totp_ok):
         # One message for both, so the response does not reveal which factor failed.
         raise AuthError("invalid credentials")
+
+    if step is not None:
+        credential.totp_last_step = step
 
     return await create_session(session, client=client)
 
@@ -245,6 +264,56 @@ async def prune_expired_sessions(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
+# ---- login throttling ----------------------------------------------------
+#
+# Password guessing is slowed by scrypt, but a 6-digit TOTP is a million codes. Failed
+# logins are counted per client address, with a global ceiling for guessing spread
+# across many addresses. Per process, in memory: a restart resets it, which is fine
+# for a limit measured in minutes.
+
+LOGIN_WINDOW_SECONDS = 300.0
+LOGIN_MAX_FAILURES_PER_CLIENT = 5
+LOGIN_MAX_FAILURES_GLOBAL = 50
+
+_failures_by_client: dict[str, deque[float]] = {}
+_failures_global: deque[float] = deque()
+
+
+def _trim(times: deque[float], now: float) -> None:
+    while times and times[0] <= now - LOGIN_WINDOW_SECONDS:
+        times.popleft()
+
+
+def check_login_allowed(client: str) -> None:
+    now = time.monotonic()
+    _trim(_failures_global, now)
+    mine = _failures_by_client.get(client)
+    if mine is not None:
+        _trim(mine, now)
+        if not mine:
+            del _failures_by_client[client]
+            mine = None
+    if (mine is not None and len(mine) >= LOGIN_MAX_FAILURES_PER_CLIENT) or len(
+        _failures_global
+    ) >= LOGIN_MAX_FAILURES_GLOBAL:
+        raise AuthError("too many failed sign-in attempts; try again in a few minutes", status_code=429)
+
+
+def record_login_failure(client: str) -> None:
+    now = time.monotonic()
+    _failures_by_client.setdefault(client, deque()).append(now)
+    _failures_global.append(now)
+
+
+def record_login_success(client: str) -> None:
+    _failures_by_client.pop(client, None)
+
+
+def _reset_throttle_for_tests() -> None:
+    _failures_by_client.clear()
+    _failures_global.clear()
+
+
 # ---- bootstrap -----------------------------------------------------------
 
 
@@ -261,6 +330,26 @@ def rotate_bootstrap_token() -> str:
     global _bootstrap_token
     _bootstrap_token = secrets.token_urlsafe(24)
     return _bootstrap_token
+
+
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.", "ip6-localhost"})
+
+
+def is_loopback_host_header(host_header: str | None) -> bool:
+    """Whether the ``Host`` the client addressed is a loopback name.
+
+    The peer address alone is not enough to trust a request: under DNS rebinding a
+    hostile page's own domain resolves to 127.0.0.1, so its requests arrive from
+    loopback — but they still carry that domain in ``Host``.
+    """
+    if not host_header:
+        return False
+    host = host_header.strip().lower()
+    if host.startswith("["):  # [::1]:2456
+        host = host[1 : host.find("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:  # name:port or v4:port
+        host = host.rsplit(":", 1)[0]
+    return host in _LOOPBACK_NAMES or is_loopback(host)
 
 
 def is_loopback(host: str | None) -> bool:

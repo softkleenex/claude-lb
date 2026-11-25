@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -90,6 +91,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await dispose_db()
 
 
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _is_cross_site(request: Request) -> bool:
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return True
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    if origin == "null":  # sandboxed frames, file:// pages
+        return True
+    # Behind a reverse proxy the Host we see may be the upstream's, not the one the
+    # browser used. X-Forwarded-Host is safe to accept here: a cross-origin page
+    # cannot set it without a CORS preflight, which claude-lb never grants.
+    origin_host = urlsplit(origin).netloc.lower()
+    seen = {
+        (request.headers.get("host") or "").lower(),
+        (request.headers.get("x-forwarded-host") or "").split(",")[0].strip().lower(),
+    }
+    return origin_host not in seen
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
@@ -117,6 +140,21 @@ def create_app() -> FastAPI:
         app.include_router(dashboard_router)
     # Registered last: its catch-all /v1/{path} must not shadow the management API.
     app.include_router(proxy_router)
+
+    @app.middleware("http")
+    async def reject_cross_site_writes(request: Request, call_next):
+        """Refuse state-changing management requests that a browser sent cross-site.
+
+        The session cookie is SameSite=Lax, which already keeps it off cross-site
+        POSTs. That does not cover the no-password bootstrap window, where loopback
+        alone grants access and a hostile page can make the visitor's browser POST
+        to 127.0.0.1. Browsers mark every cross-origin request with ``Origin`` (and
+        ``Sec-Fetch-Site``); CLI and SDK clients send neither, so they are unaffected.
+        """
+        if request.method not in _SAFE_METHODS and not request.url.path.startswith("/v1/"):
+            if _is_cross_site(request):
+                return JSONResponse(status_code=403, content={"detail": "cross-site request refused"})
+        return await call_next(request)
 
     @app.exception_handler(HTTPException)
     async def anthropic_shaped_errors(request: Request, exc: HTTPException):

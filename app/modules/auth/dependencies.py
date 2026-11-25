@@ -59,7 +59,7 @@ async def evaluate(request: Request, session: AsyncSession) -> AuthStatus:
                 authenticated=True,
                 reason="bootstrap token accepted — set a password",
             )
-        if auth.is_loopback(client_ip(request)):
+        if auth.is_loopback(client_ip(request)) and auth.is_loopback_host_header(request.headers.get("host")):
             return AuthStatus(
                 configured=False,
                 totp_enabled=False,

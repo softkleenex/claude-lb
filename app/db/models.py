@@ -192,6 +192,11 @@ class DashboardCredential(Base):
     totp_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     """Set only after a code is confirmed, so a half-finished setup can't lock you out."""
+    totp_pending_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """A secret awaiting its first code. Kept apart from the live one, so starting an
+    enrollment never switches off the second factor that is already protecting login."""
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """The last TOTP time step accepted; a code for it or an earlier step is a replay."""
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

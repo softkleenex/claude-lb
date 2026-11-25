@@ -79,7 +79,7 @@ async def make_client(handler) -> AsyncIterator[httpx.AsyncClient]:
     """Start the app with its upstream client swapped for a MockTransport."""
     app = create_app()
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         # Enter lifespan so DB init + state setup run, then override the upstream client.
         async with app.router.lifespan_context(app):
             await app.state.http_client.aclose()

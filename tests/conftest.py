@@ -34,6 +34,7 @@ async def fresh_database() -> AsyncIterator[None]:
     # The "a password exists" latch is process-global and deliberately one-way, so it
     # has to be cleared between tests along with the database it mirrors.
     auth_service._reset_latch_for_tests()
+    auth_service._reset_throttle_for_tests()
 
     await init_db()
     engine = get_engine()

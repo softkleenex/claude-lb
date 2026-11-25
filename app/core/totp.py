@@ -39,26 +39,38 @@ def now_code(secret: str, *, at: float | None = None) -> str:
     return _hotp(secret, int(at // PERIOD_SECONDS))
 
 
-def verify(secret: str, code: str, *, at: float | None = None, window: int = DEFAULT_WINDOW) -> bool:
-    """Constant-time check of ``code`` against the current step ± ``window``."""
+def matched_step(
+    secret: str, code: str, *, at: float | None = None, window: int = DEFAULT_WINDOW
+) -> int | None:
+    """The time step ``code`` is valid for (current step ± ``window``), or ``None``.
+
+    Callers that must reject a replayed code compare the step against the last one
+    they accepted.
+    """
     if not secret or not code:
-        return False
+        return None
     candidate = code.strip().replace(" ", "")
     if not candidate.isdigit() or len(candidate) != DIGITS:
-        return False
+        return None
 
     at = time.time() if at is None else at
     counter = int(at // PERIOD_SECONDS)
     # Compare every candidate rather than returning early, so timing does not leak
     # which step matched.
-    matched = False
+    matched: int | None = None
     for drift in range(-window, window + 1):
         try:
             expected = _hotp(secret, counter + drift)
         except (ValueError, TypeError):
-            return False
-        matched |= hmac.compare_digest(expected, candidate)
+            return None
+        if hmac.compare_digest(expected, candidate) and matched is None:
+            matched = counter + drift
     return matched
+
+
+def verify(secret: str, code: str, *, at: float | None = None, window: int = DEFAULT_WINDOW) -> bool:
+    """Constant-time check of ``code`` against the current step ± ``window``."""
+    return matched_step(secret, code, at=at, window=window) is not None
 
 
 def provisioning_uri(secret: str, *, account_name: str, issuer: str = "claude-lb") -> str:
