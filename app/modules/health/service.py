@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -241,10 +241,20 @@ async def unsupported_accounts(session: AsyncSession, model: str) -> set[str]:
     if not synced:
         return set()
 
+    # `/v1/models` lists dated snapshots (claude-sonnet-4-5-20250929) while clients
+    # usually ask for the alias (claude-sonnet-4-5), so a snapshot of the requested id
+    # counts as support. An exact-only match excluded every synced account for alias
+    # traffic.
+    escaped = model.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     supporting = set(
         (
             await session.execute(
-                select(ModelCatalogEntry.account_id).where(ModelCatalogEntry.model_id == model)
+                select(ModelCatalogEntry.account_id).where(
+                    or_(
+                        ModelCatalogEntry.model_id == model,
+                        ModelCatalogEntry.model_id.like(f"{escaped}-%", escape="\\"),
+                    )
+                )
             )
         ).scalars()
     )

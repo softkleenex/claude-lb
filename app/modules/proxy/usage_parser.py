@@ -24,10 +24,16 @@ class Usage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cache_creation_1h_input_tokens: int = 0
+    """The 1-hour-TTL share of ``cache_creation_input_tokens``. Priced, not stored."""
     model: str | None = None
 
     def as_dict(self) -> dict[str, int]:
+        """The persisted token columns."""
         return {name: getattr(self, name) for name in USAGE_FIELDS}
+
+    def cost_inputs(self) -> dict[str, int]:
+        return {**self.as_dict(), "cache_creation_1h_input_tokens": self.cache_creation_1h_input_tokens}
 
     def merge(self, raw: dict) -> None:
         for name in USAGE_FIELDS:
@@ -36,6 +42,11 @@ class Usage:
                 # output_tokens in message_delta is cumulative, so take the larger value
                 # rather than summing; input/cache counts only ever appear once.
                 setattr(self, name, max(getattr(self, name), value))
+        breakdown = raw.get("cache_creation")
+        if isinstance(breakdown, dict):
+            value = breakdown.get("ephemeral_1h_input_tokens")
+            if isinstance(value, int):
+                self.cache_creation_1h_input_tokens = max(self.cache_creation_1h_input_tokens, value)
 
 
 @dataclass

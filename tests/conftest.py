@@ -11,7 +11,11 @@ import pytest
 # pointed at a throwaway data dir before anything under `app.` is imported.
 _TMPDIR = tempfile.mkdtemp(prefix="claude-lb-tests-")
 os.environ["CLAUDE_LB_DATA_DIR"] = _TMPDIR
-os.environ["CLAUDE_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(_TMPDIR) / 'test.db'}"
+# CLAUDE_LB_TEST_DATABASE_URL runs the suite against another backend (CI uses it for
+# Postgres, where concurrency bugs that SQLite's serialized writes hide do show up).
+os.environ["CLAUDE_LB_DATABASE_URL"] = os.environ.get(
+    "CLAUDE_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{Path(_TMPDIR) / 'test.db'}"
+)
 os.environ["CLAUDE_LB_REQUIRE_API_KEY"] = "false"
 os.environ["CLAUDE_LB_MAX_ATTEMPTS"] = "3"
 

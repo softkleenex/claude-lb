@@ -7,9 +7,8 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import ApiKey
-from app.db.session import get_session
-from app.modules.api_keys.service import AuthError, authenticate
+from app.db.session import get_session, session_scope
+from app.modules.api_keys.service import Admission, AuthError, admit
 from app.modules.proxy.service import ProxyService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -40,7 +39,14 @@ def extract_presented_key(request: Request) -> str | None:
     return None
 
 
-async def require_api_key(request: Request, session: SessionDep) -> ApiKey | None:
+async def require_api_key(request: Request) -> Admission | None:
+    """Authenticate the client key on a session of its own.
+
+    Deliberately not the request-scoped ``SessionDep``: that connection would stay
+    checked out until the response finished — for a stream, minutes — while the
+    proxy opened more connections to do its work. Fifteen concurrent requests then
+    held the whole pool and waited on each other forever.
+    """
     settings = get_settings()
     presented = extract_presented_key(request)
 
@@ -57,7 +63,8 @@ async def require_api_key(request: Request, session: SessionDep) -> ApiKey | Non
         )
 
     try:
-        return await authenticate(session, presented)
+        async with session_scope() as session:
+            return await admit(session, presented)
     except AuthError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -71,4 +78,4 @@ async def require_api_key(request: Request, session: SessionDep) -> ApiKey | Non
         ) from exc
 
 
-ApiKeyDep = Annotated[ApiKey | None, Depends(require_api_key)]
+AdmissionDep = Annotated[Admission | None, Depends(require_api_key)]
