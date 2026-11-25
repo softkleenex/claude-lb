@@ -23,10 +23,11 @@ docker run --rm -p 2457:2457 ghcr.io/softkleenex/claude-lb demo
 
 ## Why
 
-- **Your prompt cache is per key, and a naive load balancer wastes it.** Spread one
-  conversation across keys and every turn pays the 1.25× cache-*write* price instead of
-  the 0.025–0.1× *read*. claude-lb pins each conversation to the key that cached it. The
-  dashboard shows the dollars that saved you, priced per model.
+- **Your prompt cache is per key, and a naive load balancer wastes it.** When a turn
+  lands on a different key, that key re-writes (at 1.25×) whatever history it hasn't
+  cached yet, or the whole prefix if its cache has expired. A read would have cost
+  0.025–0.1×. claude-lb pins each conversation to the key that holds its cache. The
+  dashboard shows what that saved, priced per model.
 - **You can see who spends what.** Every client gets its own `clb_` key with optional
   request, token, or USD budgets. Cost reports by key, account, model, or day export to CSV.
 - **One 429 does not take your app down.** Rate limits, overloads (529), and 5xx errors fail
@@ -210,9 +211,11 @@ bearer accounts route side by side in one pool.
 
 ### Prompt-cache affinity
 
-Anthropic prompt caches are scoped to the credential that created them, so spreading
-one conversation across the pool throws the cache away on every turn — each account
-pays the ~1.25x cache-write premium instead of the 0.025–0.1x read. claude-lb keys each
+Anthropic prompt caches are scoped to the credential that created them. When a turn of
+a conversation lands on a different account, that account re-writes (at ~1.25x) the
+history it has not cached yet, or the whole prefix once its cache has expired, where a
+read would have cost 0.025–0.1x. Modelled on a Claude Code-like session over three keys,
+random spreading costs roughly twice what affinity does. claude-lb keys each
 request on its *cacheable prefix* (`system` + `tools` + the first user turn), which is
 exactly the part Anthropic hashes and exactly the part that stays byte-identical as a
 conversation grows, and pins that key to one account.
