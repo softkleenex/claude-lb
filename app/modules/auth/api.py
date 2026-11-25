@@ -60,6 +60,11 @@ async def status(request: Request, session: SessionDep) -> AuthStatusOut:
 
 @router.post("/login", response_model=AuthStatusOut)
 async def login(payload: LoginRequest, request: Request, response: Response, session: SessionDep):
+    client = client_ip(request)
+    try:
+        auth.check_login_allowed(client)
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
     try:
         token = await auth.login(
             session,
@@ -68,12 +73,15 @@ async def login(payload: LoginRequest, request: Request, response: Response, ses
             client=request.headers.get("user-agent", ""),
         )
     except auth.AuthError as exc:
+        if exc.status_code == 401:
+            auth.record_login_failure(client)
         await audit.record_and_commit(
-            session, action="auth.login", ok=False, detail=exc.message, client_ip=client_ip(request)
+            session, action="auth.login", ok=False, detail=exc.message, client_ip=client
         )
         raise HTTPException(exc.status_code, exc.message) from exc
 
-    await audit.record(session, action="auth.login", client_ip=client_ip(request))
+    auth.record_login_success(client)
+    await audit.record(session, action="auth.login", client_ip=client)
     _set_session_cookie(response, token, secure=request.url.scheme == "https")
     credential = await auth.get_credential(session)
     return AuthStatusOut(

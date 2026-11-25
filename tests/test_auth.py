@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -24,7 +25,7 @@ async def make_remote_client(handler, host: str = "203.0.113.7") -> AsyncIterato
     """
     app = create_app()
     transport = httpx.ASGITransport(app=app, client=(host, 54321))
-    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         async with app.router.lifespan_context(app):
             await app.state.http_client.aclose()
             app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -223,9 +224,10 @@ class TestTotpEnrollment:
             client.cookies.clear()
             assert (await client.post("/api/auth/login", json={"password": PASSWORD})).status_code == 401
 
+            # The code that confirmed enrollment is spent; the next step's code works.
+            next_code = totp.now_code(enrollment["secret"], at=time.time() + totp.PERIOD_SECONDS)
             with_code = await client.post(
-                "/api/auth/login",
-                json={"password": PASSWORD, "totp_code": totp.now_code(enrollment["secret"])},
+                "/api/auth/login", json={"password": PASSWORD, "totp_code": next_code}
             )
             assert with_code.status_code == 200
 
@@ -255,7 +257,8 @@ class TestTotpEnrollment:
 
         async with session_scope() as session:
             credential = await auth.get_credential(session)
-        assert secret not in credential.totp_secret_encrypted
+        assert credential.totp_pending_secret_encrypted
+        assert secret not in credential.totp_pending_secret_encrypted
 
 
 class TestProxyIsUnaffected:

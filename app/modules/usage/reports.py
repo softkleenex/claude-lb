@@ -180,6 +180,18 @@ async def _labels(session: AsyncSession, group_by: str, keys: list[str | None]) 
     return {row[0]: row[1] for row in result}
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(value: str) -> str:
+    """Neutralize a text cell a spreadsheet would evaluate as a formula.
+
+    Labels are operator-chosen names and, for the model grouping, whatever model
+    string a client sent — so ``=HYPERLINK(...)`` must open as text, not run.
+    """
+    return "'" + value if value.startswith(_FORMULA_PREFIXES) else value
+
+
 def to_csv(report: Report) -> str:
     """Render a report as CSV, with a totals row so a spreadsheet reconciles."""
     buffer = io.StringIO()
@@ -189,7 +201,7 @@ def to_csv(report: Report) -> str:
         writer.writerow(
             [
                 report.group_by,
-                row.label,
+                _cell(row.label),
                 row.requests,
                 row.errors,
                 row.input_tokens,
