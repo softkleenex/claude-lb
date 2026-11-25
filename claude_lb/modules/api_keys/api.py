@@ -574,9 +574,7 @@ async def key_trends(
         **{field: sum(getattr(d, field) for d in usage) for field in KeyTrendTotals.model_fields}
     )
 
-    accounts = {
-        a.id: a for a in (await session.execute(select(Account))).scalars()
-    }
+    accounts = {a.id: a for a in (await session.execute(select(Account))).scalars()}
     by_account = [
         KeyAccountCost(
             account_id=account_id,

@@ -273,9 +273,7 @@ class TestDeleteHistory:
         account_id = await self._account_with_history()
         async for client in make_client(ok_json(proxy_calls)):
             await client.post("/v1/messages", json=MESSAGE_BODY)
-            response = await client.delete(
-                f"/api/accounts/{account_id}", params={"delete_history": "true"}
-            )
+            response = await client.delete(f"/api/accounts/{account_id}", params={"delete_history": "true"})
         assert response.status_code == 204
         assert await self._counts(account_id) == (0, 0, 0)
         async with session_scope() as session:

@@ -87,9 +87,7 @@ def parse_credential_bundle(payload: dict[str, Any]) -> ImportedCredential:
         source.get("rateLimitTier"),
     )
     extra_raw = source.get("extra_headers") or source.get("extraHeaders")
-    extra_headers = (
-        {str(k): str(v) for k, v in extra_raw.items()} if isinstance(extra_raw, dict) else {}
-    )
+    extra_headers = {str(k): str(v) for k, v in extra_raw.items()} if isinstance(extra_raw, dict) else {}
     base_url = source.get("base_url") or source.get("baseUrl")
 
     return ImportedCredential(

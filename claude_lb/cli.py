@@ -222,9 +222,7 @@ def account_add(
     api_key: Annotated[str, typer.Option(prompt=True, hide_input=True, help="Anthropic API key.")],
     weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
     priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
-    plan_type: Annotated[
-        str, typer.Option(help=f"Plan tier ({', '.join(PLAN_TYPES)}).")
-    ] = "api",
+    plan_type: Annotated[str, typer.Option(help=f"Plan tier ({', '.join(PLAN_TYPES)}).")] = "api",
     routing_policy: Annotated[
         str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
     ] = "normal",
@@ -355,9 +353,7 @@ def account_add_oauth(
 @account_app.command("add-subscription")
 def account_add_subscription(
     name: Annotated[str, typer.Argument(help="Label for this account, e.g. the person's name.")],
-    plan_type: Annotated[
-        str, typer.Option(help=f"Subscription plan ({', '.join(PLAN_TYPES)}).")
-    ] = "pro",
+    plan_type: Annotated[str, typer.Option(help=f"Subscription plan ({', '.join(PLAN_TYPES)}).")] = "pro",
     routing_policy: Annotated[
         str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
     ] = "normal",

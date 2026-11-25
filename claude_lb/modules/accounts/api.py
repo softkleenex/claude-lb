@@ -403,14 +403,10 @@ async def import_account(payload: AccountImport, request: Request, session: Sess
         priority=payload.priority,
         plan_type=payload.plan_type or parsed.plan_type,
         routing_policy=payload.routing_policy,
-        oauth_refresh_token_encrypted=(
-            encrypt(parsed.refresh_token) if parsed.refresh_token else None
-        ),
+        oauth_refresh_token_encrypted=(encrypt(parsed.refresh_token) if parsed.refresh_token else None),
         oauth_token_endpoint=payload.token_endpoint or parsed.token_endpoint,
         oauth_client_id=payload.client_id or parsed.client_id,
-        oauth_client_secret_encrypted=(
-            encrypt(parsed.client_secret) if parsed.client_secret else None
-        ),
+        oauth_client_secret_encrypted=(encrypt(parsed.client_secret) if parsed.client_secret else None),
         oauth_scope=parsed.scope,
         credential_lifetime_seconds=parsed.lifetime_seconds,
         credential_expires_at=parsed.expires_at,

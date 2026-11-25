@@ -232,6 +232,7 @@ def select_account(
         )
 
     if strategy == "reset_drain":
+
         def _reset_drain_key(a: Account) -> tuple[int, float, float, str]:
             sec_reset = _as_aware(getattr(a, "secondary_reset_at", None))
             pri_reset = _as_aware(getattr(a, "primary_reset_at", None))

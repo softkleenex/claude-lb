@@ -133,7 +133,11 @@ async def guest_login(payload: GuestLoginRequest, request: Request, response: Re
     if not await auth.verify_guest_password(session, payload.password):
         auth.record_login_failure(client)
         await audit.record_and_commit(
-            session, action="auth.guest_login", ok=False, detail="invalid guest password", actor="guest",
+            session,
+            action="auth.guest_login",
+            ok=False,
+            detail="invalid guest password",
+            actor="guest",
             client_ip=client,
         )
         raise HTTPException(401, "invalid credentials")
