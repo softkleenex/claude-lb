@@ -237,9 +237,9 @@ describe("useRequestLogs", () => {
         const url = new URL(request.url);
         calls.push({
           statuses: url.searchParams.getAll("status"),
-          accountIds: url.searchParams.getAll("accountId"),
-          apiKeyIds: url.searchParams.getAll("apiKeyId"),
-          modelOptions: url.searchParams.getAll("modelOption"),
+          accountIds: url.searchParams.getAll("account_id"),
+          apiKeyIds: url.searchParams.getAll("api_key_id"),
+          modelOptions: url.searchParams.getAll("model_option"),
           since: url.searchParams.get("since"),
         });
         return HttpResponse.json({
@@ -315,7 +315,7 @@ describe("useRequestLogs", () => {
     server.use(
       http.get("/api/request-logs", ({ request }) => {
         const url = new URL(request.url);
-        apiKeyCalls.push(url.searchParams.getAll("apiKeyId"));
+        apiKeyCalls.push(url.searchParams.getAll("api_key_id"));
         return HttpResponse.json({
           requests: [],
           total: 0,

@@ -9,6 +9,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from claude_lb import __version__
 from claude_lb.core.config import get_settings
@@ -190,6 +191,17 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
+        return JSONResponse({"status": "ok", "version": app.version})
+
+    @app.get("/health/ready", tags=["meta"])
+    async def health_ready() -> JSONResponse:
+        """Readiness: the process is up *and* the database answers."""
+        try:
+            async with session_scope() as session:
+                await session.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001 - any DB failure means not ready
+            logger.warning("readiness check failed: %s", exc)
+            return JSONResponse({"status": "unavailable", "version": app.version}, status_code=503)
         return JSONResponse({"status": "ok", "version": app.version})
 
     # Registered last of all: the SPA fallback answers any GET nothing else claimed.

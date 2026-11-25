@@ -9,6 +9,7 @@ import {
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
+import { InsecureModeBanner } from "@/features/auth/components/insecure-mode-banner";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
@@ -23,9 +24,6 @@ const ReportsPage = lazy(() =>
 const AccountsPage = lazy(() =>
   import("@/features/accounts/components/accounts-page").then((m) => ({ default: m.AccountsPage })),
 );
-const AutomationsPage = lazy(() =>
-  import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
-);
 const ApisPage = lazy(() => import("@/features/apis/components/apis-page").then((m) => ({ default: m.ApisPage })));
 const SettingsPage = lazy(() =>
   import("@/features/settings/components/settings-page").then((m) => ({ default: m.SettingsPage })),
@@ -34,11 +32,8 @@ const SettingsPage = lazy(() =>
 function AppLayout() {
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
-  const role = useAuthStore((state) => state.role);
-  const guestPasswordRequired = useAuthStore((state) => state.guestPasswordRequired);
-  const startAdminLogin = useAuthStore((state) => state.startAdminLogin);
+  const authEnabled = useAuthStore((state) => state.authEnabled);
   const timeFormat = useTimeFormatStore((state) => state.timeFormat);
-  const isGuest = role === "guest";
   const [statusBarHeight, setStatusBarHeight] = useState(STATUS_BAR_DEFAULT_HEIGHT_PX);
 
   return (
@@ -51,10 +46,10 @@ function AppLayout() {
         onLogout={() => {
           void logout();
         }}
-        onAdminLogin={startAdminLogin}
-        showAdminLogin={isGuest && passwordRequired}
-        showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
+        // Signing out only means something once a password protects the dashboard.
+        showLogout={authEnabled && passwordRequired}
       />
+      <InsecureModeBanner />
       <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
         <Suspense fallback={null}>
           <Outlet />
@@ -76,10 +71,9 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Route>
         </Routes>
       </AuthGate>

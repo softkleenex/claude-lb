@@ -77,8 +77,8 @@ describe("apis page integration", () => {
 		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
 		await waitFor(() => {
 			expect(requestBody).toMatchObject({
-				allowedReasoningEfforts: ["low"],
-				enforcedReasoningEffort: null,
+				allowed_reasoning_efforts: ["low"],
+				enforced_reasoning_effort: null,
 			});
 		});
 	});

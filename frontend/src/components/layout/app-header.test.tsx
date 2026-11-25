@@ -6,103 +6,27 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import { AppHeader } from "@/components/layout/app-header";
+import { useThemeStore } from "@/hooks/use-theme";
 import { server } from "@/test/mocks/server";
-import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
-function renderHeader(initialEntry = "/dashboard") {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: {
-        retry: false,
-      },
-    },
-  });
+/** `GET /api/accounts` in claude-lb returns a bare array of `AccountOut` (snake_case). */
+function account(id: string, available: boolean) {
+  return { id, name: id, enabled: true, available, quota_observed_at: null };
+}
 
+function renderHeader(props: Partial<Parameters<typeof AppHeader>[0]> = {}) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <AppHeader onLogout={vi.fn()} />
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AppHeader onLogout={vi.fn()} {...props} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
 describe("AppHeader", () => {
-  it("shows the summed Accounts reset-credit badge capped at 99+", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({ availableResetCredits: 70 }),
-            createAccountSummary({ accountId: "acc-2", availableResetCredits: 40 }),
-          ],
-        }),
-      ),
-    );
-
-    renderHeader();
-
-    expect(await screen.findAllByText("99+")).not.toHaveLength(0);
-  });
-
-  it("sums reset-credit badge across accounts and treats missing counts as zero", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({ availableResetCredits: 5 }),
-            createAccountSummary({ accountId: "acc-2" }),
-            createAccountSummary({ accountId: "acc-3", availableResetCredits: null }),
-            createAccountSummary({ accountId: "acc-4", availableResetCredits: 3 }),
-          ],
-        }),
-      ),
-    );
-
-    renderHeader();
-
-    expect(await screen.findAllByText("8")).not.toHaveLength(0);
-  });
-
-  it("hides the Accounts reset-credit badge when no resets are available", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [
-            createAccountSummary({ availableResetCredits: 0 }),
-            createAccountSummary({ accountId: "acc-2", availableResetCredits: 0 }),
-          ],
-        }),
-      ),
-    );
-
-    renderHeader();
-
-    await screen.findByRole("link", { name: /Accounts/i });
-    expect(screen.queryByText("99+")).not.toBeInTheDocument();
-  });
-
-  it("hides the Accounts reset-credit badge when settings disable reset-credit badges", async () => {
-    server.use(
-      http.get("/api/accounts", () =>
-        HttpResponse.json({
-          accounts: [createAccountSummary({ availableResetCredits: 5 })],
-        }),
-      ),
-      http.get("/api/settings", () =>
-        HttpResponse.json(createDashboardSettings({ showResetCreditBadges: false })),
-      ),
-    );
-
-    renderHeader();
-
-    await screen.findByRole("link", { name: /Accounts/i });
-    await waitFor(() => {
-      expect(screen.queryByText("5")).not.toBeInTheDocument();
-    });
-  });
-
-  it("renders core destinations as top-level links and keeps Automations out of the pill bar", async () => {
+  it("renders the five core destinations and no empty Advanced menu", async () => {
     renderHeader();
 
     expect(await screen.findByRole("link", { name: /Dashboard/i })).toBeInTheDocument();
@@ -110,26 +34,53 @@ describe("AppHeader", () => {
     expect(screen.getByRole("link", { name: /Accounts/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /APIs/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Settings/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Advanced" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Advanced" })).toBeInTheDocument();
   });
 
-  it("reveals Automations after opening the Advanced menu", async () => {
-    const user = userEvent.setup();
+  it("badges Accounts with the number of available accounts", async () => {
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json([account("a", true), account("b", true), account("c", false)]),
+      ),
+    );
+
     renderHeader();
 
-    await user.click(screen.getByRole("button", { name: "Advanced" }));
-
-    expect(await screen.findByRole("menuitem", { name: "Automations" })).toBeInTheDocument();
+    expect(await screen.findAllByLabelText("2 of 3 accounts available")).not.toHaveLength(0);
   });
 
-  it("marks the Advanced trigger active only while an advanced route is current", () => {
-    renderHeader("/automations");
-    expect(screen.getByRole("button", { name: "Advanced" })).toHaveAttribute("data-active", "true");
+  it("hides the Accounts badge when there are no accounts", async () => {
+    server.use(http.get("/api/accounts", () => HttpResponse.json([])));
+
+    renderHeader();
+
+    await screen.findByRole("link", { name: /Accounts/i });
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/accounts available/)).not.toBeInTheDocument();
+    });
   });
 
-  it("keeps the Advanced trigger inactive on core routes", () => {
-    renderHeader("/dashboard");
-    expect(screen.getByRole("button", { name: "Advanced" })).toHaveAttribute("data-active", "false");
+  it("switches the theme from the header menu", async () => {
+    const user = userEvent.setup();
+    useThemeStore.getState().setTheme("light");
+    renderHeader();
+
+    await user.click(screen.getByRole("button", { name: "Theme" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Dark" }));
+
+    expect(useThemeStore.getState().preference).toBe("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    useThemeStore.getState().setTheme("light");
+  });
+
+  it("only shows Sign out when asked to", () => {
+    const onLogout = vi.fn();
+    const { unmount } = renderHeader({ showLogout: false, onLogout });
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    unmount();
+
+    renderHeader({ showLogout: true, onLogout });
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 });

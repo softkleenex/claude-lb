@@ -1,64 +1,80 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { MOCK_BOOTSTRAP_TOKEN, MOCK_DASHBOARD_PASSWORD, MOCK_TOTP_CODE } from "@/test/mocks/factories";
+import { setMockAuth } from "@/test/mocks/handlers";
 import { renderWithProviders } from "@/test/utils";
-import { server } from "@/test/mocks/server";
 
 describe("auth flow integration", () => {
-  it("flows from login to totp to dashboard", async () => {
+  beforeEach(() => {
+    useAuthStore.setState(useAuthStore.getInitialState());
+  });
+
+  it("signs in with password and TOTP, then reaches the app", async () => {
     const user = userEvent.setup({ delay: null });
+    setMockAuth({ authenticated: false, totpEnabled: true });
 
-    server.use(
-      http.get("/api/dashboard-auth/session", () =>
-        HttpResponse.json({
-          authenticated: false,
-          passwordRequired: true,
-          totpRequiredOnLogin: false,
-          totpConfigured: true,
-          authMode: "standard",
-          passwordManagementEnabled: true,
-        }),
-      ),
-      http.post("/api/dashboard-auth/password/login", () =>
-        HttpResponse.json({
-          authenticated: false,
-          passwordRequired: true,
-          totpRequiredOnLogin: true,
-          totpConfigured: true,
-          authMode: "standard",
-          passwordManagementEnabled: true,
-        }),
-      ),
-      http.post("/api/dashboard-auth/totp/verify", () =>
-        HttpResponse.json({
-          authenticated: true,
-          passwordRequired: true,
-          totpRequiredOnLogin: false,
-          totpConfigured: true,
-          authMode: "standard",
-          passwordManagementEnabled: true,
-        }),
-      ),
-    );
-
-    window.history.pushState({}, "", "/dashboard");
+    window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
-    expect(await screen.findByText("Sign in")).toBeInTheDocument();
+    await user.type(await screen.findByLabelText("Password"), MOCK_DASHBOARD_PASSWORD);
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.type(await screen.findByLabelText("Authentication code"), MOCK_TOTP_CODE);
 
-    await user.type(screen.getByLabelText("Password"), "secret-password");
-    await user.click(screen.getByRole("button", { name: "Sign In" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+  });
 
-    expect(await screen.findByText("Two-factor verification")).toBeInTheDocument();
+  it("sets the first password remotely with the bootstrap token", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ configured: false, authenticated: false, password: null });
 
-    await user.type(screen.getByLabelText("TOTP code"), "123456");
+    window.history.pushState({}, "", "/settings");
+    renderWithProviders(<App />);
 
-    // Auto-submit triggers on 6-digit completion via onComplete
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    });
+    await user.type(await screen.findByLabelText("New password"), "long-enough-pw");
+    await user.type(screen.getByLabelText("Confirm password"), "long-enough-pw");
+    await user.click(screen.getByRole("button", { name: "Set password" }));
+    expect(await screen.findByText("Enter the bootstrap token from the server log.")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Bootstrap token"), MOCK_BOOTSTRAP_TOKEN);
+    await user.click(screen.getByRole("button", { name: "Set password" }));
+
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("warns on loopback without a password and sets one from the banner", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ configured: false, authenticated: true, password: null });
+
+    window.history.pushState({}, "", "/settings");
+    renderWithProviders(<App />);
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("No dashboard password is set.");
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: "Set password" })[0]!);
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("New password"), "long-enough-pw");
+    await user.type(within(dialog).getByLabelText("Confirm password"), "long-enough-pw");
+    await user.click(within(dialog).getByRole("button", { name: "Set password" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+  });
+
+  it("signs out back to the sign-in screen", async () => {
+    const user = userEvent.setup({ delay: null });
+
+    window.history.pushState({}, "", "/settings");
+    renderWithProviders(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 });

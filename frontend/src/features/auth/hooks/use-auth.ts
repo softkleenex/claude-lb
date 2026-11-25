@@ -2,96 +2,83 @@ import { ApiError, setUnauthorizedHandler } from "@/lib/api-client";
 import { create } from "zustand";
 
 import {
-  getAuthSession,
-  loginGuest as loginGuestRequest,
-  loginPassword,
+  getAuthStatus,
+  login as loginRequest,
   logout as logoutRequest,
-  verifyTotp as verifyTotpRequest,
+  setPassword as setPasswordRequest,
 } from "@/features/auth/api";
-import type {
-  AuthSession,
-  DashboardAuthMode,
-  DashboardPermission,
-  DashboardRole,
-} from "@/features/auth/schemas";
+import type { AuthStatus, DashboardPermission, DashboardRole } from "@/features/auth/schemas";
 
-let isAdminLoginInProgress = false;
+let isLoginInProgress = false;
+
+export const INVALID_CREDENTIALS_KEY = "auth.login.invalidCredentials";
 
 type AuthState = {
+  /** A dashboard password exists (`configured` in `/api/auth/status`). */
   passwordRequired: boolean;
   authenticated: boolean;
-  totpRequiredOnLogin: boolean;
-  totpConfigured: boolean;
+  totpEnabled: boolean;
+  /** False when the server runs with `CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false`. */
+  authEnabled: boolean;
+  /** No password yet and this client is not trusted (remote): setup needs the bootstrap token. */
   bootstrapRequired: boolean;
-  bootstrapTokenConfigured: boolean;
-  authMode: DashboardAuthMode;
-  passwordManagementEnabled: boolean;
-  passwordSessionActive: boolean;
+  /** Signed in without any password protecting the management plane. */
+  insecure: boolean;
+  reason: string;
+  // Role plumbing for the guest role (Step G). Today every signed-in user is an admin.
   role: DashboardRole;
   permissions: DashboardPermission[];
-  guestAccessEnabled: boolean;
-  guestPasswordRequired: boolean;
   canWrite: boolean;
-  adminLoginRequested: boolean;
   loading: boolean;
   initialized: boolean;
   error: string | null;
-  refreshSession: () => Promise<AuthSession>;
-  login: (password: string) => Promise<AuthSession>;
-  loginGuest: (password?: string) => Promise<AuthSession>;
-  startAdminLogin: () => void;
+  refreshSession: () => Promise<AuthStatus>;
+  login: (password: string, totpCode?: string) => Promise<AuthStatus>;
+  setupPassword: (password: string, bootstrapToken?: string) => Promise<AuthStatus>;
   logout: () => Promise<void>;
-  verifyTotp: (code: string) => Promise<AuthSession>;
   clearError: () => void;
 };
 
-function applySession(set: (next: Partial<AuthState>) => void, session: AuthSession): AuthSession {
-  set({
-    passwordRequired: session.passwordRequired,
-    authenticated: session.authenticated,
-    totpRequiredOnLogin: session.totpRequiredOnLogin,
-    totpConfigured: session.totpConfigured,
-    bootstrapRequired: session.bootstrapRequired ?? false,
-    bootstrapTokenConfigured: session.bootstrapTokenConfigured ?? false,
-    authMode: session.authMode,
-    passwordManagementEnabled: session.passwordManagementEnabled,
-    passwordSessionActive: session.passwordSessionActive,
-    role: session.role,
-    permissions: session.permissions,
-    guestAccessEnabled: session.guestAccessEnabled,
-    guestPasswordRequired: session.guestPasswordRequired,
-    canWrite: session.permissions.includes("write"),
-    adminLoginRequested: false,
-    initialized: true,
-    error: null,
-  });
-  return session;
+function deriveState(status: AuthStatus): Partial<AuthState> {
+  const authEnabled = status.authEnabled;
+  return {
+    passwordRequired: status.configured,
+    authenticated: status.authenticated,
+    totpEnabled: status.totpEnabled,
+    authEnabled,
+    bootstrapRequired: authEnabled && !status.configured && !status.authenticated,
+    insecure: status.authenticated && (!authEnabled || !status.configured),
+    reason: status.reason,
+    role: "admin",
+    permissions: status.authenticated ? ["read", "write"] : [],
+    canWrite: status.authenticated,
+  };
+}
+
+function applyStatus(set: (next: Partial<AuthState>) => void, status: AuthStatus): AuthStatus {
+  set({ ...deriveState(status), initialized: true, error: null });
+  return status;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   passwordRequired: false,
   authenticated: false,
-  totpRequiredOnLogin: false,
-  totpConfigured: false,
+  totpEnabled: false,
+  authEnabled: true,
   bootstrapRequired: false,
-  bootstrapTokenConfigured: false,
-  authMode: "standard",
-  passwordManagementEnabled: true,
-  passwordSessionActive: false,
+  insecure: false,
+  reason: "",
   role: "admin",
-  permissions: ["read", "write"],
-  guestAccessEnabled: false,
-  guestPasswordRequired: false,
-  canWrite: true,
-  adminLoginRequested: false,
+  permissions: [],
+  canWrite: false,
   loading: false,
   initialized: false,
   error: null,
   refreshSession: async () => {
     set({ loading: true, error: null });
     try {
-      const session = await getAuthSession();
-      return applySession(set, session);
+      const status = await getAuthStatus();
+      return applyStatus(set, status);
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to refresh session",
@@ -101,76 +88,48 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ loading: false, initialized: true });
     }
   },
-  login: async (password) => {
+  login: async (password, totpCode) => {
     set({ loading: true, error: null });
-    isAdminLoginInProgress = true;
+    isLoginInProgress = true;
     try {
-      const session = await loginPassword({ password });
-      return applySession(set, session);
+      const status = await loginRequest({ password, totpCode: totpCode || undefined });
+      return applyStatus(set, status);
     } catch (error) {
-      const shouldKeepAdminLogin =
-        useAuthStore.getState().adminLoginRequested ||
-        (error instanceof ApiError && error.status === 401);
-      set({
-        error: error instanceof Error ? error.message : "Login failed",
-        adminLoginRequested: shouldKeepAdminLogin,
-      });
+      // The server deliberately says only "invalid credentials" for a wrong password or
+      // code; surface it as an i18n key so the form can show it translated.
+      const message =
+        error instanceof ApiError && error.status === 401
+          ? INVALID_CREDENTIALS_KEY
+          : error instanceof Error
+            ? error.message
+            : "Login failed";
+      set({ error: message });
       throw error;
     } finally {
-      isAdminLoginInProgress = false;
+      isLoginInProgress = false;
       set({ loading: false, initialized: true });
     }
   },
-  loginGuest: async (password) => {
+  setupPassword: async (password, bootstrapToken) => {
     set({ loading: true, error: null });
     try {
-      const session = await loginGuestRequest(password ? { password } : {});
-      return applySession(set, session);
+      const status = await setPasswordRequest({ password }, { bootstrapToken });
+      return applyStatus(set, status);
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : "Guest login failed",
-      });
+      set({ error: error instanceof Error ? error.message : "Password setup failed" });
       throw error;
     } finally {
       set({ loading: false, initialized: true });
     }
-  },
-  startAdminLogin: () => {
-    set({ adminLoginRequested: true, error: null });
   },
   logout: async () => {
     set({ loading: true, error: null });
     try {
       await logoutRequest();
-      set({
-        authenticated: false,
-        totpRequiredOnLogin: false,
-        bootstrapRequired: false,
-        bootstrapTokenConfigured: false,
-        authMode: "standard",
-        passwordManagementEnabled: true,
-        role: "admin",
-        permissions: ["read", "write"],
-        canWrite: true,
-        adminLoginRequested: false,
-      });
+      set({ authenticated: false, permissions: [], canWrite: false });
       await useAuthStore.getState().refreshSession();
     } finally {
       set({ loading: false });
-    }
-  },
-  verifyTotp: async (code) => {
-    set({ loading: true, error: null });
-    try {
-      const session = await verifyTotpRequest({ code });
-      return applySession(set, session);
-    } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : "TOTP verification failed",
-      });
-      throw error;
-    } finally {
-      set({ loading: false, initialized: true });
     }
   },
   clearError: () => {
@@ -179,20 +138,16 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 setUnauthorizedHandler(() => {
-  if (isAdminLoginInProgress || useAuthStore.getState().adminLoginRequested) {
-    useAuthStore.setState({ initialized: true });
+  if (isLoginInProgress) {
     return;
   }
 
-  useAuthStore.setState((state) => ({
-    ...state,
+  useAuthStore.setState({
     authenticated: false,
-    role: state.guestAccessEnabled ? "guest" : state.role,
-    permissions: ["read"],
+    permissions: [],
     canWrite: false,
-    adminLoginRequested: false,
     initialized: true,
     error: null,
-  }));
+  });
   void useAuthStore.getState().refreshSession().catch(() => undefined);
 });

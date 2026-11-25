@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -6,6 +5,7 @@ import { Link, NavLink, useLocation } from "react-router-dom";
 
 import { AppLogo } from "@/components/brand/app-logo";
 import { LanguageToggle, LanguageToggleMobile } from "@/components/layout/language-toggle";
+import { ThemeToggle, ThemeToggleMobile } from "@/components/layout/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,8 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { listAccounts } from "@/features/accounts/api";
-import { getSettings } from "@/features/settings/api";
+import { usePoolStatus } from "@/features/accounts/pool-status";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
@@ -27,9 +26,10 @@ const CORE_NAV_ITEMS = [
   { to: "/settings", labelKey: "nav.settings" },
 ] as const;
 
-const ADVANCED_NAV_ITEMS = [
-  { to: "/automations", labelKey: "nav.automations" },
-] as const;
+// Power-user pages. Later steps add conversations, audit log, model catalog, firewall
+// and the sticky-session browser here. Automations (codex-lb) stays unlisted: claude-lb
+// has no automations backend. The dropdown renders only when this list is non-empty.
+const ADVANCED_NAV_ITEMS: ReadonlyArray<{ to: string; labelKey: string }> = [];
 
 export type AppHeaderProps = {
   onLogout: () => void;
@@ -55,30 +55,12 @@ export function AppHeader({
   const blurred = usePrivacyStore((s) => s.blurred);
   const togglePrivacy = usePrivacyStore((s) => s.toggle);
   const PrivacyIcon = blurred ? EyeOff : Eye;
-  const { data: accounts = [] } = useQuery({
-    queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
-    select: (data) => data.accounts,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-    staleTime: 30_000,
-  });
-  const { data: settings } = useQuery({
-    queryKey: ["settings", "detail"],
-    queryFn: getSettings,
-  });
-  const showResetCreditBadges = settings?.showResetCreditBadges ?? true;
-  const totalAvailableResetCredits = accounts.reduce(
-    (total, account) => total + Math.max(0, account.availableResetCredits ?? 0),
-    0,
-  );
-  const accountsResetBadge = !showResetCreditBadges
-    ? null
-    : totalAvailableResetCredits > 99
-    ? "99+"
-    : totalAvailableResetCredits > 0
-      ? String(totalAvailableResetCredits)
-      : null;
+  const { data: pool } = usePoolStatus();
+  // How many accounts can take traffic right now; hidden until the pool has an account.
+  const accountsBadge =
+    pool && pool.total > 0 ? (pool.available > 99 ? "99+" : String(pool.available)) : null;
+  const accountsBadgeLabel = pool ? t("nav.accountsAvailable", { available: pool.available, total: pool.total }) : undefined;
+  const accountsBadgeTone = pool && pool.available === 0 ? "bg-destructive text-white" : "bg-primary text-primary-foreground";
   const privacyLabel = blurred ? t("nav.showEmails") : t("nav.hideEmails");
 
   return (
@@ -119,14 +101,22 @@ export function AppHeader({
             >
               <span className="relative inline-flex items-center">
                 {t(item.labelKey)}
-                {item.to === "/accounts" && accountsResetBadge ? (
-                  <span className="absolute -top-2 -right-4 z-10 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
-                    {accountsResetBadge}
+                {item.to === "/accounts" && accountsBadge ? (
+                  <span
+                    title={accountsBadgeLabel}
+                    aria-label={accountsBadgeLabel}
+                    className={cn(
+                      "absolute -top-2 -right-4 z-10 grid h-4 min-w-[1rem] place-items-center rounded-full px-1 text-[10px] font-medium",
+                      accountsBadgeTone,
+                    )}
+                  >
+                    {accountsBadge}
                   </span>
                 ) : null}
               </span>
             </NavLink>
           ))}
+          {ADVANCED_NAV_ITEMS.length > 0 ? (
           <DropdownMenu>
             <DropdownMenuTrigger
               data-active={advancedActive}
@@ -150,11 +140,13 @@ export function AppHeader({
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+          ) : null}
         </nav>
 
         {/* Actions */}
         <div className="flex flex-1 items-center justify-end gap-1.5">
           <LanguageToggle />
+          <ThemeToggle />
           <Button
             type="button"
             size="sm"
@@ -219,15 +211,23 @@ export function AppHeader({
                         )}
                       >
                         {t(item.labelKey)}
-                        {item.to === "/accounts" && accountsResetBadge ? (
-                          <span className="absolute right-2 top-1 z-10 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
-                            {accountsResetBadge}
+                        {item.to === "/accounts" && accountsBadge ? (
+                          <span
+                            aria-label={accountsBadgeLabel}
+                            className={cn(
+                              "absolute right-2 top-1 z-10 grid h-5 min-w-[1.25rem] place-items-center rounded-full px-1 text-[10px] font-medium",
+                              accountsBadgeTone,
+                            )}
+                          >
+                            {accountsBadge}
                           </span>
                         ) : null}
                       </span>
                     )}
                   </NavLink>
                 ))}
+                {ADVANCED_NAV_ITEMS.length > 0 ? (
+                  <>
                 <div className="my-2 h-px bg-border" />
                 <p className="px-3 pb-1 text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
                   {t("nav.advanced")}
@@ -248,6 +248,8 @@ export function AppHeader({
                     )}
                   </NavLink>
                 ))}
+                  </>
+                ) : null}
                 <div className="my-2 h-px bg-border" />
                 <button
                   type="button"
@@ -257,6 +259,8 @@ export function AppHeader({
                   <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
                   {privacyLabel}
                 </button>
+                <div className="my-2 h-px bg-border" />
+                <ThemeToggleMobile />
                 <div className="my-2 h-px bg-border" />
                 <LanguageToggleMobile />
                 {showLogout && (

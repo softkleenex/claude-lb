@@ -1,6 +1,8 @@
 import { ApiErrorResponseSchema } from "@/schemas/api";
 import { z, type ZodType } from "zod";
 
+import { camelizeKeys, snakifyKeys, snakifyQueryKeys } from "@/lib/casing";
+
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 type RequestOptions = {
@@ -10,6 +12,12 @@ type RequestOptions = {
   credentials?: RequestCredentials;
   cache?: RequestCache;
   suppressUnauthorizedHandler?: boolean;
+  /**
+   * Skip the snake_case <-> camelCase key conversion for this call (request body,
+   * query string and response). Use it when object keys are data rather than field
+   * names, e.g. free-form header maps or model-name-keyed maps.
+   */
+  rawKeys?: boolean;
 };
 
 const JSON_CONTENT_TYPE = "application/json";
@@ -86,11 +94,51 @@ async function readJsonPayload(response: Response): Promise<unknown> {
   }
 }
 
-function parseApiErrorPayload(payload: unknown): {
+const FastApiErrorSchema = z.object({
+  detail: z.union([
+    z.string(),
+    z.array(z.looseObject({ msg: z.string().optional(), loc: z.array(z.unknown()).optional() })),
+    z.unknown(),
+  ]),
+});
+
+function formatFastApiDetail(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    return detail.length > 0 ? detail : null;
+  }
+  if (Array.isArray(detail)) {
+    // FastAPI 422: [{loc: ["body", "password"], msg: "..."}]
+    const messages = detail
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const record = item as { msg?: unknown; loc?: unknown };
+        if (typeof record.msg !== "string") return null;
+        const field = Array.isArray(record.loc) ? record.loc.filter((part) => part !== "body").join(".") : "";
+        return field ? `${field}: ${record.msg}` : record.msg;
+      })
+      .filter((message): message is string => !!message);
+    return messages.length > 0 ? messages.join("; ") : null;
+  }
+  return null;
+}
+
+function parseApiErrorPayload(
+  payload: unknown,
+  status: number,
+): {
   code: string;
   message: string;
   details: unknown;
 } {
+  // claude-lb management routes use FastAPI's `{"detail": ...}` envelope.
+  const fastApi = FastApiErrorSchema.safeParse(payload);
+  if (fastApi.success) {
+    const message = formatFastApiDetail(fastApi.data.detail);
+    if (message) {
+      return { code: `http_${status}`, message, details: fastApi.data.detail };
+    }
+  }
+
   const parsed = ApiErrorResponseSchema.safeParse(payload);
   if (!parsed.success) {
     return {
@@ -133,7 +181,13 @@ async function request<T>(
   schema: ZodType<T> | null,
   options?: RequestOptions,
 ): Promise<T | void> {
-  const requestBody = buildRequestBody(options?.body);
+  const convertKeys = !options?.rawKeys;
+  const requestBody = buildRequestBody(
+    convertKeys && options?.body !== undefined && !isBodyInit(options.body)
+      ? snakifyKeys(options.body)
+      : options?.body,
+  );
+  const requestUrl = convertKeys ? snakifyQueryKeys(url) : url;
   const headers = new Headers(options?.headers);
   if (requestBody.contentType && !headers.has("Content-Type")) {
     headers.set("Content-Type", requestBody.contentType);
@@ -144,7 +198,7 @@ async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetch(requestUrl, {
       method,
       body: requestBody.body,
       headers,
@@ -165,21 +219,23 @@ async function request<T>(
     unauthorizedHandler?.();
   }
 
-  const payload = await readJsonPayload(response);
+  const rawPayload = await readJsonPayload(response);
   if (!response.ok) {
-    const parsedError = parseApiErrorPayload(payload);
+    const parsedError = parseApiErrorPayload(rawPayload, response.status);
     throw new ApiError({
       status: response.status,
       code: parsedError.code,
       message: parsedError.message,
       details: parsedError.details,
-      payload,
+      payload: rawPayload,
     });
   }
 
   if (schema === null) {
     return undefined;
   }
+
+  const payload = convertKeys ? camelizeKeys(rawPayload) : rawPayload;
 
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
@@ -206,28 +262,34 @@ export function get<T>(
   return request("GET", url, schema, options);
 }
 
+export function post(url: string, schema: null, options?: RequestOptions): Promise<void>;
+export function post<T>(url: string, schema: ZodType<T>, options?: RequestOptions): Promise<T>;
 export function post<T>(
   url: string,
-  schema: ZodType<T>,
+  schema: ZodType<T> | null,
   options?: RequestOptions,
-): Promise<T> {
-  return request("POST", url, schema, options);
+): Promise<T | void> {
+  return schema === null ? request("POST", url, null, options) : request("POST", url, schema, options);
 }
 
+export function patch(url: string, schema: null, options?: RequestOptions): Promise<void>;
+export function patch<T>(url: string, schema: ZodType<T>, options?: RequestOptions): Promise<T>;
 export function patch<T>(
   url: string,
-  schema: ZodType<T>,
+  schema: ZodType<T> | null,
   options?: RequestOptions,
-): Promise<T> {
-  return request("PATCH", url, schema, options);
+): Promise<T | void> {
+  return schema === null ? request("PATCH", url, null, options) : request("PATCH", url, schema, options);
 }
 
+export function put(url: string, schema: null, options?: RequestOptions): Promise<void>;
+export function put<T>(url: string, schema: ZodType<T>, options?: RequestOptions): Promise<T>;
 export function put<T>(
   url: string,
-  schema: ZodType<T>,
+  schema: ZodType<T> | null,
   options?: RequestOptions,
-): Promise<T> {
-  return request("PUT", url, schema, options);
+): Promise<T | void> {
+  return schema === null ? request("PUT", url, null, options) : request("PUT", url, schema, options);
 }
 
 export function del(

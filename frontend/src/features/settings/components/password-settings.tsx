@@ -1,15 +1,27 @@
-import { KeyRound } from "lucide-react";
+import { KeyRound, LogOut } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { revokeAllSessions } from "@/features/auth/api";
+import { PasswordSetupDialog } from "@/features/auth/components/password-setup-dialog";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { PasswordChangeDialog } from "@/features/settings/components/password-change-dialog";
-import { PasswordRemoveDialog } from "@/features/settings/components/password-remove-dialog";
-import { PasswordSetupDialog } from "@/features/settings/components/password-setup-dialog";
-import { PasswordVerifyDialog } from "@/features/settings/components/password-verify-dialog";
+import { SettingsCard, SettingsRow } from "@/features/settings/components/settings-card";
+import { getErrorMessage } from "@/utils/errors";
 
-type PasswordDialog = "setup" | "change" | "remove" | "verify" | null;
+type ActiveDialog = "setup" | "change" | "revoke" | null;
 
 export type PasswordSettingsProps = {
   disabled?: boolean;
@@ -18,114 +30,109 @@ export type PasswordSettingsProps = {
 export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const { t } = useTranslation();
   const passwordRequired = useAuthStore((s) => s.passwordRequired);
-  const authMode = useAuthStore((s) => s.authMode);
-  const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
-  const passwordSessionActive = useAuthStore((s) => s.passwordSessionActive);
-  const authenticated = useAuthStore((s) => s.authenticated);
+  const authEnabled = useAuthStore((s) => s.authEnabled);
+  const refreshSession = useAuthStore((s) => s.refreshSession);
+  const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [revoking, setRevoking] = useState(false);
 
-  const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
-
-  const lock = disabled || !passwordManagementEnabled;
-  const closeIfMatches = (dialog: PasswordDialog) => (open: boolean) => {
+  const closeIfMatches = (dialog: ActiveDialog) => (open: boolean) => {
     if (!open && activeDialog === dialog) {
       setActiveDialog(null);
     }
   };
 
-  const statusMessage = !passwordManagementEnabled
-    ? t("settings.password.status.disabled")
-    : authMode === "trusted_header"
-      ? passwordRequired
-        ? t("settings.password.status.fallbackConfigured")
-        : t("settings.password.status.fallbackMissing")
-      : passwordRequired
-        ? t("settings.password.status.configured")
-        : t("settings.password.status.notSet");
+  const revokeAll = async () => {
+    setRevoking(true);
+    try {
+      await revokeAllSessions();
+      toast.success(t("settings.sessions.toasts.revoked"));
+      // This browser's session is gone too; the gate takes over from here.
+      await refreshSession();
+    } catch (caught) {
+      toast.error(getErrorMessage(caught));
+    } finally {
+      setRevoking(false);
+      setActiveDialog(null);
+    }
+  };
+
+  const statusMessage = !authEnabled
+    ? t("settings.password.status.authDisabled")
+    : passwordRequired
+      ? t("settings.password.status.configured")
+      : t("settings.password.status.notSet");
 
   return (
-    <section className="rounded-xl border bg-card p-5">
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-              <KeyRound className="h-4 w-4 text-primary" aria-hidden="true" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold">{t("settings.password.title")}</h3>
-              <p className="text-xs text-muted-foreground">{statusMessage}</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {!passwordManagementEnabled ? null : passwordRequired && passwordSessionActive ? (
-              <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs"
-                  disabled={lock}
-                  onClick={() => setActiveDialog("change")}
-                >
-                  {t("settings.password.actions.change")}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs text-destructive hover:text-destructive"
-                  disabled={lock}
-                  onClick={() => setActiveDialog("remove")}
-                >
-                  {t("settings.password.actions.remove")}
-                </Button>
-              </>
-            ) : passwordRequired && authenticated && !passwordSessionActive ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs"
-                disabled={disabled}
-                onClick={() => setActiveDialog("verify")}
-              >
-                {t("settings.password.actions.loginToManage")}
-              </Button>
-            ) : !passwordRequired ? (
-              <Button
-                type="button"
-                size="sm"
-                className="h-8 text-xs"
-                disabled={lock}
-                onClick={() => setActiveDialog("setup")}
-              >
-                {t("settings.password.actions.set")}
-              </Button>
-            ) : null}
-          </div>
+    <SettingsCard
+      id="password"
+      icon={KeyRound}
+      title={t("settings.password.title")}
+      description={statusMessage}
+      actions={
+        !authEnabled ? null : passwordRequired ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            disabled={disabled}
+            onClick={() => setActiveDialog("change")}
+          >
+            {t("settings.password.actions.change")}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 text-xs"
+            disabled={disabled}
+            onClick={() => setActiveDialog("setup")}
+          >
+            {t("settings.password.actions.set")}
+          </Button>
+        )
+      }
+    >
+      {passwordRequired ? (
+        <div className="rounded-lg border">
+          <SettingsRow label={t("settings.sessions.revokeAll.label")} description={t("settings.sessions.revokeAll.description")}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
+              disabled={disabled || revoking}
+              onClick={() => setActiveDialog("revoke")}
+            >
+              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              {t("settings.sessions.revokeAll.action")}
+            </Button>
+          </SettingsRow>
         </div>
-      </div>
+      ) : null}
 
-      <PasswordSetupDialog
-        open={activeDialog === "setup"}
-        onOpenChange={closeIfMatches("setup")}
-        disabled={disabled}
-      />
-      <PasswordChangeDialog
-        open={activeDialog === "change"}
-        onOpenChange={closeIfMatches("change")}
-        disabled={disabled}
-      />
-      <PasswordRemoveDialog
-        open={activeDialog === "remove"}
-        onOpenChange={closeIfMatches("remove")}
-        disabled={disabled}
-      />
-      <PasswordVerifyDialog
-        open={activeDialog === "verify"}
-        onOpenChange={closeIfMatches("verify")}
-        disabled={disabled}
-      />
-    </section>
+      <PasswordSetupDialog open={activeDialog === "setup"} onOpenChange={closeIfMatches("setup")} />
+      <PasswordChangeDialog open={activeDialog === "change"} onOpenChange={closeIfMatches("change")} />
+      <AlertDialog open={activeDialog === "revoke"} onOpenChange={closeIfMatches("revoke")}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("settings.sessions.revokeAll.confirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("settings.sessions.revokeAll.confirmDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revoking}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={revoking}
+              onClick={(event) => {
+                event.preventDefault();
+                void revokeAll();
+              }}
+            >
+              {t("settings.sessions.revokeAll.action")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SettingsCard>
   );
 }

@@ -205,7 +205,7 @@ describe("ResetCreditConfirmDialog", () => {
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
 
     expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toEqual({ redeemRequestId: expect.any(String) });
+    expect(bodies[0]).toEqual({ redeem_request_id: expect.any(String) });
     expect(bodies[1]).toEqual(bodies[0]);
   });
 

@@ -1,208 +1,63 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { screen } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { setMockAuth } from "@/test/mocks/handlers";
+import { server } from "@/test/mocks/server";
+import { renderWithProviders } from "@/test/utils";
 
-vi.mock("@/features/auth/components/totp-dialog", () => ({
-  TotpDialog: () => <div>Two-factor verification</div>,
-}));
-
-function setAuthState(
-  patch: Partial<ReturnType<typeof useAuthStore.getState>>,
-): void {
-  useAuthStore.setState({
-    initialized: true,
-    loading: false,
-    passwordRequired: true,
-    authenticated: false,
-    totpRequiredOnLogin: false,
-    bootstrapRequired: false,
-    bootstrapTokenConfigured: false,
-    authMode: "standard",
-    passwordManagementEnabled: true,
-    error: null,
-    ...patch,
-  });
+function renderGate() {
+  return renderWithProviders(
+    <AuthGate>
+      <div>app content</div>
+    </AuthGate>,
+  );
 }
 
 describe("AuthGate", () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    setAuthState({
-      refreshSession: vi.fn().mockResolvedValue(undefined),
-    });
+    useAuthStore.setState(useAuthStore.getInitialState());
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("renders the app when signed in", async () => {
+    renderGate();
+
+    expect(await screen.findByText("app content")).toBeInTheDocument();
   });
 
-  it("shows login form when unauthenticated", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: true,
-      authenticated: false,
-      totpRequiredOnLogin: false,
-    });
+  it("renders the app on loopback before a password exists", async () => {
+    setMockAuth({ configured: false, authenticated: true });
 
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
+    renderGate();
 
-    expect(screen.getByText("Sign in")).toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("app content")).toBeInTheDocument();
   });
 
-  it("shows guest login prompt when guest access requires a password", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: false,
-      authenticated: false,
-      guestAccessEnabled: true,
-      guestPasswordRequired: true,
-    });
+  it("shows sign-in when a password is set and there is no session", async () => {
+    setMockAuth({ authenticated: false });
 
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
+    renderGate();
 
-    expect(screen.getByText("Guest access")).toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText("app content")).not.toBeInTheDocument();
   });
 
-  it("shows children when authenticated", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: true,
-      authenticated: true,
-      totpRequiredOnLogin: false,
-    });
+  it("shows remote first-time setup with a bootstrap token field", async () => {
+    setMockAuth({ configured: false, authenticated: false, password: null });
 
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
+    renderGate();
 
-    expect(screen.getByText("Protected content")).toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Set up dashboard access" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Bootstrap token")).toBeInTheDocument();
   });
 
-  it("shows admin login form when a guest requests admin sign in", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: true,
-      authenticated: true,
-      role: "guest",
-      adminLoginRequested: true,
-    });
+  it("offers a retry when the status request fails", async () => {
+    server.use(http.get("/api/auth/status", () => HttpResponse.error()));
 
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
+    renderGate();
 
-    expect(screen.getByText("Sign in")).toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
-  });
-
-  it("shows totp dialog when verification is pending", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: true,
-      authenticated: false,
-      totpRequiredOnLogin: true,
-    });
-
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
-
-    expect(screen.getByText("Two-factor verification")).toBeInTheDocument();
-    expect(screen.queryByText("Dashboard Login")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
-  });
-
-  it("shows reverse proxy notice when trusted header auth is required", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: false,
-      authenticated: false,
-      totpRequiredOnLogin: false,
-      authMode: "trusted_header",
-    });
-
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
-
-    expect(screen.getByText("Reverse proxy authentication required")).toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
-  });
-
-  it("shows reverse proxy notice instead of guest login in trusted header mode", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: false,
-      authenticated: false,
-      totpRequiredOnLogin: false,
-      authMode: "trusted_header",
-      guestAccessEnabled: true,
-      guestPasswordRequired: true,
-    });
-
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
-
-    expect(screen.getByText("Reverse proxy authentication required")).toBeInTheDocument();
-    expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
-  });
-
-  it("shows bootstrap setup screen for remote first-run access", async () => {
-    const refreshSession = vi.fn().mockResolvedValue(undefined);
-    setAuthState({
-      refreshSession,
-      passwordRequired: false,
-      authenticated: false,
-      bootstrapRequired: true,
-      bootstrapTokenConfigured: true,
-    });
-
-    render(
-      <AuthGate>
-        <div>Protected content</div>
-      </AuthGate>,
-    );
-
-    expect(screen.getByText("Complete Remote Setup")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set password" })).toBeInTheDocument();
-    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
-    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 });

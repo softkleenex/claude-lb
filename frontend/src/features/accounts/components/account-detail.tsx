@@ -21,7 +21,7 @@ import type {
   AccountProxyBindingRequest,
   UpstreamProxyAdmin,
   UpstreamProxyEndpointTestResponse,
-} from "@/features/settings/schemas";
+} from "@/features/accounts/upstream-proxy-legacy";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 

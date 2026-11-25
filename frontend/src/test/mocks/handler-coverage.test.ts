@@ -23,8 +23,6 @@ const EXPECTED_ENDPOINTS = [
 	// health
 	"GET /health",
 	"GET /health/ready",
-	// runtime
-	"GET /api/runtime/version",
 	// dashboard
 	"GET /api/dashboard/overview",
 	"GET /api/dashboard/projections",
@@ -53,25 +51,20 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/oauth/start",
 	"GET /api/oauth/status",
 	"POST /api/oauth/complete",
-	// auth
-	"GET /api/dashboard-auth/session",
-	"POST /api/dashboard-auth/password/setup",
-	"POST /api/dashboard-auth/password/login",
-	"POST /api/dashboard-auth/guest/login",
-	"POST /api/dashboard-auth/password/change",
-	"POST /api/dashboard-auth/guest/password",
-	"DELETE /api/dashboard-auth/guest/password",
-	"DELETE /api/dashboard-auth/password",
-	"POST /api/dashboard-auth/totp/setup/start",
-	"POST /api/dashboard-auth/totp/setup/confirm",
-	"POST /api/dashboard-auth/totp/verify",
-	"POST /api/dashboard-auth/totp/disable",
-	"POST /api/dashboard-auth/logout",
-	// settings
+	// auth (claude-lb)
+	"GET /api/auth/status",
+	"POST /api/auth/login",
+	"POST /api/auth/logout",
+	"POST /api/auth/password",
+	"POST /api/auth/totp/enroll",
+	"POST /api/auth/totp/confirm",
+	"DELETE /api/auth/totp",
+	"POST /api/auth/sessions/revoke-all",
+	// settings (claude-lb)
 	"GET /api/settings",
-	"PUT /api/settings",
-	"GET /api/settings/telemetry",
-	"PUT /api/settings/telemetry",
+	"PATCH /api/settings",
+	"POST /api/settings/reset",
+	// LEGACY codex-lb upstream proxy (accounts page until Step C)
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
 	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",

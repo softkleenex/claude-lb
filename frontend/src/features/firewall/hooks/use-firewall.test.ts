@@ -40,8 +40,8 @@ describe("useFirewall", () => {
         }),
       ),
       http.post("/api/firewall/ips", async ({ request }) => {
-        const payload = (await request.json()) as { ipAddress?: string };
-        const ipAddress = String(payload.ipAddress || "").trim();
+        const payload = (await request.json()) as { ip_address?: string };
+        const ipAddress = String(payload.ip_address || "").trim();
         const createdAt = "2026-02-18T12:00:00Z";
         entries.push({ ipAddress, createdAt });
         return HttpResponse.json({ ipAddress, createdAt });

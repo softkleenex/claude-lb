@@ -68,7 +68,7 @@ describe("useAccounts", () => {
       accountId: firstAccountId as string,
     });
     expect(usageResetBody).toEqual({
-      redeemRequestId: expect.any(String),
+      redeem_request_id: expect.any(String),
     });
     const routingPolicyResult = await result.current.routingPolicyMutation.mutateAsync({
       accountId: firstAccountId as string,
@@ -163,7 +163,7 @@ describe("useAccounts", () => {
 
     expect(usageResetBodies).toHaveLength(2);
     expect(usageResetBodies[0]).toEqual({
-      redeemRequestId: expect.any(String),
+      redeem_request_id: expect.any(String),
     });
     expect(usageResetBodies[1]).toEqual(usageResetBodies[0]);
   });
@@ -200,10 +200,10 @@ describe("useAccounts", () => {
 
     expect(usageResetBodies).toHaveLength(2);
     expect(usageResetBodies[0]).toEqual({
-      redeemRequestId: expect.any(String),
+      redeem_request_id: expect.any(String),
     });
     expect(usageResetBodies[1]).toEqual({
-      redeemRequestId: expect.any(String),
+      redeem_request_id: expect.any(String),
     });
     expect(usageResetBodies[1]).not.toEqual(usageResetBodies[0]);
   });

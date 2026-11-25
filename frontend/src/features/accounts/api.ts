@@ -141,6 +141,8 @@ export function exportAccountAuth(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/auth`,
     AccountAuthExportResponseSchema,
+    // The nested auth.json payloads use their own key names (e.g. `id_token`); keep them.
+    { rawKeys: true },
   );
 }
 

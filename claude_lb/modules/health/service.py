@@ -266,8 +266,11 @@ async def unsupported_accounts(session: AsyncSession, model: str) -> set[str]:
     return synced - supporting
 
 
+RETENTION_INTERVAL_SECONDS = 6 * 3600
+
+
 class Scheduler:
-    """Runs the probe and sync loops for the lifetime of the app."""
+    """Runs the probe, sync and retention loops for the lifetime of the app."""
 
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -278,6 +281,7 @@ class Scheduler:
         self._tasks = [
             asyncio.create_task(self._loop("health probe", self._probe_tick), name="clb-health"),
             asyncio.create_task(self._loop("model sync", self._sync_tick), name="clb-model-sync"),
+            asyncio.create_task(self._loop("retention", self._retention_tick), name="clb-retention"),
         ]
 
     async def stop(self) -> None:
@@ -331,3 +335,13 @@ class Scheduler:
         if counts:
             logger.info("model catalog synced: %s", counts)
         return runtime.model_sync_interval_seconds
+
+    async def _retention_tick(self) -> int:
+        # Imported lazily: the usage module pulls in the proxy stack.
+        from claude_lb.modules.usage.api import prune_request_logs
+
+        async with session_scope() as session:
+            pruned = await prune_request_logs(session)
+        if pruned:
+            logger.info("pruned %d request log rows past retention", pruned)
+        return RETENTION_INTERVAL_SECONDS

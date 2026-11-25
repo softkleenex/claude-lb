@@ -16,48 +16,41 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { changePassword } from "@/features/auth/api";
+import { setPassword } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { PasswordChangeRequestSchema } from "@/features/auth/schemas";
+import { PasswordChangeFormSchema, type PasswordChangeForm } from "@/features/auth/schemas";
 import { getErrorMessage } from "@/utils/errors";
 
 export type PasswordChangeDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  disabled?: boolean;
 };
 
-export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: PasswordChangeDialogProps) {
+/**
+ * Rotation: `POST /api/auth/password {password, current_password}`. The server ends
+ * every other session and hands this browser a fresh cookie.
+ */
+export function PasswordChangeDialog({ open, onOpenChange }: PasswordChangeDialogProps) {
   const { t } = useTranslation();
-  const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
+  const refreshSession = useAuthStore((s) => s.refreshSession);
 
-  const resolveValidationMessage = (message?: string): string | undefined => {
-    if (!message) {
-      return undefined;
-    }
-    const translated = t(message);
-    return translated === message ? message : translated;
-  };
-
-  const form = useForm({
-    resolver: zodResolver(PasswordChangeRequestSchema),
-    defaultValues: { currentPassword: "", newPassword: "" },
+  const form = useForm<PasswordChangeForm>({
+    resolver: zodResolver(PasswordChangeFormSchema),
+    defaultValues: { currentPassword: "", newPassword: "", confirmPassword: "" },
   });
-
   const busy = form.formState.isSubmitting;
-  const lock = busy || disabled || !passwordManagementEnabled;
 
   useEffect(() => {
     if (!open) {
       form.reset();
-      form.clearErrors();
     }
   }, [open, form]);
 
-  const handleSubmit = async (values: { currentPassword: string; newPassword: string }) => {
+  const handleSubmit = async (values: PasswordChangeForm) => {
     form.clearErrors("root");
     try {
-      await changePassword(values);
+      await setPassword({ password: values.newPassword, currentPassword: values.currentPassword });
+      await refreshSession();
       toast.success(t("settings.password.toasts.changed"));
       onOpenChange(false);
     } catch (caught) {
@@ -80,24 +73,20 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
             <FormField
               control={form.control}
               name="currentPassword"
-              render={({ field, fieldState }) => (
+              render={({ field }) => (
                 <FormItem>
                   <FormLabel>{t("settings.password.changeDialog.currentLabel")}</FormLabel>
                   <FormControl>
-                    <Input {...field} type="password" autoComplete="current-password" />
+                    <Input {...field} type="password" autoComplete="current-password" autoFocus />
                   </FormControl>
-                  {fieldState.error?.message ? (
-                    <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
-                  ) : (
-                    <FormMessage />
-                  )}
+                  <FormMessage />
                 </FormItem>
               )}
             />
             <FormField
               control={form.control}
               name="newPassword"
-              render={({ field, fieldState }) => (
+              render={({ field }) => (
                 <FormItem>
                   <FormLabel>{t("settings.password.changeDialog.newLabel")}</FormLabel>
                   <FormControl>
@@ -105,14 +94,23 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
                       {...field}
                       type="password"
                       autoComplete="new-password"
-                      placeholder={t("settings.password.changeDialog.newPlaceholder")}
+                      placeholder={t("settings.password.setupDialog.passwordPlaceholder")}
                     />
                   </FormControl>
-                  {fieldState.error?.message ? (
-                    <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage>
-                  ) : (
-                    <FormMessage />
-                  )}
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="confirmPassword"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t("settings.password.setupDialog.confirmLabel")}</FormLabel>
+                  <FormControl>
+                    <Input {...field} type="password" autoComplete="new-password" />
+                  </FormControl>
+                  <FormMessage />
                 </FormItem>
               )}
             />
@@ -120,7 +118,7 @@ export function PasswordChangeDialog({ open, onOpenChange, disabled = false }: P
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
                 {t("common.cancel")}
               </Button>
-              <Button type="submit" disabled={lock}>
+              <Button type="submit" disabled={busy}>
                 {t("settings.password.changeDialog.submit")}
               </Button>
             </DialogFooter>

@@ -1,102 +1,71 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { useSettings, useTelemetryConsent, useTelemetryPreview } from "@/features/settings/hooks/use-settings";
+import { useSettings } from "@/features/settings/hooks/use-settings";
+import { getMockSettings } from "@/test/mocks/handlers";
 
-function createTestQueryClient(): QueryClient {
-  return new QueryClient({
-    defaultOptions: {
-      queries: {
-        retry: false,
-        gcTime: 0,
-      },
-    },
+function createWrapper() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-}
-
-function createWrapper(queryClient: QueryClient) {
   return function Wrapper({ children }: PropsWithChildren) {
     return createElement(QueryClientProvider, { client: queryClient }, children);
   };
 }
 
 describe("useSettings", () => {
-  it("loads settings and invalidates cache on update", async () => {
-    const queryClient = createTestQueryClient();
-    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const { result } = renderHook(() => useSettings(), {
-      wrapper: createWrapper(queryClient),
-    });
+  it("loads the envelope with camelCase keys", async () => {
+    const { result } = renderHook(() => useSettings(), { wrapper: createWrapper() });
 
     await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
-    expect(result.current.settingsQuery.data?.stickyThreadsEnabled).toBeTypeOf("boolean");
-    expect(result.current.settingsQuery.data?.openaiCacheAffinityMaxAgeSeconds).toBeTypeOf("number");
-    expect(result.current.settingsQuery.data?.dashboardSessionTtlSeconds).toBeTypeOf("number");
+    expect(result.current.settingsQuery.data?.settings).toMatchObject({
+      routingStrategy: "capacity_weighted",
+      stickySessionsEnabled: true,
+      stickyTtlSeconds: 900,
+      requestLogRetentionDays: 30,
+    });
+    expect(result.current.settingsQuery.data?.availableStrategies).toContain("least_used");
+  });
 
-    await result.current.updateSettingsMutation.mutateAsync({
-      stickyThreadsEnabled: false,
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      openaiCacheAffinityMaxAgeSeconds: 180,
-      dashboardSessionTtlSeconds: 31536000,
-      stickyReallocationBudgetThresholdPct: 95,
-      stickyReallocationPrimaryBudgetThresholdPct: 95,
-      stickyReallocationSecondaryBudgetThresholdPct: 100,
-      importWithoutOverwrite: true,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
+  it("patches only the changed key in snake_case and stores the response", async () => {
+    const { result } = renderHook(() => useSettings(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
+
+    await act(async () => {
+      await result.current.updateSettingsMutation.mutateAsync({ routingStrategy: "round_robin", maxAttempts: 5 });
     });
 
-    await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["settings", "detail"] });
+    expect(getMockSettings()).toMatchObject({ routing_strategy: "round_robin", max_attempts: 5 });
+    await waitFor(() =>
+      expect(result.current.settingsQuery.data?.settings).toMatchObject({ routingStrategy: "round_robin", maxAttempts: 5 }),
+    );
+  });
+
+  it("surfaces the server's validation error", async () => {
+    const { result } = renderHook(() => useSettings(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
+
+    await act(async () => {
+      await expect(result.current.updateSettingsMutation.mutateAsync({ maxAttempts: 99 })).rejects.toThrow(
+        "max_attempts must be between 1 and 10",
+      );
     });
   });
-});
 
-describe("useTelemetryConsent", () => {
-  it("loads consent and invalidates cache on decision", async () => {
-    const queryClient = createTestQueryClient();
-    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
-    const { result } = renderHook(() => useTelemetryConsent(), {
-      wrapper: createWrapper(queryClient),
+  it("resets to defaults", async () => {
+    const { result } = renderHook(() => useSettings(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
+    await act(async () => {
+      await result.current.updateSettingsMutation.mutateAsync({ stickySessionsEnabled: false });
     });
 
-    await waitFor(() => expect(result.current.telemetryConsentQuery.isSuccess).toBe(true));
-    expect(result.current.telemetryConsentQuery.data?.state).toBe("enabled");
-    expect(result.current.telemetryConsentQuery.data?.active).toBe(true);
-    // A persisted decision skips the expensive snapshot build entirely.
-    expect(result.current.telemetryConsentQuery.data?.preview).toBeNull();
-
-    await result.current.updateTelemetryConsentMutation.mutateAsync({ enabled: false });
-
-    await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["settings", "telemetry"] });
-    });
-  });
-});
-
-describe("useTelemetryPreview", () => {
-  it("stays idle until enabled, then loads the preview envelope", async () => {
-    const queryClient = createTestQueryClient();
-
-    const { result, rerender } = renderHook(({ enabled }) => useTelemetryPreview(enabled), {
-      wrapper: createWrapper(queryClient),
-      initialProps: { enabled: false },
+    await act(async () => {
+      await result.current.resetSettingsMutation.mutateAsync();
     });
 
-    expect(result.current.telemetryPreviewQuery.isFetching).toBe(false);
-    expect(result.current.telemetryPreviewQuery.data).toBeUndefined();
-
-    rerender({ enabled: true });
-
-    await waitFor(() => expect(result.current.telemetryPreviewQuery.isSuccess).toBe(true));
-    const preview = result.current.telemetryPreviewQuery.data?.preview;
-    expect(preview?.metrics.schema_version).toBe(1);
-    expect(preview?.instance_id).toBe("00000000-0000-4000-8000-000000000000");
-    expect(preview?.timestamp).toBe("2026-08-06T00:00:00Z");
+    expect(getMockSettings().sticky_sessions_enabled).toBe(true);
+    expect(result.current.settingsQuery.data?.settings.stickySessionsEnabled).toBe(true);
   });
 });

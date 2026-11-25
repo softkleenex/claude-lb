@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
@@ -38,16 +39,7 @@ vi.mock("@/features/accounts/hooks/use-oauth", () => ({
   })),
 }));
 
-vi.mock("@/features/settings/hooks/use-settings", () => ({
-  useSettings: vi.fn(() => ({
-    settingsQuery: {
-      data: {
-        showResetCreditBadges: true,
-        showResetCreditExpiryBadge: true,
-      },
-      error: null,
-    },
-  })),
+vi.mock("@/features/accounts/upstream-proxy-legacy", () => ({
   useUpstreamProxyAdmin: vi.fn(() => ({
     upstreamProxyQuery: { data: null, error: null },
     accountBindingMutation: {
@@ -89,6 +81,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 
 describe("AccountsPage", () => {
   beforeEach(() => {
+    useAuthStore.setState({ authenticated: true, canWrite: true });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
     vi.spyOn(Date, "now").mockReturnValue(
       new Date("2026-01-01T12:00:00.000Z").getTime(),

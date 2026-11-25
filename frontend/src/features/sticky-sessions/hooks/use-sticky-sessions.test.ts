@@ -127,8 +127,8 @@ describe("useStickySessions", () => {
     });
 
     await waitFor(() => {
-      expect(seenUrl).toContain("accountQuery=sticky-a");
-      expect(seenUrl).toContain("keyQuery=thread_123");
+      expect(seenUrl).toContain("account_query=sticky-a");
+      expect(seenUrl).toContain("key_query=thread_123");
     });
 
     act(() => {
@@ -141,8 +141,8 @@ describe("useStickySessions", () => {
     });
 
     await waitFor(() => {
-      expect(seenUrl).toContain("sortBy=key");
-      expect(seenUrl).toContain("sortDir=asc");
+      expect(seenUrl).toContain("sort_by=key");
+      expect(seenUrl).toContain("sort_dir=asc");
     });
   });
 

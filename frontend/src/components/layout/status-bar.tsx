@@ -1,92 +1,50 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
+import { ArrowRightLeft, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { getDashboardOverview } from "@/features/dashboard/api";
-import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
-import { getServiceReadiness } from "@/features/health/api";
-import { getRuntimeVersion } from "@/features/runtime/api";
-import { getSettings } from "@/features/settings/api";
+import { usePoolStatus } from "@/features/accounts/pool-status";
+import { getHealth, getServiceReadiness } from "@/features/health/api";
+import { useSettingsQuery } from "@/features/settings/hooks/use-settings";
+import { routingStrategyLabelKey } from "@/features/settings/routing-labels";
+import type { RuntimeSettings } from "@/features/settings/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { formatTimeLong } from "@/utils/formatters";
 
 const GITHUB_REPOSITORY_URL = "https://github.com/softkleenex/claude-lb";
 const STATUS_REFRESH_INTERVAL_MS = 60_000;
-const USAGE_FRESHNESS_THRESHOLD_MS = 60_000;
+/** Fallback when settings are unavailable; otherwise two probe intervals plus slack. */
+const DEFAULT_USAGE_FRESHNESS_MS = 5 * 60_000;
 export const STATUS_BAR_DEFAULT_HEIGHT_PX = 40;
 
 export interface StatusBarProps {
   onHeightChange?: (height: number) => void;
 }
 
-type RoutingStrategy =
-  | "usage_weighted"
-  | "round_robin"
-  | "capacity_weighted"
-  | "relative_availability"
-  | "fill_first"
-  | "single_account"
-  | "sequential_drain"
-  | "reset_drain";
-
-const ROUTING_STRATEGY_LABEL_KEYS: Record<RoutingStrategy, string> = {
-  usage_weighted: "settings.routing.strategy.usageWeighted",
-  round_robin: "settings.routing.strategy.roundRobin",
-  capacity_weighted: "settings.routing.strategy.capacityWeighted",
-  relative_availability: "settings.routing.strategy.relativeAvailability",
-  fill_first: "settings.routing.strategy.fillFirst",
-  single_account: "settings.routing.strategy.singleAccount",
-  sequential_drain: "settings.routing.strategy.sequentialDrain",
-  reset_drain: "settings.routing.strategy.resetDrain",
-};
-
-const EARLY_RESET_STRATEGIES: ReadonlySet<RoutingStrategy> = new Set([
-  "usage_weighted",
-  "capacity_weighted",
-  "fill_first",
-]);
-
-function getRoutingLabel(
-  t: TFunction,
-  strategy: RoutingStrategy,
-  sticky: boolean,
-  preferEarlier: boolean,
-  preferEarlierWindow: "primary" | "secondary",
-): string {
-  const strategyLabel = t(ROUTING_STRATEGY_LABEL_KEYS[strategy]);
-  const stickyLabel = t("statusBar.routingLabels.stickyThreads");
-  const stickyShortLabel = t("statusBar.routingLabels.sticky");
-  const supportsEarlyReset = EARLY_RESET_STRATEGIES.has(strategy);
-  const showEarlyReset = preferEarlier && supportsEarlyReset;
-  if (strategy === "single_account") {
-    return strategyLabel;
-  }
-  const earlyResetLabel =
-    preferEarlierWindow === "secondary"
-      ? t("statusBar.routingLabels.earlyWeeklyReset")
-      : t("statusBar.routingLabels.earlyFiveHourReset");
-  if (sticky && showEarlyReset) {
-    return t("statusBar.routingLabels.withStickyAndEarlyReset", {
-      strategy: strategyLabel,
-      sticky: stickyShortLabel,
-      reset: earlyResetLabel,
-    });
-  }
-  if (sticky) {
+function getRoutingLabel(t: TFunction, settings: Pick<RuntimeSettings, "routingStrategy" | "stickySessionsEnabled">): string {
+  const key = routingStrategyLabelKey(settings.routingStrategy);
+  const strategyLabel = key ? t(key) : settings.routingStrategy;
+  // `single_account` ignores affinity on the server, so "+ sticky" would be misleading.
+  if (settings.stickySessionsEnabled && settings.routingStrategy !== "single_account") {
     return t("statusBar.routingLabels.withSticky", {
       strategy: strategyLabel,
-      sticky: stickyLabel,
-    });
-  }
-  if (showEarlyReset) {
-    return t("statusBar.routingLabels.withEarlyReset", {
-      strategy: strategyLabel,
-      reset: earlyResetLabel,
+      sticky: t("statusBar.routingLabels.sticky"),
     });
   }
   return strategyLabel;
+}
+
+/**
+ * Usage freshness: claude-lb refreshes an account's quota from the response headers of
+ * every proxied request and from the periodic health probe. "Synced" means some account
+ * was observed within two probe intervals.
+ */
+function usageFreshnessThresholdMs(settings: RuntimeSettings | undefined): number {
+  if (!settings?.healthProbeEnabled) {
+    return DEFAULT_USAGE_FRESHNESS_MS;
+  }
+  return Math.max(DEFAULT_USAGE_FRESHNESS_MS, settings.healthProbeIntervalSeconds * 2 * 1000 + 60_000);
 }
 
 export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
@@ -99,62 +57,40 @@ export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
     refetchIntervalInBackground: false,
     retry: false,
   });
-  const { data: lastSyncAt = null } = useQuery({
-    queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
-    queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
-    refetchInterval: STATUS_REFRESH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
-    select: (data) => data.lastSyncAt,
-  });
-
-  const { data: settings } = useQuery({
-    queryKey: ["settings", "detail"],
-    queryFn: getSettings,
-  });
-  const { data: runtimeVersion } = useQuery({
-    queryKey: ["runtime", "version"],
-    queryFn: getRuntimeVersion,
+  const { data: health } = useQuery({
+    queryKey: ["health", "live"],
+    queryFn: getHealth,
     retry: false,
-    staleTime: 6 * 60 * 60 * 1000,
+    staleTime: 60 * 60 * 1000,
   });
+  const { data: pool } = usePoolStatus();
+  const { data: settingsEnvelope } = useSettingsQuery();
+  const settings = settingsEnvelope?.settings;
+
+  const lastSyncAt = pool?.lastQuotaObservedAt ?? null;
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
-  const lastSync = formatTimeLong(lastSyncAt, dateDisplayFormat);
+  const lastSync = formatTimeLong(lastSyncAt === null ? null : new Date(lastSyncAt).toISOString(), dateDisplayFormat);
+  const freshnessMs = usageFreshnessThresholdMs(settings);
   const [isUsageSynced, setIsUsageSynced] = useState(false);
   useEffect(() => {
     function check() {
-      setIsUsageSynced(
-        lastSyncAt
-          ? Date.now() - new Date(lastSyncAt).getTime() < USAGE_FRESHNESS_THRESHOLD_MS
-          : false,
-      );
+      setIsUsageSynced(lastSyncAt !== null && Date.now() - lastSyncAt < freshnessMs);
     }
     check();
     const id = setInterval(check, 10_000);
     return () => clearInterval(id);
-  }, [lastSyncAt]);
+  }, [lastSyncAt, freshnessMs]);
+
   const serviceReadiness = readinessQuery.isPending
     ? "checking"
     : !readinessQuery.isError && readinessQuery.data?.status === "ok"
       ? "ready"
       : "notReady";
   const serviceStatusLabel = t(`statusBar.${serviceReadiness}`);
-  const usageStatusLabel = t(isUsageSynced ? "statusBar.synced" : "statusBar.stale");
-
-  const routingLabel = settings
-    ? getRoutingLabel(
-        t,
-        settings.routingStrategy,
-        settings.stickyThreadsEnabled,
-        settings.preferEarlierResetAccounts,
-        settings.preferEarlierResetWindow,
-      )
-    : "—";
-  const currentVersion = runtimeVersion?.currentVersion ?? __APP_VERSION__;
-  const latestVersion = runtimeVersion?.latestVersion ?? null;
-  const showUpdateAvailable = runtimeVersion?.updateAvailable === true && latestVersion;
-  const updateLabel = latestVersion
-    ? t("statusBar.updateAvailableWithVersion", { version: latestVersion })
-    : t("statusBar.updateAvailable");
+  const usageStatusLabel =
+    lastSyncAt === null ? t("statusBar.neverSynced") : t(isUsageSynced ? "statusBar.synced" : "statusBar.stale");
+  const routingLabel = settings ? getRoutingLabel(t, settings) : "—";
+  const currentVersion = health?.version ?? readinessQuery.data?.version ?? __APP_VERSION__;
 
   useLayoutEffect(() => {
     const footer = footerRef.current;
@@ -190,19 +126,18 @@ export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
                     : "bg-red-500"
               }`}
             />
-            <span className="font-medium">{t("statusBar.serviceReady")}</span>{" "}
-            <span>{serviceStatusLabel}</span>
+            <span className="font-medium">{t("statusBar.serviceReady")}</span> <span>{serviceStatusLabel}</span>
           </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span
-              aria-hidden="true"
-              className={`h-1.5 w-1.5 rounded-full ${
-                isUsageSynced ? "bg-emerald-500" : "bg-amber-500"
-              }`}
-            />
-            <span className="font-medium">{t("statusBar.usageSynced")}</span>{" "}
-            <span>{usageStatusLabel}</span> · {lastSync.time}
-          </span>
+          {pool && pool.total > 0 ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className={`h-1.5 w-1.5 rounded-full ${isUsageSynced ? "bg-emerald-500" : "bg-amber-500"}`}
+              />
+              <span className="font-medium">{t("statusBar.usageSynced")}</span> <span>{usageStatusLabel}</span>
+              {lastSyncAt !== null ? <> · {lastSync.time}</> : null}
+            </span>
+          ) : null}
           <span className="inline-flex items-center gap-1.5">
             <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />
             <span className="font-medium">{t("statusBar.routing")}</span> {routingLabel}
@@ -210,18 +145,6 @@ export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
           <span className="inline-flex items-center gap-1.5">
             <Tag className="h-3 w-3" aria-hidden="true" />
             <span className="font-medium">{t("statusBar.version")}</span> {currentVersion}
-            {showUpdateAvailable ? (
-              <a
-                aria-label={updateLabel}
-                className="inline-flex h-4 w-4 items-center justify-center rounded-full text-amber-500 transition-colors hover:text-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 focus-visible:ring-offset-2"
-                href={runtimeVersion.releaseUrl}
-                rel="noreferrer"
-                target="_blank"
-                title={updateLabel}
-              >
-                <ArrowUpCircle className="h-3.5 w-3.5" aria-hidden="true" />
-              </a>
-            ) : null}
           </span>
         </div>
         <a

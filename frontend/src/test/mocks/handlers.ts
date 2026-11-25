@@ -1,6 +1,8 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import { camelizeKeys, snakeToCamel } from "@/lib/casing";
+
 import {
   LIMIT_TYPES,
   LIMIT_WINDOWS,
@@ -19,10 +21,10 @@ import {
   createApiKeyUsage7Day,
   createConversationDetails,
   createConversationsResponse,
-  createDashboardAuthSession,
+  createAuthStatus,
   createDashboardOverview,
   createDashboardProjections,
-  createDashboardSettings,
+  createRuntimeSettings,
   createDefaultAccounts,
   createDefaultApiKeys,
   createDefaultConversations,
@@ -35,17 +37,18 @@ import {
   createQuotaPlannerSettings,
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
-  createTelemetryConsent,
-  createTelemetrySnapshotEnvelope,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
-  type DashboardAuthSession,
-  type DashboardSettings,
+  type AuthStatusWire,
+  MOCK_BOOTSTRAP_TOKEN,
+  MOCK_DASHBOARD_PASSWORD,
+  MOCK_TOTP_CODE,
+  ROUTING_STRATEGIES_WIRE,
+  type RuntimeSettingsWire,
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
   type RequestLogEntry,
-  type TelemetryConsent,
   type UpstreamProxyAdmin,
 } from "@/test/mocks/factories";
 
@@ -95,62 +98,8 @@ const AccountAliasPayloadSchema = z.object({
   alias: z.string().max(255).nullable(),
 });
 
-const TelemetryConsentPayloadSchema = z.object({
-  enabled: z.boolean(),
-});
-
 const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
-});
-
-const SettingsPayloadSchema = z.looseObject({
-  stickyThreadsEnabled: z.boolean().optional(),
-  upstreamStreamTransport: z
-    .enum(["default", "auto", "http", "websocket"])
-    .optional(),
-  httpDownstreamTransportPolicy: z
-    .enum(["smart", "always_http", "always_websocket", "pinned"])
-    .optional(),
-  upstreamProxyRoutingEnabled: z.boolean().optional(),
-  upstreamProxyDefaultPoolId: z.string().nullable().optional(),
-  preferEarlierResetAccounts: z.boolean().optional(),
-  preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
-  showResetCreditBadges: z.boolean().optional(),
-  autoRedeemResetCreditsBeforeExpiry: z.boolean().optional(),
-  showResetCreditExpiryBadge: z.boolean().optional(),
-  routingStrategy: z
-    .enum([
-      "usage_weighted",
-      "round_robin",
-      "capacity_weighted",
-      "relative_availability",
-      "fill_first",
-      "sequential_drain",
-      "reset_drain",
-      "single_account",
-    ])
-    .optional(),
-  relativeAvailabilityPower: z.number().positive().optional(),
-  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
-  singleAccountId: z.string().nullable().optional(),
-  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
-  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
-  stickyReallocationPrimaryBudgetThresholdPct: z
-    .number()
-    .min(0)
-    .max(100)
-    .optional(),
-  stickyReallocationSecondaryBudgetThresholdPct: z
-    .number()
-    .min(0)
-    .max(100)
-    .optional(),
-  importWithoutOverwrite: z.boolean().optional(),
-  totpRequiredOnLogin: z.boolean().optional(),
-  totpConfigured: z.boolean().optional(),
-  apiKeyAuthEnabled: z.boolean().optional(),
-  limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
-  hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -207,12 +156,31 @@ const AutomationUpdatePayloadSchema = z
 
 // ── Helpers ──
 
+// LEGACY: the codex-lb handlers below model codex-lb's camelCase API. The api-client now
+// sends snake_case bodies and query keys (claude-lb's wire format), so these helpers
+// convert requests back before the legacy handlers read them. Handlers for claude-lb
+// endpoints must NOT use them: they read the snake_case request as the real backend does.
+// Remove once Steps C–G have replaced every codex-lb handler.
+function legacyRequestUrl(request: Request): URL {
+  const url = new URL(request.url);
+  const converted = new URLSearchParams();
+  for (const [key, value] of url.searchParams) {
+    converted.append(snakeToCamel(key), value);
+  }
+  url.search = converted.toString();
+  return url;
+}
+
+async function legacyJson(request: Request): Promise<unknown> {
+  return camelizeKeys(await request.json());
+}
+
 async function parseJsonBody<T>(
   request: Request,
   schema: z.ZodType<T>,
 ): Promise<T | null> {
   try {
-    const raw: unknown = await request.json();
+    const raw: unknown = await legacyJson(request);
     const result = schema.safeParse(raw);
     return result.success ? result.data : null;
   } catch {
@@ -225,9 +193,12 @@ type MockState = {
   requestLogs: RequestLogEntry[];
   conversations: ConversationEntry[];
   conversationDetails: ConversationDetails[];
-  authSession: DashboardAuthSession;
-  settings: DashboardSettings;
-  telemetryConsent: TelemetryConsent;
+  authStatus: AuthStatusWire;
+  /** Password the mock auth endpoints accept once `authStatus.configured` is true. */
+  password: string | null;
+  totpEnabled: boolean;
+  totpPending: boolean;
+  settings: RuntimeSettingsWire;
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
   upstreamProxyAdmin: UpstreamProxyAdmin;
@@ -317,9 +288,11 @@ function createInitialState(): MockState {
         dominantUseragentGroup: "codex",
       }),
     ],
-    authSession: createDashboardAuthSession(),
-    settings: createDashboardSettings(),
-    telemetryConsent: createTelemetryConsent(),
+    authStatus: createAuthStatus(),
+    password: MOCK_DASHBOARD_PASSWORD,
+    totpEnabled: false,
+    totpPending: false,
+    settings: createRuntimeSettings(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     upstreamProxyAdmin: createUpstreamProxyAdmin(),
@@ -333,6 +306,21 @@ function createInitialState(): MockState {
 }
 
 let state: MockState = createInitialState();
+
+/**
+ * Adjusts the claude-lb auth mock for a test, e.g. `{ configured: false, authenticated: false }`
+ * for a remote first visit, or `{ authenticated: false, totpEnabled: true }` for a TOTP sign-in.
+ */
+export function setMockAuth(overrides: Partial<AuthStatusWire> & { password?: string | null; totpEnabled?: boolean }): void {
+  const { password, totpEnabled, ...status } = overrides;
+  if (password !== undefined) state.password = password;
+  if (totpEnabled !== undefined) state.totpEnabled = totpEnabled;
+  state.authStatus = { ...state.authStatus, ...status, totp_enabled: state.totpEnabled };
+}
+
+export function getMockSettings(): RuntimeSettingsWire {
+  return state.settings;
+}
 
 export function resetMockState(): void {
   state = createInitialState();
@@ -705,25 +693,185 @@ function listFilteredAutomationRuns(url: URL) {
 	});
 }
 
-export const handlers = [
-  http.get("/health", () => {
-    return HttpResponse.json({ status: "ok" });
+// ── claude-lb endpoints ──
+// These mirror the real FastAPI backend: snake_case bodies, `{"detail": ...}` errors,
+// 204 for bodiless success, 401 from the management-auth dependency.
+
+const SETTINGS_BOUNDS: Record<string, [number, number]> = {
+  max_attempts: [1, 10],
+  sticky_ttl_seconds: [0, 24 * 3600],
+  health_probe_interval_seconds: [30, 3600],
+  model_sync_interval_seconds: [300, 24 * 3600],
+  request_log_retention_days: [1, 3650],
+};
+
+function detail(status: number, message: unknown, headers?: Record<string, string>) {
+  return HttpResponse.json({ detail: message }, { status, headers });
+}
+
+/** `require_management_auth`: 401 unless the mock session is authenticated. */
+function managementAuthError(): Response | null {
+  if (state.authStatus.authenticated) {
+    return null;
+  }
+  return detail(401, state.authStatus.reason || "sign in required", { "x-claude-lb-auth": "required" });
+}
+
+async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const raw: unknown = await request.json();
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function settingsEnvelope() {
+  return { settings: state.settings, available_strategies: [...ROUTING_STRATEGIES_WIRE] };
+}
+
+const claudeLbHandlers = [
+  http.get("/health", () => HttpResponse.json({ status: "ok", version: "0.6.1" })),
+
+  http.get("/health/ready", () => HttpResponse.json({ status: "ok", version: "0.6.1" })),
+
+  http.get("/api/auth/status", () => HttpResponse.json(state.authStatus)),
+
+  http.post("/api/auth/login", async ({ request }) => {
+    const body = await readJsonObject(request);
+    if (!state.authStatus.configured) {
+      return detail(409, "dashboard authentication is not configured");
+    }
+    const passwordOk = body.password === state.password;
+    const totpOk = !state.totpEnabled || body.totp_code === MOCK_TOTP_CODE;
+    if (!passwordOk || !totpOk) {
+      return detail(401, "invalid credentials");
+    }
+    state.authStatus = { ...state.authStatus, authenticated: true, reason: "", totp_enabled: state.totpEnabled };
+    return HttpResponse.json(state.authStatus);
   }),
 
-  http.get("/health/ready", () => {
-    return HttpResponse.json({ status: "ok" });
+  http.post("/api/auth/logout", () => {
+    // Loopback without a password stays trusted after logout, as on the real server.
+    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured };
+    return new HttpResponse(null, { status: 204 });
   }),
 
-  http.get("/api/runtime/version", () => {
+  http.post("/api/auth/password", async ({ request }) => {
+    if (!state.authStatus.authenticated) {
+      const bootstrapOk =
+        !state.authStatus.configured && request.headers.get("x-claude-lb-bootstrap") === MOCK_BOOTSTRAP_TOKEN;
+      if (!bootstrapOk) {
+        return detail(401, state.authStatus.reason || "sign in required", { "x-claude-lb-auth": "required" });
+      }
+    }
+    const body = await readJsonObject(request);
+    const password = typeof body.password === "string" ? body.password : "";
+    if (password.length < 8) {
+      return detail(422, [
+        { type: "string_too_short", loc: ["body", "password"], msg: "String should have at least 8 characters" },
+      ]);
+    }
+    if (state.authStatus.configured && body.current_password !== state.password) {
+      return detail(403, "current password is incorrect");
+    }
+    state.password = password;
+    state.authStatus = {
+      ...state.authStatus,
+      configured: true,
+      authenticated: true,
+      reason: "",
+      totp_enabled: state.totpEnabled,
+    };
+    return HttpResponse.json(state.authStatus);
+  }),
+
+  http.post("/api/auth/totp/enroll", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    if (!state.authStatus.configured) {
+      return detail(409, "set a password before enabling TOTP");
+    }
+    state.totpPending = true;
     return HttpResponse.json({
-      currentVersion: "1.19.0",
-      latestVersion: "1.19.0",
-      updateAvailable: false,
-      checkedAt: "2026-05-26T00:00:00Z",
-      source: "github",
-      releaseUrl: "https://github.com/softkleenex/claude-lb/releases/latest",
+      secret: "JBSWY3DPEHPK3PXP",
+      provisioning_uri: "otpauth://totp/claude-lb:dashboard?secret=JBSWY3DPEHPK3PXP&issuer=claude-lb",
     });
   }),
+
+  http.post("/api/auth/totp/confirm", async ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    if (!state.totpPending) {
+      return detail(409, "no TOTP enrollment in progress");
+    }
+    if (body.code !== MOCK_TOTP_CODE) {
+      return detail(403, "that code did not match");
+    }
+    state.totpPending = false;
+    state.totpEnabled = true;
+    state.authStatus = { ...state.authStatus, totp_enabled: true };
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.delete("/api/auth/totp", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    state.totpEnabled = false;
+    state.totpPending = false;
+    state.authStatus = { ...state.authStatus, totp_enabled: false };
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/auth/sessions/revoke-all", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured };
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.get("/api/settings", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json(settingsEnvelope());
+  }),
+
+  http.patch("/api/settings", async ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const changes = Object.fromEntries(Object.entries(body).filter(([, value]) => value !== null));
+    if (Object.keys(changes).length === 0) {
+      return detail(400, "no settings supplied");
+    }
+    const unknown = Object.keys(changes).filter((key) => !(key in state.settings));
+    if (unknown.length > 0) {
+      return detail(422, unknown.map((key) => ({ type: "extra_forbidden", loc: ["body", key], msg: "Extra inputs are not permitted" })));
+    }
+    if (typeof changes.routing_strategy === "string" && !ROUTING_STRATEGIES_WIRE.includes(changes.routing_strategy)) {
+      return detail(422, `unknown routing strategy '${changes.routing_strategy}'`);
+    }
+    for (const [key, [min, max]] of Object.entries(SETTINGS_BOUNDS)) {
+      const value = changes[key];
+      if (typeof value === "number" && (value < min || value > max)) {
+        return detail(422, `${key} must be between ${min} and ${max}`);
+      }
+    }
+    state.settings = { ...state.settings, ...(changes as Partial<RuntimeSettingsWire>) };
+    return HttpResponse.json(settingsEnvelope());
+  }),
+
+  http.post("/api/settings/reset", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    state.settings = createRuntimeSettings();
+    return HttpResponse.json(settingsEnvelope());
+  }),
+];
+
+export const handlers = [
+  ...claudeLbHandlers,
 
   http.get("/api/dashboard/overview", () => {
     return HttpResponse.json(
@@ -738,7 +886,7 @@ export const handlers = [
   }),
 
   http.get("/api/request-logs", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const filtered = filterRequestLogs(url);
     const total = filtered.length;
     const limitRaw = Number(url.searchParams.get("limit") ?? 50);
@@ -754,7 +902,7 @@ export const handlers = [
   }),
 
   http.get("/api/request-logs/options", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const filtered = filterRequestLogs(url, {
       includeStatuses: false,
     });
@@ -768,7 +916,7 @@ export const handlers = [
   }),
 
   http.get("/api/conversations", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const search = (url.searchParams.get("search") || "").trim().toLowerCase();
     const filtered = state.conversations.filter((entry) => {
       if (search.length === 0) {
@@ -895,7 +1043,7 @@ export const handlers = [
           { status: 404 },
         );
       }
-      const body = await request.json().catch(() => ({}));
+      const body = await legacyJson(request).catch(() => ({}));
       const enabled =
         typeof body === "object" && body !== null && "enabled" in body
           ? Boolean((body as { enabled?: unknown }).enabled)
@@ -953,7 +1101,7 @@ export const handlers = [
         { status: 404 },
       );
     }
-    const payload = (await request.json()) as {
+    const payload = (await legacyJson(request)) as {
       securityWorkAuthorized?: boolean;
     };
     if (typeof payload.securityWorkAuthorized === "boolean") {
@@ -1173,36 +1321,6 @@ export const handlers = [
     return HttpResponse.json(createOauthCompleteResponse());
   }),
 
-  http.get("/api/settings", () => {
-    return HttpResponse.json(state.settings);
-  }),
-
-  http.get("/api/settings/telemetry", ({ request }) => {
-    // include_preview=true is the on-demand path: the envelope is attached
-    // regardless of consent state.
-    if (new URL(request.url).searchParams.get("include_preview") === "true") {
-      return HttpResponse.json({
-        ...state.telemetryConsent,
-        preview: createTelemetrySnapshotEnvelope(),
-      });
-    }
-    return HttpResponse.json(state.telemetryConsent);
-  }),
-
-  http.put("/api/settings/telemetry", async ({ request }) => {
-    const payload = await parseJsonBody(request, TelemetryConsentPayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(state.telemetryConsent);
-    }
-    state.telemetryConsent = createTelemetryConsent({
-      state: payload.enabled ? "enabled" : "disabled",
-      source: "persisted",
-      active: payload.enabled,
-      preview: null,
-    });
-    return HttpResponse.json(state.telemetryConsent);
-  }),
-
   http.get("/api/settings/upstream-proxy", () => {
     return HttpResponse.json(state.upstreamProxyAdmin);
   }),
@@ -1404,27 +1522,6 @@ export const handlers = [
     return HttpResponse.json(created);
   }),
 
-	http.post("/api/dashboard-auth/password/login", () => {
-		state.authSession = createDashboardAuthSession({
-			...state.authSession,
-			authenticated: !state.authSession.totpRequiredOnLogin,
-			role: "admin",
-			permissions: ["read", "write"],
-		});
-		return HttpResponse.json(state.authSession);
-	}),
-
-	http.post("/api/dashboard-auth/guest/login", () => {
-		state.authSession = createDashboardAuthSession({
-			...state.authSession,
-			authenticated: true,
-			role: "guest",
-			permissions: ["read"],
-			guestAccessEnabled: true,
-		});
-		return HttpResponse.json(state.authSession);
-	}),
-
   http.delete("/api/firewall/ips/:ipAddress", ({ params }) => {
     const ipAddress = decodeURIComponent(String(params.ipAddress));
     const exists = state.firewallEntries.some(
@@ -1446,40 +1543,6 @@ export const handlers = [
     HttpResponse.json(state.quotaPlannerSettings),
   ),
 
-	http.post("/api/dashboard-auth/guest/password", () => {
-		state.settings = createDashboardSettings({
-			...state.settings,
-			guestPasswordConfigured: true,
-		});
-		state.authSession = createDashboardAuthSession({
-			...state.authSession,
-			guestPasswordRequired: true,
-		});
-		return HttpResponse.json({ status: "ok" });
-	}),
-
-	http.delete("/api/dashboard-auth/guest/password", () => {
-		state.settings = createDashboardSettings({
-			...state.settings,
-			guestPasswordConfigured: false,
-		});
-		state.authSession = createDashboardAuthSession({
-			...state.authSession,
-			guestPasswordRequired: false,
-		});
-		return HttpResponse.json({ status: "ok" });
-	}),
-
-	http.delete("/api/dashboard-auth/password", () => {
-		state.authSession = createDashboardAuthSession({
-			authenticated: false,
-			passwordRequired: false,
-			totpRequiredOnLogin: false,
-			totpConfigured: false,
-		});
-		return HttpResponse.json({ status: "ok" });
-	}),
-
   http.put("/api/quota-planner/settings", async ({ request }) => {
     const payload = await parseJsonBody(
       request,
@@ -1496,7 +1559,7 @@ export const handlers = [
   }),
 
   http.get("/api/quota-planner/decisions", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const limit = Number(url.searchParams.get("limit") ?? "50");
     return HttpResponse.json(state.quotaPlannerDecisions.slice(0, limit));
   }),
@@ -1548,35 +1611,8 @@ export const handlers = [
     );
   }),
 
-  http.put("/api/settings", async ({ request }) => {
-    const payload = await parseJsonBody(request, SettingsPayloadSchema);
-    if (!payload) {
-      return HttpResponse.json(state.settings);
-    }
-    state.settings = createDashboardSettings({
-      ...state.settings,
-      ...payload,
-    });
-    if (
-      payload.upstreamProxyRoutingEnabled !== undefined ||
-      payload.upstreamProxyDefaultPoolId !== undefined
-    ) {
-      state.upstreamProxyAdmin = {
-        ...state.upstreamProxyAdmin,
-        routingEnabled:
-          payload.upstreamProxyRoutingEnabled ??
-          state.upstreamProxyAdmin.routingEnabled,
-        defaultPoolId:
-          payload.upstreamProxyDefaultPoolId !== undefined
-            ? payload.upstreamProxyDefaultPoolId
-            : state.upstreamProxyAdmin.defaultPoolId,
-      };
-    }
-    return HttpResponse.json(state.settings);
-  }),
-
   http.get("/api/sticky-sessions", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const staleOnly = url.searchParams.get("staleOnly") === "true";
     const accountQuery = (url.searchParams.get("accountQuery") ?? "")
       .trim()
@@ -1635,7 +1671,7 @@ export const handlers = [
     });
   }),
   http.get("/api/automations", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const filtered = listFilteredAutomationJobs(url);
     const total = filtered.length;
     const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
@@ -1649,7 +1685,7 @@ export const handlers = [
   }),
 
   http.get("/api/automations/options", ({ request }) => {
-    const filtered = listFilteredAutomationJobs(new URL(request.url));
+    const filtered = listFilteredAutomationJobs(legacyRequestUrl(request));
     const accountIds = [
       ...new Set(state.accounts.map((account) => account.accountId)),
     ].sort();
@@ -1770,7 +1806,7 @@ export const handlers = [
   }),
 
   http.get("/api/automations/runs", ({ request }) => {
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const filtered = listFilteredAutomationRuns(url);
     const total = filtered.length;
     const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
@@ -1784,7 +1820,7 @@ export const handlers = [
   }),
 
   http.get("/api/automations/runs/options", ({ request }) => {
-    const filtered = listFilteredAutomationRuns(new URL(request.url));
+    const filtered = listFilteredAutomationRuns(legacyRequestUrl(request));
     const accountIds = [
       ...new Set(state.accounts.map((account) => account.accountId)),
     ].sort();
@@ -1858,7 +1894,7 @@ export const handlers = [
         { status: 404 },
       );
     }
-    const url = new URL(request.url);
+    const url = legacyRequestUrl(request);
     const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 20));
     const all = state.automationRuns[automationId] ?? [];
     const items = all.slice(0, limit).map((run) => ({
@@ -1984,85 +2020,6 @@ export const handlers = [
     const deletedCount = state.stickySessions.length;
     state.stickySessions = [];
     return HttpResponse.json({ deletedCount });
-  }),
-
-  http.get("/api/dashboard-auth/session", () => {
-    return HttpResponse.json(state.authSession);
-  }),
-
-  http.post("/api/dashboard-auth/password/setup", () => {
-    state.authSession = createDashboardAuthSession({
-      authenticated: true,
-      passwordRequired: true,
-      totpRequiredOnLogin: false,
-      totpConfigured: state.authSession.totpConfigured,
-    });
-    return HttpResponse.json(state.authSession);
-  }),
-
-  http.post("/api/dashboard-auth/password/login", () => {
-    state.authSession = createDashboardAuthSession({
-      ...state.authSession,
-      authenticated: !state.authSession.totpRequiredOnLogin,
-    });
-    return HttpResponse.json(state.authSession);
-  }),
-
-  http.post("/api/dashboard-auth/password/change", () => {
-    return HttpResponse.json({ status: "ok" });
-  }),
-
-  http.delete("/api/dashboard-auth/password", () => {
-    state.authSession = createDashboardAuthSession({
-      authenticated: false,
-      passwordRequired: false,
-      totpRequiredOnLogin: false,
-      totpConfigured: false,
-    });
-    return HttpResponse.json({ status: "ok" });
-  }),
-
-  http.post("/api/dashboard-auth/totp/setup/start", () => {
-    return HttpResponse.json({
-      secret: "JBSWY3DPEHPK3PXP",
-      otpauthUri: "otpauth://totp/claude-lb?secret=JBSWY3DPEHPK3PXP",
-      qrSvgDataUri: "data:image/svg+xml;base64,PHN2Zy8+",
-    });
-  }),
-
-  http.post("/api/dashboard-auth/totp/setup/confirm", () => {
-    state.authSession = createDashboardAuthSession({
-      ...state.authSession,
-      totpConfigured: true,
-      authenticated: true,
-    });
-    return HttpResponse.json({ status: "ok" });
-  }),
-
-  http.post("/api/dashboard-auth/totp/verify", () => {
-    state.authSession = createDashboardAuthSession({
-      ...state.authSession,
-      authenticated: true,
-    });
-    return HttpResponse.json(state.authSession);
-  }),
-
-  http.post("/api/dashboard-auth/totp/disable", () => {
-    state.authSession = createDashboardAuthSession({
-      ...state.authSession,
-      totpConfigured: false,
-      totpRequiredOnLogin: false,
-      authenticated: true,
-    });
-    return HttpResponse.json({ status: "ok" });
-  }),
-
-  http.post("/api/dashboard-auth/logout", () => {
-    state.authSession = createDashboardAuthSession({
-      ...state.authSession,
-      authenticated: false,
-    });
-    return HttpResponse.json({ status: "ok" });
   }),
 
   http.get("/api/models", () => {

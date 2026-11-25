@@ -6,12 +6,12 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import case, delete, func, select
 
-from claude_lb.core.config import get_settings
 from claude_lb.core.pricing import cache_read_savings_usd
 from claude_lb.db.models import Account, QuotaHistory, RequestLog
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.proxy import load_balancer as lb
 from claude_lb.modules.proxy import quota as quota_mod
+from claude_lb.modules.settings import service as settings_service
 from claude_lb.modules.usage import reports, rollup
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
@@ -170,8 +170,12 @@ async def list_requests(
 
 
 async def prune_request_logs(session: SessionDep) -> int:
-    """Delete logs and quota snapshots past the retention window. Called from the startup task."""
-    days = get_settings().request_log_retention_days
+    """Delete logs and quota snapshots past the retention window.
+
+    Runs at startup and periodically from the scheduler. The window is the *runtime*
+    setting (dashboard-editable), which defaults to the env value.
+    """
+    days = (await settings_service.load(session, use_cache=False)).request_log_retention_days
     cutoff = datetime.now(UTC) - timedelta(days=days)
     result = await session.execute(delete(RequestLog).where(RequestLog.created_at < cutoff))
     await session.execute(delete(QuotaHistory).where(QuotaHistory.recorded_at < cutoff))

@@ -23,7 +23,7 @@ import {
   type AccountSortMode,
 } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
-import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
+import { useUpstreamProxyAdmin } from "@/features/accounts/upstream-proxy-legacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -54,7 +54,6 @@ export function AccountsPage() {
     routingPolicyMutation,
     exportAuthMutation,
   } = useAccounts();
-  const { settingsQuery } = useSettings();
   const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
   const canWrite = useAuthStore((state) => state.canWrite);
@@ -72,8 +71,9 @@ export function AccountsPage() {
     () => accountsQuery.data ?? [],
     [accountsQuery.data],
   );
-  const showResetCreditBadges = settingsQuery.data?.showResetCreditBadges ?? true;
-  const showResetCreditExpiryBadge = settingsQuery.data?.showResetCreditExpiryBadge ?? true;
+  // LEGACY (codex-lb reset credits; the settings toggles are gone). Step C removes these.
+  const showResetCreditBadges = true;
+  const showResetCreditExpiryBadge = true;
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const sortedAccounts = useMemo(
     () => sortAccountsForDisplay(accounts, quotaDisplay, accountSortMode),
@@ -141,7 +141,6 @@ export function AccountsPage() {
     getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
-    getErrorMessageOrNull(settingsQuery.error) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(accountBindingMutation.error) ||
     getErrorMessageOrNull(testEndpointMutation.error);

@@ -1,133 +1,86 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
 
-import {
-  getAuthSession,
-  loginGuest,
-  loginPassword,
-  logout as logoutRequest,
-  verifyTotp as verifyTotpRequest,
-} from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createDashboardAuthSession } from "@/test/mocks/factories";
+import { get } from "@/lib/api-client";
+import { MOCK_BOOTSTRAP_TOKEN, MOCK_DASHBOARD_PASSWORD, MOCK_TOTP_CODE } from "@/test/mocks/factories";
+import { setMockAuth } from "@/test/mocks/handlers";
+import { z } from "zod";
 
-vi.mock("@/features/auth/api", () => ({
-  getAuthSession: vi.fn(),
-  loginPassword: vi.fn(),
-  loginGuest: vi.fn(),
-  logout: vi.fn(),
-  verifyTotp: vi.fn(),
-}));
-
-const sessionBase = createDashboardAuthSession();
-
-function resetAuthStore(): void {
-  useAuthStore.setState({
-    passwordRequired: false,
-    authenticated: false,
-    totpRequiredOnLogin: false,
-    totpConfigured: false,
-    bootstrapRequired: false,
-    bootstrapTokenConfigured: false,
-    authMode: "standard",
-    passwordManagementEnabled: true,
-    passwordSessionActive: false,
-    role: "admin",
-    permissions: ["read", "write"],
-    guestAccessEnabled: false,
-    guestPasswordRequired: false,
-    canWrite: true,
-    adminLoginRequested: false,
-    loading: false,
-    initialized: false,
-    error: null,
-  });
-}
-
-describe("useAuthStore actions", () => {
+describe("useAuthStore", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    resetAuthStore();
+    useAuthStore.setState(useAuthStore.getInitialState());
   });
 
-  it("refreshSession updates auth state", async () => {
-    (getAuthSession as Mock).mockResolvedValue({
-      ...sessionBase,
-      authenticated: false,
-      totpRequiredOnLogin: true,
-    });
+  it("maps a signed-in status to an admin who can write", async () => {
+    await useAuthStore.getState().refreshSession();
+
+    const state = useAuthStore.getState();
+    expect(state.initialized).toBe(true);
+    expect(state.authenticated).toBe(true);
+    expect(state.passwordRequired).toBe(true);
+    expect(state.role).toBe("admin");
+    expect(state.canWrite).toBe(true);
+    expect(state.insecure).toBe(false);
+    expect(state.bootstrapRequired).toBe(false);
+  });
+
+  it("flags loopback without a password as insecure", async () => {
+    setMockAuth({ configured: false, authenticated: true, reason: "unprotected: no password set (loopback only)" });
 
     await useAuthStore.getState().refreshSession();
 
-    const next = useAuthStore.getState();
-    expect(next.initialized).toBe(true);
-    expect(next.authenticated).toBe(false);
-    expect(next.totpRequiredOnLogin).toBe(true);
-    expect(next.loading).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ authenticated: true, insecure: true, bootstrapRequired: false });
   });
 
-  it("login updates session state", async () => {
-    (loginPassword as Mock).mockResolvedValue(sessionBase);
+  it("requires the bootstrap token for a remote first visit", async () => {
+    setMockAuth({ configured: false, authenticated: false, password: null });
 
-    await useAuthStore.getState().login("secret-pass");
+    await useAuthStore.getState().refreshSession();
+    expect(useAuthStore.getState()).toMatchObject({ authenticated: false, bootstrapRequired: true, canWrite: false });
 
-    const next = useAuthStore.getState();
-    expect(loginPassword).toHaveBeenCalledWith({ password: "secret-pass" });
-    expect(next.authenticated).toBe(true);
-    expect(next.error).toBeNull();
+    await useAuthStore.getState().setupPassword("long-enough-pw", MOCK_BOOTSTRAP_TOKEN);
+    expect(useAuthStore.getState()).toMatchObject({ authenticated: true, passwordRequired: true, insecure: false });
   });
 
-  it("guest login stores read-only permissions", async () => {
-    (loginGuest as Mock).mockResolvedValue({
-      ...sessionBase,
-      role: "guest",
-      permissions: ["read"],
-      guestAccessEnabled: true,
-    });
+  it("treats auth disabled by config as insecure", async () => {
+    setMockAuth({ configured: false, authenticated: true, auth_enabled: false, reason: "auth disabled by config" });
 
-    await useAuthStore.getState().loginGuest("guest-pass");
+    await useAuthStore.getState().refreshSession();
 
-    const next = useAuthStore.getState();
-    expect(loginGuest).toHaveBeenCalledWith({ password: "guest-pass" });
-    expect(next.role).toBe("guest");
-    expect(next.canWrite).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ authEnabled: false, insecure: true, bootstrapRequired: false });
   });
 
-  it("logout clears auth and refreshes session", async () => {
-    useAuthStore.setState({
-      authenticated: true,
-      passwordRequired: true,
-      initialized: true,
-    });
+  it("logs in with password and TOTP, and keeps the error on failure", async () => {
+    setMockAuth({ authenticated: false, totpEnabled: true });
+    await useAuthStore.getState().refreshSession();
 
-    (logoutRequest as Mock).mockResolvedValue({ status: "ok" });
-    (getAuthSession as Mock).mockResolvedValue({
-      ...sessionBase,
-      authenticated: false,
-      totpRequiredOnLogin: false,
-    });
+    await expect(useAuthStore.getState().login(MOCK_DASHBOARD_PASSWORD, "000000")).rejects.toThrow(
+      "invalid credentials",
+    );
+    expect(useAuthStore.getState().error).toBe("auth.login.invalidCredentials");
+
+    await useAuthStore.getState().login(MOCK_DASHBOARD_PASSWORD, MOCK_TOTP_CODE);
+    expect(useAuthStore.getState()).toMatchObject({ authenticated: true, totpEnabled: true, error: null });
+  });
+
+  it("logs out and re-reads the status", async () => {
+    await useAuthStore.getState().refreshSession();
 
     await useAuthStore.getState().logout();
 
-    const next = useAuthStore.getState();
-    expect(logoutRequest).toHaveBeenCalledTimes(1);
-    expect(getAuthSession).toHaveBeenCalledTimes(1);
-    expect(next.authenticated).toBe(false);
-    expect(next.loading).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ authenticated: false, passwordRequired: true, canWrite: false });
   });
 
-  it("verifyTotp updates state transitions", async () => {
-    (verifyTotpRequest as Mock).mockResolvedValue({
-      ...sessionBase,
-      authenticated: true,
-      totpRequiredOnLogin: false,
+  it("drops back to sign-in when any request answers 401", async () => {
+    await useAuthStore.getState().refreshSession();
+    expect(useAuthStore.getState().authenticated).toBe(true);
+
+    setMockAuth({ authenticated: false });
+    await expect(get("/api/settings", z.unknown())).rejects.toMatchObject({ status: 401 });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({ authenticated: false, passwordRequired: true });
     });
-
-    await useAuthStore.getState().verifyTotp("123456");
-
-    const next = useAuthStore.getState();
-    expect(verifyTotpRequest).toHaveBeenCalledWith({ code: "123456" });
-    expect(next.authenticated).toBe(true);
-    expect(next.totpRequiredOnLogin).toBe(false);
-    expect(next.loading).toBe(false);
   });
 });

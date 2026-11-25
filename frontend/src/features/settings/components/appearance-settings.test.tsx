@@ -78,8 +78,8 @@ describe("AppearanceSettings", () => {
 
     render(<AppearanceSettings />);
 
-    const button5h = screen.getByRole("button", { name: "5H" });
-    const buttonWeekly = screen.getByRole("button", { name: "W" });
+    const button5h = screen.getByRole("button", { name: "5h" });
+    const buttonWeekly = screen.getByRole("button", { name: "7d" });
     const buttonBoth = screen.getByRole("button", { name: "Both" });
 
     expect(buttonBoth).toHaveAttribute("aria-pressed", "true");

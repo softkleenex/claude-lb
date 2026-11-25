@@ -20,7 +20,7 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 
 ## Steps
 - [x] A. Scaffold: copy frontend, npm, outDir, SPA serving, branding, prune codex-only features, compiles
-- [ ] B. Auth gate + shell (nav, status bar, theme, i18n ko/en, privacy blur) + Settings page
+- [x] B. Auth gate + shell (nav, status bar, theme, i18n ko/en, privacy blur) + Settings page
 - [ ] C. Accounts page (+ backend: pause/resume, per-account probe, trends from QuotaHistory, rename)
 - [ ] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
 - [ ] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
@@ -100,4 +100,87 @@ pages show "Response schema mismatch" because they still call codex-lb endpoints
   No guest role yet (Step G). Step B must rewrite `features/auth/api.ts` + schemas against these.
 - Run the backend for dev with `CLAUDE_LB_DATA_DIR=<tmp> uv run claude-lb serve --port 2456` to avoid touching the
   real DB; port 2457 belongs to an unrelated process.
+
+### 2026-11-26 — Step B (auth gate, shell, settings)
+**Done**
+- **Casing converter** (`src/lib/casing.ts`, wired in `src/lib/api-client.ts`): every response body is camelized
+  (snake_case → camelCase, keys only, deep, arrays walked) *before* zod validation; every JSON request body and every
+  query-string key is snakified. Opt out per call with `{ rawKeys: true }` (keys are data: header maps, model-keyed
+  maps, codex auth.json export). Error bodies stay raw in `ApiError.payload`. `post/put/patch(url, null, …)` now
+  exist for 204 endpoints. FastAPI errors are parsed: `{"detail": "msg"}` → `ApiError{status, code: "http_<status>",
+  message}`; 422 lists → `"field: msg; …"`. Tests: `src/lib/casing.test.ts`, `src/lib/api-client.test.ts`.
+- **Auth** (`features/auth`): rewritten against `/api/auth/*`. Store (`hooks/use-auth.ts`) derives
+  `passwordRequired` (=configured), `authenticated`, `totpEnabled`, `authEnabled`, `bootstrapRequired` (remote, no
+  password), `insecure` (signed in with no password or auth disabled), `role` (always `admin`), `canWrite`
+  (=authenticated). Gate states: spinner → signed in (app) / loopback-no-password (app + `InsecureModeBanner` with a
+  "Set password" dialog) / remote-no-password (`BootstrapSetupScreen`: password + confirm + bootstrap token, sent as
+  `x-claude-lb-bootstrap`) / password set (two-step `LoginForm`: password, then TOTP step when `totp_enabled`; one
+  `POST /login {password, totp_code}`) / status request failed (retry card). Any 401 from another call flips the store
+  to signed-out and re-reads status. 401 on login shows the i18n key `auth.login.invalidCredentials`.
+- **Backend**: `AuthStatusOut.auth_enabled` (false when `CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false`); `GET /health/ready`
+  (SELECT 1, 503 on DB failure; both health endpoints return `version`); **bug fix**: request-log pruning used the env
+  retention instead of the runtime (dashboard-editable) setting and ran only at startup — now uses the runtime value
+  and the scheduler runs a third loop (`retention`, every 6 h). +4 pytest tests.
+- **Shell**: header nav Dashboard/Reports/Accounts/APIs/Settings; Advanced dropdown is driven by
+  `ADVANCED_NAV_ITEMS` and hidden while empty (Automations removed from nav and routes — no backend; unknown routes
+  redirect to /dashboard; `/firewall` redirect removed). New `ThemeToggle` (Light/Dark/System) in header and mobile
+  sheet; language menu (en/zh-CN/ko); privacy blur; Sign out only when a password exists. Accounts badge = number of
+  available accounts (red at 0, hidden with no accounts) from `features/accounts/pool-status.ts` (minimal loose schema
+  over `GET /api/accounts`, query key `["accounts","pool-status"]`). Status bar: readiness from `/health/ready`,
+  version from `/health`, routing label = strategy (+ "Sticky sessions" unless `single_account`), usage-sync =
+  newest `quota_observed_at` (fresh within 2× probe interval + 60 s, min 5 min; "Not yet observed"; hidden with no
+  accounts). Update check removed (`features/runtime` deleted). `src/utils/server-date.ts` parses naive SQLite
+  timestamps as UTC — use it for every claude-lb datetime.
+- **Settings** (`features/settings`): `GET/PATCH /api/settings`, `POST /api/settings/reset`. Cards: Appearance
+  (unchanged, browser-local), Routing (strategy select over `available_strategies`, per-strategy guide for all 9 with
+  "Current" marker, max attempts, sticky toggle + TTL), Background jobs (probe/model-sync toggles + intervals),
+  Data retention (request-log days), Dashboard password (set / change with current password / sign out everywhere),
+  TOTP (enroll → client-side QR via `qrcode-generator` rendered as an SVG path in `src/components/qr-code.tsx`,
+  secret shown, confirm; disable), Reset to defaults (confirm dialog). PATCH sends only the changed key; the response
+  envelope is written straight into the query cache. Reusable `SettingsCard`/`SettingsRow`/`SwitchSettingRow`/
+  `NumberSettingRow` (bounded integer input with its own Save; remount via `key` when the server value changes) in
+  `settings-card.tsx`; bounds in `SETTINGS_LIMITS` mirror `RuntimeSettings`.
+- Removed (codex-only or no backend): settings payload/advanced group/deeplink, import, reset-credit, guest-access,
+  session-TTL, codex data-retention, codex routing card, password remove/verify dialogs, TOTP login dialog, telemetry
+  and runtime-version APIs. Upstream-proxy schemas/api/hook moved to `features/accounts/upstream-proxy-legacy.ts`
+  (accounts page still uses it — delete in Step C). Accounts page reset-credit badge flags are hard-coded `true`
+  (LEGACY comment) until Step C. Firewall, sticky-session and quota-planner feature folders are kept but not rendered.
+- Tests rewritten: auth api/schemas/store/gate/login-form, settings page/hook/password/TOTP, header, status bar,
+  auth-flow integration. Deleted: api-keys-flow and firewall-flow integration tests (exercised removed Settings
+  sections), two automations navigation tests. Legacy tests that inspect raw requests now expect snake_case.
+
+**Results**: `npm test` 127 files / 996 tests pass; `npm run lint` clean; `npm run build` OK; `ruff` clean;
+`pytest` 434 passed. Browser smoke on :2461 (fresh data dir, loopback): insecure banner shown → set password from
+banner → banner gone, Sign out appears; routing strategy changed to Least used, persisted across reload, status bar
+"Least used + Sticky sessions"; TOTP enrolled with the rendered QR and a real code; signed out → two-step sign-in with
+TOTP worked; wrong password/code shows the translated error; language switch to 한국어 and theme switch to Dark from the
+header work. Console: only the expected 401s from the deliberate wrong sign-ins.
+
+**Known issues**
+- Remote bootstrap screen verified by tests only (browser smoke ran on loopback).
+- Server error messages other than the login 401 (e.g. "current password is incorrect", 422 details) are shown in
+  English as the backend sends them.
+- `GET /api/accounts` MSW handler still returns codex-lb's `{accounts: [...]}` shape, so in tests the pool-status query
+  fails schema validation (badge/usage-sync hidden; dev console noise). Fix when Step C rewrites the accounts handler.
+- Dashboard/Reports/Accounts/APIs pages still call codex-lb endpoints (unchanged from Step A).
+- zh-CN has no translations for the new keys (falls back to English).
+- `SettingsSkeleton` still draws an Appearance placeholder although Appearance renders immediately.
+
+**Notes for next agents**
+- Casing: write zod schemas in camelCase for claude-lb's snake_case JSON and pass camelCase bodies/query keys —
+  the client converts. Use `{ rawKeys: true }` whenever object *keys* are data. Never camelize values.
+- MSW: handlers for claude-lb endpoints live in `claudeLbHandlers` at the top of `src/test/mocks/handlers.ts` and must
+  mirror the real FastAPI behaviour: snake_case JSON from wire factories (`createAuthStatus`, `createRuntimeSettings`,
+  `createSettingsEnvelope` in `factories.ts`, typed `*Wire`), `{"detail": …}` errors, 204 with no body, 401 via
+  `managementAuthError()`. Read request bodies raw (`readJsonObject`). Tests tweak state with `setMockAuth({...})`
+  and read it with `getMockSettings()`; `resetMockState()` runs after each test. The remaining codex-lb handlers use
+  `legacyJson()`/`legacyRequestUrl()` (camelize incoming requests) — when you port an endpoint, move it into
+  `claudeLbHandlers` and drop the legacy helper for it. Update `handler-coverage.test.ts` with every handler change.
+  Tests that render `App` or depend on `canWrite` must make sure the auth store is signed in
+  (`useAuthStore.setState(useAuthStore.getInitialState())` + default mock = signed in, or set `canWrite: true`).
+- i18n: flat dotted keys (`area.section.item`), en + ko written together; Korean uses natural product terms
+  (계정, 구독, API 키, 라우팅, 세션 고정) and polite -습니다/-세요 endings, no English mixed in except proper nouns.
+  Plurals use i18next `_one`/`_other` (ko needs only `_other`). Store-level errors may hold an i18n key; render with
+  `t(error)` (unknown text passes through).
+- Settings cards: build new ones from `settings-card.tsx`; save with `onSave(partialPatch)`.
 

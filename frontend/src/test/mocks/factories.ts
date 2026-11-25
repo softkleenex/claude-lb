@@ -25,8 +25,6 @@ import {
 	ApiKeyTrendsResponseSchema,
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
-import type { AuthSession } from "@/features/auth/schemas";
-import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
 	DashboardOverview,
 	DashboardProjections,
@@ -47,18 +45,8 @@ import {
 	RequestLogSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
-import type {
-	DashboardSettings,
-	TelemetryConsent,
-	TelemetrySnapshotEnvelope,
-	UpstreamProxyAdmin,
-} from "@/features/settings/schemas";
-import {
-	DashboardSettingsSchema,
-	TelemetryConsentSchema,
-	TelemetrySnapshotEnvelopeSchema,
-	UpstreamProxyAdminSchema,
-} from "@/features/settings/schemas";
+import type { UpstreamProxyAdmin } from "@/features/accounts/upstream-proxy-legacy";
+import { UpstreamProxyAdminSchema } from "@/features/accounts/upstream-proxy-legacy";
 import type {
 	QuotaPlannerDecision,
 	QuotaPlannerForecast,
@@ -73,7 +61,6 @@ import {
 
 // Backward-compatible type aliases
 export type RequestLogEntry = RequestLog;
-export type DashboardAuthSession = AuthSession;
 export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
 export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
 export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
@@ -89,8 +76,6 @@ export type {
 	DashboardProjections,
 	RequestLogsResponse,
 	RequestLogFilterOptions,
-	DashboardSettings,
-	TelemetryConsent,
 	UpstreamProxyAdmin,
 	OauthStartResponse,
 	OauthStatusResponse,
@@ -422,169 +407,6 @@ export function createRequestLogFilterOptions(
 		statuses: ["ok", "rate_limit", "quota"],
 		...overrides,
 	});
-}
-
-export function createDashboardAuthSession(
-	overrides: Partial<DashboardAuthSession> = {},
-): DashboardAuthSession {
-	return AuthSessionSchema.parse({
-		authenticated: true,
-		passwordRequired: true,
-		totpRequiredOnLogin: false,
-		totpConfigured: true,
-		bootstrapRequired: false,
-		bootstrapTokenConfigured: false,
-		authMode: "standard",
-		passwordManagementEnabled: true,
-		passwordSessionActive: false,
-		role: "admin",
-		permissions: ["read", "write"],
-		guestAccessEnabled: false,
-		guestPasswordRequired: false,
-		...overrides,
-	});
-}
-
-export function createDashboardSettings(
-	overrides: Partial<DashboardSettings> = {},
-): DashboardSettings {
-	return DashboardSettingsSchema.parse({
-		stickyThreadsEnabled: true,
-		upstreamStreamTransport: "default",
-		httpDownstreamTransportPolicy: "smart",
-		upstreamProxyRoutingEnabled: false,
-		upstreamProxyDefaultPoolId: null,
-		preferEarlierResetAccounts: false,
-		preferEarlierResetWindow: "secondary",
-		showResetCreditBadges: true,
-		autoRedeemResetCreditsBeforeExpiry: false,
-		showResetCreditExpiryBadge: true,
-		routingStrategy: "usage_weighted",
-		relativeAvailabilityPower: 2,
-		relativeAvailabilityTopK: 5,
-		singleAccountId: null,
-		proxyAccountResponseCreateLimit: 4,
-		proxyAccountStreamLimit: 8,
-		proxyAccountStreamRecoveryReserve: 1,
-		proxyApiKeyFairShareCongestionThresholdPct: 0,
-		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-		weeklyPaceSmoothingMinutes: 30,
-		openaiCacheAffinityMaxAgeSeconds: 300,
-		dashboardSessionTtlSeconds: 31536000,
-		stickyReallocationBudgetThresholdPct: 95,
-		stickyReallocationPrimaryBudgetThresholdPct: 95,
-		stickyReallocationSecondaryBudgetThresholdPct: 100,
-		warmupModel: "gpt-5.4-mini",
-		importWithoutOverwrite: false,
-		totpRequiredOnLogin: false,
-		totpConfigured: true,
-		apiKeyAuthEnabled: true,
-		hideUpstreamQuotaFromApiKeys: false,
-		limitWarmupEnabled: false,
-		limitWarmupWindows: "both",
-		limitWarmupModel: "auto",
-		limitWarmupPrompt: "Say OK.",
-		limitWarmupCooldownSeconds: 3600,
-		limitWarmupExhaustedThresholdPercent: 99,
-		limitWarmupIdleThresholdPercent: 1,
-		limitWarmupMinAvailablePercent: 100,
-		guestAccessEnabled: false,
-		guestPasswordConfigured: false,
-		limitWarmupStaggeredIdleEnabled: false,
-		...overrides,
-	});
-}
-
-export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
-	return TelemetrySnapshotEnvelopeSchema.parse({
-		instance_id: "00000000-0000-4000-8000-000000000000",
-		timestamp: "2026-08-06T00:00:00Z",
-		metrics: {
-			schema_version: 1,
-			instance_id: "00000000-0000-4000-8000-000000000000",
-			version: "1.23.0",
-			python: "3.13",
-			os: "linux",
-			arch: "x86_64",
-			uptime_hours: 168,
-			deploy: {
-				method: "docker",
-				db_backend: "sqlite",
-				db_size_bucket: "<100MB",
-				replicas: 1,
-				reverse_proxy: true,
-			},
-			accounts: {
-				pool_bucket: "2-5",
-				plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
-				workspace_accounts: false,
-				routing_policy: "usage_weighted",
-				limit_warmup_enabled: false,
-				egress_proxy_used: false,
-			},
-			usage_7d: {
-				requests: 1024,
-				success_rate: 0.99,
-				tokens_input: 1000000,
-				tokens_output: 50000,
-				tokens_cached_ratio: 0.8,
-				cost_usd_bucket: "<10",
-				request_kinds: { responses: 0.97, chat: 0.02, images: 0.01, unknown: 0.0 },
-				transport_mix: { ws: 0.6, http_bridge: 0.4 },
-				service_tier_mix: { default: 1.0, flex: 0.0, priority: 0.0 },
-				clients: { "codex-cli": 0.9, other: 0.1 },
-				clients_other_ratio: 0.1,
-				models: [
-					{
-						name: "gpt-5.4-codex",
-						share: 1.0,
-						reasoning: { high: 0.5, medium: 0.5 },
-						avg_output_tokens_bucket: "250-1k",
-					},
-				],
-				latency_ms_p50: 1200,
-				ttft_ms_p50: 800,
-				ttft_ms_p95: 3400,
-				rate_limit_429_ratio: 0.004,
-				top_upstream_errors: ["server_overloaded"],
-			},
-			features: {
-				api_firewall: false,
-				quota_planner: false,
-				sticky_sessions: true,
-				conversation_archive: false,
-				automations: false,
-				fleet: false,
-				model_sources_count: 0,
-				api_keys_bucket: "2-5",
-				prometheus: false,
-				otel: false,
-				dashboard_auth: true,
-				reset_credits: true,
-				image_api_used: false,
-			},
-		},
-	});
-}
-
-export function createTelemetryConsent(
-	overrides: Partial<TelemetryConsent> = {},
-): TelemetryConsent {
-	const base = {
-		state: "enabled",
-		source: "persisted",
-		active: true,
-		...overrides,
-	};
-	// Mirror the backend: the base GET attaches a preview envelope only for
-	// the undecided/default (consent dialog) case; explicit overrides win.
-	const preview =
-		"preview" in overrides
-			? overrides.preview
-			: base.state === "undecided" && base.source === "default"
-				? createTelemetrySnapshotEnvelope()
-				: null;
-	return TelemetryConsentSchema.parse({ ...base, preview });
 }
 
 export function createQuotaPlannerSettings(
@@ -946,4 +768,76 @@ export function createConversationDetails(
 		],
 		...overrides,
 	});
+}
+
+// ── claude-lb wire shapes (snake_case, exactly as the FastAPI backend sends them) ──
+// Handlers for claude-lb endpoints return these raw; the api-client camelizes them.
+
+export const MOCK_DASHBOARD_PASSWORD = "correct-horse-battery";
+export const MOCK_BOOTSTRAP_TOKEN = "bootstrap-token-from-log";
+export const MOCK_TOTP_CODE = "123456";
+
+/** `GET /api/auth/status` (`AuthStatusOut`). */
+export type AuthStatusWire = {
+	configured: boolean;
+	totp_enabled: boolean;
+	authenticated: boolean;
+	reason: string;
+	auth_enabled: boolean;
+};
+
+export function createAuthStatus(overrides: Partial<AuthStatusWire> = {}): AuthStatusWire {
+	return {
+		configured: true,
+		totp_enabled: false,
+		authenticated: true,
+		reason: "",
+		auth_enabled: true,
+		...overrides,
+	};
+}
+
+/** `RuntimeSettings` from `claude_lb.modules.settings.service`. */
+export type RuntimeSettingsWire = {
+	routing_strategy: string;
+	max_attempts: number;
+	sticky_sessions_enabled: boolean;
+	sticky_ttl_seconds: number;
+	health_probe_enabled: boolean;
+	health_probe_interval_seconds: number;
+	model_sync_enabled: boolean;
+	model_sync_interval_seconds: number;
+	request_log_retention_days: number;
+};
+
+export const ROUTING_STRATEGIES_WIRE = [
+	"capacity_weighted",
+	"relative_availability",
+	"usage_weighted",
+	"reset_drain",
+	"sequential_drain",
+	"round_robin",
+	"least_used",
+	"fill_first",
+	"single_account",
+];
+
+export function createRuntimeSettings(overrides: Partial<RuntimeSettingsWire> = {}): RuntimeSettingsWire {
+	return {
+		routing_strategy: "capacity_weighted",
+		max_attempts: 3,
+		sticky_sessions_enabled: true,
+		sticky_ttl_seconds: 900,
+		health_probe_enabled: true,
+		health_probe_interval_seconds: 120,
+		model_sync_enabled: true,
+		model_sync_interval_seconds: 3600,
+		request_log_retention_days: 30,
+		...overrides,
+	};
+}
+
+/** `GET/PATCH /api/settings` envelope. */
+export function createSettingsEnvelope(overrides: Partial<RuntimeSettingsWire> = {}) {
+	return { settings: createRuntimeSettings(overrides), available_strategies: [...ROUTING_STRATEGIES_WIRE] };
 }

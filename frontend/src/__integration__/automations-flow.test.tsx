@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import App from "@/App";
 import { AutomationsPage } from "@/features/automations/components/automations-page";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
@@ -20,27 +19,6 @@ function getJobRow(jobName: string): HTMLElement {
 describe("automations page integration", () => {
 	beforeEach(() => {
 		window.history.pushState({}, "", "/automations");
-	});
-
-	it("navigates to automations through the Advanced header menu", async () => {
-		const user = userEvent.setup({ delay: null });
-		window.history.pushState({}, "", "/dashboard");
-		renderWithProviders(<App />);
-
-		const advancedTrigger = await screen.findByRole("button", { name: "Advanced" });
-		expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
-		await user.click(advancedTrigger);
-		await user.click(await screen.findByRole("menuitem", { name: "Automations" }));
-
-		expect(await screen.findByRole("heading", { name: "Automations" })).toBeInTheDocument();
-		expect(window.location.pathname).toBe("/automations");
-	});
-
-	it("renders automations from a direct /automations deep link", async () => {
-		renderWithProviders(<App />);
-
-		expect(await screen.findByRole("heading", { name: "Automations" })).toBeInTheDocument();
-		expect(window.location.pathname).toBe("/automations");
 	});
 
 	it("validates form input, creates a job, updates it, and renders run history", async () => {

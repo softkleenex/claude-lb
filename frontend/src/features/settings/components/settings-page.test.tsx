@@ -1,247 +1,105 @@
-import { render, screen } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
-import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createDashboardSettings } from "@/test/mocks/factories";
+import { SettingsPage } from "@/features/settings/components/settings-page";
+import { getMockSettings, setMockAuth } from "@/test/mocks/handlers";
+import { renderWithProviders } from "@/test/utils";
 
-const useSettingsMock = vi.fn();
-const useAccountsMock = vi.fn();
-const useUpstreamProxyAdminMock = vi.fn();
-const routingSettingsMock = vi.fn();
-const importSettingsMock = vi.fn();
-const guestAccessSettingsMock = vi.fn();
-const apiKeysSectionMock = vi.fn();
-const firewallSectionMock = vi.fn();
-const quotaPlannerSectionMock = vi.fn();
-const stickySessionsSectionMock = vi.fn();
-const dataRetentionSettingsMock = vi.fn();
-
-vi.mock("@/features/settings/hooks/use-settings", () => ({
-  useSettings: () => useSettingsMock(),
-  useUpstreamProxyAdmin: () => useUpstreamProxyAdminMock(),
-}));
-
-vi.mock("@/features/accounts/hooks/use-accounts", () => ({
-  useAccounts: () => useAccountsMock(),
-}));
-
-vi.mock("@/features/settings/components/appearance-settings", () => ({
-  AppearanceSettings: () => <div>Appearance Settings</div>,
-}));
-
-vi.mock("@/features/settings/components/routing-settings", () => ({
-  RoutingSettings: (props: unknown) => {
-    routingSettingsMock(props);
-    return <div>Routing Settings</div>;
-  },
-}));
-
-vi.mock("@/features/settings/components/import-settings", () => ({
-  ImportSettings: (props: unknown) => {
-    importSettingsMock(props);
-    return <div>Import Settings</div>;
-  },
-}));
-
-vi.mock("@/features/settings/components/guest-access-settings", () => ({
-  GuestAccessSettings: (props: unknown) => {
-    guestAccessSettingsMock(props);
-    return <div>Guest Access Settings</div>;
-  },
-}));
-
-vi.mock("@/features/settings/components/password-settings", () => ({
-  PasswordSettings: () => <div>Password Settings</div>,
-}));
-
-vi.mock("@/features/settings/components/session-settings", () => ({
-  SessionSettings: () => <div>Session Settings</div>,
-}));
-
-vi.mock("@/features/settings/components/data-retention-settings", () => ({
-  DataRetentionSettings: (props: unknown) => {
-    dataRetentionSettingsMock(props);
-    return <div>Data Retention Settings</div>;
-  },
-}));
-
-vi.mock("@/features/api-keys/components/api-keys-section", () => ({
-  ApiKeysSection: (props: unknown) => {
-    apiKeysSectionMock(props);
-    return <div>API Keys Section</div>;
-  },
-}));
-
-vi.mock("@/features/firewall/components/firewall-section", () => ({
-  FirewallSection: (props: unknown) => {
-    firewallSectionMock(props);
-    return <div>Firewall Section</div>;
-  },
-}));
-
-vi.mock("@/features/quota-planner/components/quota-planner-section", () => ({
-  QuotaPlannerSection: (props: unknown) => {
-    quotaPlannerSectionMock(props);
-    return <div>Quota Planner Section</div>;
-  },
-}));
-
-vi.mock("@/features/sticky-sessions/components/sticky-sessions-section", () => ({
-  StickySessionsSection: (props: unknown) => {
-    stickySessionsSectionMock(props);
-    return <div>Sticky Sessions Section</div>;
-  },
-}));
+async function renderPage() {
+  await useAuthStore.getState().refreshSession();
+  return renderWithProviders(<SettingsPage />);
+}
 
 describe("SettingsPage", () => {
-  const settings = createDashboardSettings();
-  const upstreamAdmin = { endpoints: [], pools: [], bindings: [], routingEnabled: false, defaultPoolId: null };
-
   beforeEach(() => {
-    useAuthStore.setState({
-      authMode: "standard",
-      passwordManagementEnabled: true,
-      passwordSessionActive: false,
-      canWrite: true,
-    });
-
-    useSettingsMock.mockReturnValue({
-      settingsQuery: {
-        data: settings,
-        error: null,
-        refetch: vi.fn().mockResolvedValue(undefined),
-      },
-      updateSettingsMutation: {
-        isPending: false,
-        error: null,
-        mutateAsync: vi.fn().mockResolvedValue(undefined),
-      },
-    });
-    useAccountsMock.mockReturnValue({
-      accountsQuery: {
-        data: [],
-        isLoading: false,
-      },
-    });
-    useUpstreamProxyAdminMock.mockReturnValue({
-      upstreamProxyQuery: {
-        data: upstreamAdmin,
-        error: null,
-      },
-      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
-      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
-      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
-      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
-    });
-
-    routingSettingsMock.mockReset();
-    importSettingsMock.mockReset();
-    guestAccessSettingsMock.mockReset();
-    apiKeysSectionMock.mockReset();
-    firewallSectionMock.mockReset();
-    quotaPlannerSectionMock.mockReset();
-    stickySessionsSectionMock.mockReset();
-    dataRetentionSettingsMock.mockReset();
+    useAuthStore.setState(useAuthStore.getInitialState());
   });
 
-  function renderSettings(initialEntry = "/settings") {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    return render(
-      <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={[initialEntry]}>
-          <SettingsPage />
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-  }
+  it("renders claude-lb's cards and none of codex-lb's", async () => {
+    await renderPage();
 
-  async function expandAdvancedSettings() {
+    expect(await screen.findByRole("heading", { name: "Routing" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Background jobs" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Data retention" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard password" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Two-factor authentication (TOTP)" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Reset to defaults" })).toBeInTheDocument();
+    for (const gone of [/warm-?up/i, /reset credit/i, /websocket/i, /quota planner/i, /upstream proxy/i, /firewall/i, /guest/i]) {
+      expect(screen.queryByText(gone)).not.toBeInTheDocument();
+    }
+  });
+
+  it("lists every strategy with a guide and marks the current one", async () => {
+    await renderPage();
+
+    const guide = await screen.findByRole("list", { name: "Strategy guide" });
+    const items = within(guide).getAllByRole("listitem");
+    expect(items).toHaveLength(9);
+    expect(items.find((item) => item.dataset.active === "true")).toHaveTextContent("Capacity weighted");
+    expect(guide).toHaveTextContent("Least used");
+  });
+
+  it("changes the routing strategy", async () => {
     const user = userEvent.setup({ delay: null });
-    await user.click(screen.getByRole("button", { name: "Show advanced settings" }));
-  }
+    await renderPage();
 
-  it("keeps advanced sections collapsed and unmounted by default", () => {
-    renderSettings();
+    await user.click(await screen.findByRole("combobox", { name: "Routing strategy" }));
+    await user.click(await screen.findByRole("option", { name: "Round robin" }));
 
-    expect(screen.getByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
-    expect(screen.queryByText("Routing Settings")).not.toBeInTheDocument();
-    expect(screen.queryByText("Firewall Section")).not.toBeInTheDocument();
-    expect(screen.queryByText("Quota Planner Section")).not.toBeInTheDocument();
-    expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
-    expect(screen.queryByText("Data Retention Settings")).not.toBeInTheDocument();
-    expect(routingSettingsMock).not.toHaveBeenCalled();
-    expect(firewallSectionMock).not.toHaveBeenCalled();
-    expect(quotaPlannerSectionMock).not.toHaveBeenCalled();
-    expect(stickySessionsSectionMock).not.toHaveBeenCalled();
-    expect(dataRetentionSettingsMock).not.toHaveBeenCalled();
-
-    // Core sections stay visible without any interaction.
-    expect(screen.getByText("Appearance Settings")).toBeInTheDocument();
-    expect(screen.getByText("Import Settings")).toBeInTheDocument();
-    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    await waitFor(() => expect(getMockSettings().routing_strategy).toBe("round_robin"));
+    await waitFor(() => {
+      const active = within(screen.getByRole("list", { name: "Strategy guide" }))
+        .getAllByRole("listitem")
+        .find((item) => item.dataset.active === "true");
+      expect(active).toHaveTextContent("Round robin");
+    });
   });
 
-  it("mounts every advanced section after one expand interaction", async () => {
-    renderSettings();
+  it("toggles sticky sessions and saves numeric settings within bounds", async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderPage();
 
-    await expandAdvancedSettings();
+    await user.click(await screen.findByRole("switch", { name: "Sticky sessions" }));
+    await waitFor(() => expect(getMockSettings().sticky_sessions_enabled).toBe(false));
 
-    expect(screen.getByText("Routing Settings")).toBeInTheDocument();
-    expect(screen.getByText("Firewall Section")).toBeInTheDocument();
-    expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
-    expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
-    expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
+    const retention = screen.getByRole("spinbutton", { name: "Request log retention" });
+    await user.clear(retention);
+    await user.type(retention, "0");
+    expect(await screen.findByText("Enter a whole number from 1 to 3650.")).toBeInTheDocument();
+
+    await user.clear(retention);
+    await user.type(retention, "90");
+    const row = retention.closest("div.space-y-1\\.5") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(getMockSettings().request_log_retention_days).toBe(90));
   });
 
-  it("disables write-capable sections for read-only guests", async () => {
-    useAuthStore.setState({ canWrite: false });
+  it("shows the sticky TTL as a readable duration", async () => {
+    await renderPage();
 
-    renderSettings();
-
-    expect(screen.getByText("You are viewing the dashboard with read-only guest access. Admin controls are disabled.")).toBeInTheDocument();
-    expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
-    expect(screen.queryByText("Password Settings")).not.toBeInTheDocument();
-    expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
-    expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-
-    await expandAdvancedSettings();
-
-    expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(await screen.findByText("= 15 minutes")).toBeInTheDocument();
   });
 
-  it("keeps guest access settings available for writable sessions", async () => {
-    renderSettings();
+  it("resets settings after confirmation", async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderPage();
+    await user.click(await screen.findByRole("switch", { name: "Model list sync" }));
+    await waitFor(() => expect(getMockSettings().model_sync_enabled).toBe(false));
 
-    expect(screen.getByText("Guest Access Settings")).toBeInTheDocument();
-    expect(guestAccessSettingsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        settings,
-        busy: false,
-      }),
-    );
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+    await user.click(await screen.findByRole("button", { name: "Reset settings" }));
 
-    await expandAdvancedSettings();
-
-    expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: false }));
+    await waitFor(() => expect(getMockSettings().model_sync_enabled).toBe(true));
   });
 
-  it("expands Advanced and mounts firewall on the advanced deeplink", () => {
-    renderSettings("/settings?advanced=1#firewall");
+  it("hides TOTP until a password exists", async () => {
+    setMockAuth({ configured: false, authenticated: true, password: null });
+    await renderPage();
 
-    expect(screen.getByText("Firewall Section")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
-    expect(firewallSectionMock).toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "Dashboard password" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Two-factor authentication (TOTP)" })).not.toBeInTheDocument();
   });
-
 });

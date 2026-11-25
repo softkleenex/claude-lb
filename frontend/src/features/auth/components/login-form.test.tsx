@@ -1,108 +1,73 @@
-import { render, screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { LoginForm } from "@/features/auth/components/login-form";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { MOCK_DASHBOARD_PASSWORD, MOCK_TOTP_CODE } from "@/test/mocks/factories";
+import { setMockAuth } from "@/test/mocks/handlers";
+import { renderWithProviders } from "@/test/utils";
 
 describe("LoginForm", () => {
-  beforeEach(() => {
-    useAuthStore.setState({
-      loading: false,
-      error: null,
-      passwordRequired: true,
-      guestAccessEnabled: false,
-      guestPasswordRequired: false,
-      loginGuest: vi.fn(),
-    });
+  beforeEach(async () => {
+    useAuthStore.setState(useAuthStore.getInitialState());
   });
 
-  it("renders and submits password", async () => {
-    const user = userEvent.setup();
-    const clearError = vi.fn();
-    const login = vi.fn().mockResolvedValue(undefined);
+  it("signs in with the password alone when TOTP is off", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ authenticated: false });
+    await useAuthStore.getState().refreshSession();
 
-    useAuthStore.setState({
-      clearError,
-      login,
-      loading: false,
-      error: null,
-    });
+    renderWithProviders(<LoginForm />);
+    await user.type(screen.getByLabelText("Password"), MOCK_DASHBOARD_PASSWORD);
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
 
-    render(<LoginForm />);
-
-    await user.type(screen.getByLabelText("Password"), "secret-pass");
-    await user.click(screen.getByRole("button", { name: "Sign In" }));
-
-    expect(clearError).toHaveBeenCalledTimes(1);
-    expect(login).toHaveBeenCalledWith("secret-pass");
+    await waitFor(() => expect(useAuthStore.getState().authenticated).toBe(true));
   });
 
-  it("shows error message when present", () => {
-    useAuthStore.setState({
-      error: "Invalid credentials",
-      loading: false,
-    });
+  it("shows the server's error for a wrong password", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ authenticated: false });
+    await useAuthStore.getState().refreshSession();
 
-    render(<LoginForm />);
-    expect(screen.getByText("Invalid credentials")).toBeInTheDocument();
+    renderWithProviders(<LoginForm />);
+    await user.type(screen.getByLabelText("Password"), "wrong-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("Wrong password or authentication code.")).toBeInTheDocument();
+    expect(useAuthStore.getState().authenticated).toBe(false);
   });
 
-  it("renders and submits guest password when guest access is enabled", async () => {
-    const user = userEvent.setup();
-    const clearError = vi.fn();
-    const loginGuest = vi.fn().mockResolvedValue(undefined);
+  it("asks for the TOTP code in a second step and sends both together", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ authenticated: false, totpEnabled: true });
+    await useAuthStore.getState().refreshSession();
 
-    useAuthStore.setState({
-      clearError,
-      loginGuest,
-      passwordRequired: false,
-      guestAccessEnabled: true,
-      guestPasswordRequired: true,
-      loading: false,
-      error: null,
-    });
+    renderWithProviders(<LoginForm />);
+    await user.type(screen.getByLabelText("Password"), MOCK_DASHBOARD_PASSWORD);
+    await user.click(screen.getByRole("button", { name: "Next" }));
 
-    render(<LoginForm />);
+    expect(await screen.findByRole("heading", { name: "Two-factor verification" })).toBeInTheDocument();
+    expect(useAuthStore.getState().authenticated).toBe(false);
 
-    await user.type(screen.getByLabelText("Guest password"), "guest-pass");
-    await user.click(screen.getByRole("button", { name: "View as Guest" }));
+    await user.type(screen.getByLabelText("Authentication code"), MOCK_TOTP_CODE);
 
-    expect(clearError).toHaveBeenCalledTimes(1);
-    expect(loginGuest).toHaveBeenCalledWith("guest-pass");
+    await waitFor(() => expect(useAuthStore.getState().authenticated).toBe(true));
   });
 
-  it("submits passwordless guest access without a password", async () => {
-    const user = userEvent.setup();
-    const clearError = vi.fn();
-    const loginGuest = vi.fn().mockResolvedValue(undefined);
+  it("lets the user go back from the TOTP step after a wrong code", async () => {
+    const user = userEvent.setup({ delay: null });
+    setMockAuth({ authenticated: false, totpEnabled: true });
+    await useAuthStore.getState().refreshSession();
 
-    useAuthStore.setState({
-      clearError,
-      loginGuest,
-      passwordRequired: false,
-      guestAccessEnabled: true,
-      guestPasswordRequired: false,
-      loading: false,
-      error: null,
-    });
+    renderWithProviders(<LoginForm />);
+    await user.type(screen.getByLabelText("Password"), MOCK_DASHBOARD_PASSWORD);
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.type(await screen.findByLabelText("Authentication code"), "000000");
 
-    render(<LoginForm />);
+    expect(await screen.findByText("Wrong password or authentication code.")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "View as Guest" }));
-
-    expect(clearError).toHaveBeenCalledTimes(1);
-    expect(loginGuest).toHaveBeenCalledWith(undefined);
-  });
-
-  it("disables input and submit while loading", () => {
-    useAuthStore.setState({
-      loading: true,
-      error: null,
-    });
-
-    render(<LoginForm />);
-    expect(screen.getByLabelText("Password")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Sign In" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 });

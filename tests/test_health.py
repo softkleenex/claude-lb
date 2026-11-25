@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from claude_lb.db.models import Account, ModelCatalogEntry
 from claude_lb.db.session import session_scope
@@ -310,11 +311,33 @@ class TestScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    async def test_retention_tick_honours_the_runtime_setting(self):
+        from claude_lb.db.models import RequestLog
+
+        async with session_scope() as session:
+            await settings_service.update(session, {"request_log_retention_days": 2})
+            for age_days in (1, 3):
+                session.add(
+                    RequestLog(
+                        created_at=datetime.now(UTC) - timedelta(days=age_days),
+                        path="/v1/messages",
+                        status_code=200,
+                    )
+                )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as client:
+            interval = await service.Scheduler(client)._retention_tick()
+
+        async with session_scope() as session:
+            remaining = (await session.execute(select(RequestLog))).scalars().all()
+        assert interval == service.RETENTION_INTERVAL_SECONDS
+        assert len(remaining) == 1, "only the row inside the 2-day runtime window survives"
+
     async def test_start_then_stop_leaves_no_running_tasks(self):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as c:
             scheduler = service.Scheduler(c)
             scheduler.start()
-            assert len(scheduler._tasks) == 2
+            assert len(scheduler._tasks) == 3
             await scheduler.stop()
             assert scheduler._tasks == []
 

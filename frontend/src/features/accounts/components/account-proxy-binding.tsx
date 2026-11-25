@@ -10,7 +10,7 @@ import type {
   AccountProxyBindingRequest,
   UpstreamProxyAdmin,
   UpstreamProxyEndpointTestResponse,
-} from "@/features/settings/schemas";
+} from "@/features/accounts/upstream-proxy-legacy";
 
 export type AccountProxyBindingProps = {
   account: AccountSummary;

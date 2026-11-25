@@ -1,9 +1,12 @@
 import { get } from "@/lib/api-client";
 
-import { HealthCheckResponseSchema } from "@/features/health/schemas";
+import { HealthResponseSchema } from "@/features/health/schemas";
 
-const READINESS_PATH = "/health/ready";
+export function getHealth() {
+  return get("/health", HealthResponseSchema);
+}
 
+/** Process up *and* database reachable. */
 export function getServiceReadiness() {
-  return get(READINESS_PATH, HealthCheckResponseSchema);
+  return get("/health/ready", HealthResponseSchema);
 }

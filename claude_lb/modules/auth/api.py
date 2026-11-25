@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from claude_lb.core.config import get_settings
 from claude_lb.dependencies import SessionDep
 from claude_lb.modules.audit import service as audit
 from claude_lb.modules.auth import service as auth
@@ -16,6 +17,10 @@ class AuthStatusOut(BaseModel):
     totp_enabled: bool
     authenticated: bool
     reason: str = ""
+    auth_enabled: bool = Field(
+        default_factory=lambda: get_settings().dashboard_auth_enabled,
+        description="False when CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false turns the gate off entirely.",
+    )
 
 
 class LoginRequest(BaseModel):
