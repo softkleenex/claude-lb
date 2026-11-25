@@ -11,7 +11,16 @@ describe("auth schemas", () => {
   it("defaults authEnabled for servers that predate the field", () => {
     expect(
       AuthStatusSchema.parse({ configured: true, totpEnabled: false, authenticated: true }),
-    ).toEqual({ configured: true, totpEnabled: false, authenticated: true, reason: "", authEnabled: true });
+    ).toEqual({
+      configured: true,
+      totpEnabled: false,
+      authenticated: true,
+      reason: "",
+      role: "admin",
+      guestAccessEnabled: false,
+      guestPasswordRequired: false,
+      authEnabled: true,
+    });
   });
 
   it("requires matching passwords of at least 8 characters on setup", () => {

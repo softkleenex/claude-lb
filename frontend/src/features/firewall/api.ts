@@ -1,28 +1,34 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
-  FirewallDeleteResponseSchema,
-  FirewallIpCreateRequestSchema,
-  FirewallIpEntrySchema,
-  FirewallIpsResponseSchema,
+  FirewallCheckSchema,
+  FirewallEntrySchema,
+  type FirewallMode,
+  FirewallStateSchema,
 } from "@/features/firewall/schemas";
 
-const FIREWALL_IPS_PATH = "/api/firewall/ips";
+const BASE = "/api/firewall";
 
-export function listFirewallIps() {
-  return get(FIREWALL_IPS_PATH, FirewallIpsResponseSchema);
+export function getFirewall() {
+  return get(BASE, FirewallStateSchema);
 }
 
-export function createFirewallIp(payload: unknown) {
-  const validated = FirewallIpCreateRequestSchema.parse(payload);
-  return post(FIREWALL_IPS_PATH, FirewallIpEntrySchema, {
-    body: validated,
-  });
+export function checkFirewallEntry(network: string) {
+  return get(`${BASE}/check?${new URLSearchParams({ network })}`, FirewallCheckSchema);
 }
 
-export function deleteFirewallIp(ipAddress: string) {
-  return del(
-    `${FIREWALL_IPS_PATH}/${encodeURIComponent(ipAddress)}`,
-    FirewallDeleteResponseSchema,
-  );
+export function setFirewallMode(mode: FirewallMode) {
+  return put(`${BASE}/mode`, FirewallStateSchema, { body: { mode } });
+}
+
+export function addFirewallEntry(network: string, note: string) {
+  return post(`${BASE}/entries`, FirewallEntrySchema, { body: { network, note } });
+}
+
+export function updateFirewallEntry(entryId: string, note: string) {
+  return patch(`${BASE}/entries/${encodeURIComponent(entryId)}`, FirewallEntrySchema, { body: { note } });
+}
+
+export function deleteFirewallEntry(entryId: string) {
+  return del(`${BASE}/entries/${encodeURIComponent(entryId)}`);
 }

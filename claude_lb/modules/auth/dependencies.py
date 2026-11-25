@@ -46,10 +46,23 @@ async def evaluate(request: Request, session: AsyncSession) -> AuthStatus:
     # if this particular read came up empty.
     configured = credential is not None or auth.password_ever_seen()
     totp_enabled = bool(credential and credential.totp_enabled)
+    guest_enabled, guest_password = await auth.guest_config(session) if configured else (False, False)
+    guest = {
+        "guest_access_enabled": guest_enabled,
+        "guest_password_required": guest_enabled and guest_password,
+    }
 
     record = await auth.resolve_session(session, request.cookies.get(auth.SESSION_COOKIE))
     if record is not None:
-        return AuthStatus(configured=configured, totp_enabled=totp_enabled, authenticated=True)
+        role = record.role or auth.ROLE_ADMIN
+        if role != auth.ROLE_GUEST:
+            return AuthStatus(configured=configured, totp_enabled=totp_enabled, authenticated=True, **guest)
+        if guest_enabled:
+            return AuthStatus(
+                configured=configured, totp_enabled=totp_enabled, authenticated=True, role=role, **guest
+            )
+        # Guest access was switched off after this session began.
+        await session.delete(record)
 
     if not configured:
         if auth.verify_bootstrap_token(_presented_bootstrap(request)):
@@ -74,20 +87,31 @@ async def evaluate(request: Request, session: AsyncSession) -> AuthStatus:
         )
 
     return AuthStatus(
-        configured=True, totp_enabled=totp_enabled, authenticated=False, reason="sign in required"
+        configured=True, totp_enabled=totp_enabled, authenticated=False, reason="sign in required", **guest
     )
+
+
+_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 async def require_management_auth(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AuthStatus:
+    """Every management route goes through here, so this is also where the guest role
+    is enforced: a guest session may read anything an admin can, and change nothing."""
     status = await evaluate(request, session)
     if not status.authenticated:
         raise HTTPException(
             status_code=401,
             detail=status.reason or "authentication required",
             headers={"x-claude-lb-auth": "required"},
+        )
+    if status.role == auth.ROLE_GUEST and request.method not in _READ_ONLY_METHODS:
+        raise HTTPException(
+            status_code=403,
+            detail="read-only guest access cannot change anything",
+            headers={"x-claude-lb-auth": "read-only"},
         )
     return status
 

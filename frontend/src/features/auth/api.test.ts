@@ -26,6 +26,9 @@ describe("auth api (claude-lb /api/auth)", () => {
       totpEnabled: true,
       authenticated: false,
       reason: "sign in required",
+      role: "admin",
+      guestAccessEnabled: false,
+      guestPasswordRequired: false,
       authEnabled: true,
     });
   });

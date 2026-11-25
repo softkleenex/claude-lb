@@ -80,10 +80,24 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/quota-planner/forecast",
 	"POST /api/quota-planner/warm-now",
 	"POST /api/quota-planner/decisions/:decisionId/cancel",
-	// firewall
-	"GET /api/firewall/ips",
-	"POST /api/firewall/ips",
-	"DELETE /api/firewall/ips/:ipAddress",
+	// firewall (proxy IP allowlist)
+	"GET /api/firewall",
+	"GET /api/firewall/check",
+	"PUT /api/firewall/mode",
+	"POST /api/firewall/entries",
+	"PATCH /api/firewall/entries/:entryId",
+	"DELETE /api/firewall/entries/:entryId",
+	// guest role
+	"POST /api/auth/guest/login",
+	"GET /api/auth/guest",
+	"PATCH /api/auth/guest",
+	// automations
+	"GET /api/automations",
+	"POST /api/automations",
+	"GET /api/automations/runs",
+	"PATCH /api/automations/:jobId",
+	"DELETE /api/automations/:jobId",
+	"POST /api/automations/:jobId/run",
 	// api keys (claude-lb)
 	"GET /api/keys",
 	"GET /api/keys/overview",

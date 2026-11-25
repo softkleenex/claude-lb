@@ -22,8 +22,12 @@ from claude_lb.modules.auth import dependencies as auth_dependencies
 from claude_lb.modules.auth import service as auth_service
 from claude_lb.modules.auth.api import router as auth_router
 from claude_lb.modules.auth.dependencies import require_management_auth
+from claude_lb.modules.automations.api import router as automations_router
+from claude_lb.modules.automations.scheduler import AutomationScheduler
 from claude_lb.modules.dashboard.api import router as dashboard_router
 from claude_lb.modules.dashboard.data_api import router as dashboard_data_router
+from claude_lb.modules.firewall.api import enforce_firewall
+from claude_lb.modules.firewall.api import router as firewall_router
 from claude_lb.modules.health.api import router as health_router
 from claude_lb.modules.health.service import Scheduler
 from claude_lb.modules.proxy.api import router as proxy_router
@@ -89,10 +93,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler = Scheduler(app.state.http_client)
     scheduler.start()
     app.state.scheduler = scheduler
+    # Reads app.state.http_client on every tick, so tests that swap the client work.
+    automations = AutomationScheduler(lambda: app.state.http_client)
+    automations.start()
+    app.state.automations = automations
 
     try:
         yield
     finally:
+        await automations.stop()
         await scheduler.stop()
         await app.state.http_client.aclose()
         await dispose_db()
@@ -145,11 +154,14 @@ def create_app() -> FastAPI:
         settings_router,
         audit_router,
         health_router,
+        firewall_router,
+        automations_router,
     ]
     for router in guarded:
         app.include_router(router, dependencies=[Depends(require_management_auth)])
     # Registered after the management API: its catch-all /v1/{path} must not shadow it.
-    app.include_router(proxy_router)
+    # The IP firewall guards the proxy only; the management plane has its own gate.
+    app.include_router(proxy_router, dependencies=[Depends(enforce_firewall)])
 
     @app.middleware("http")
     async def reject_cross_site_writes(request: Request, call_next):

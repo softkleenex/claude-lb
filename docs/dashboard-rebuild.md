@@ -25,9 +25,9 @@ Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its
 - [x] D. Dashboard overview + request logs + request details (+ backend: overview/deltas/sparklines, log filters/pagination/options)
 - [x] E. Reports page (+ backend: date range, multi-filters, TTFT/TPS)
 - [x] F. API keys page (+ backend: regenerate, expiry, allowed models, multi-rule limits, trends)
-- [ ] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
+- [x] G. Extras: conversations, audit log page, model catalog page, firewall, sticky sessions browser, guest role, automations (scheduled prompts per account, e.g. start a 5h window early; codex-lb parity)
   - [x] G1. conversations, audit log page, model catalog page, sticky sessions browser
-  - [ ] G2. firewall, guest role, automations
+  - [x] G2. firewall, guest role, automations
 - [ ] H. Remove old index.html, docs/README/CHANGELOG, final full verification
 
 ## Log
@@ -665,3 +665,119 @@ no console messages.
   The pages already disable write buttons when `useAuthStore().canWrite` is false.
 - New audit actions need a label in `features/audit/action-labels.ts` + `audit.action.<action>` in en/ko (a test checks).
 - `features/firewall` and `features/quota-planner` are still codex-lb leftovers with legacy MSW handlers.
+
+
+### 2026-11-27 — Step G2 (IP firewall, guest read-only role, automations)
+**Done**
+- **IP firewall** (`modules/firewall/{service,api}.py`, table `firewall_entries`): mode `allow_all | allowlist` stored
+  in the `settings` table under `firewall_mode` (not a `RuntimeSettings` key — `POST /api/settings/reset` now deletes
+  only `RuntimeSettings` keys, so a reset never opens the firewall or touches guest access). Entries are IPv4/IPv6
+  addresses or CIDR ranges (normalized: `10.0.0.5/32` → `10.0.0.5`; host bits set → 422 "did you mean 10.0.0.0/8?";
+  IPv4-mapped IPv6 refused), with a note. **Semantics (codex-lb parity + explicit mode)**: guards the **proxy only**
+  (`/v1/*`, router dependency `enforce_firewall` that runs *before* API-key admission); the dashboard and `/api/*`
+  are never firewalled (they have their own password gate), so a bad entry cannot lock the operator out. Loopback
+  gets **no** exemption on the proxy (a rule means exactly what it says); an allowlist with no entries refuses every
+  proxy request (UI warns). Client address = `auth.dependencies.client_ip` (TCP peer; claude-lb has no trusted-proxy
+  setting, so `X-Forwarded-For` is ignored — documented in the UI). Blocked → 403 Anthropic envelope
+  `{"type":"error","error":{"type":"permission_error","message":"claude-lb: client address X is not allowed by the
+  firewall"}}`. Decisions cached 5 s per process, invalidated on every change. API: `GET /api/firewall` (mode, entries
+  with `covers_client`, `client_ip`, `client_allowed`, `client_covered`), `GET /api/firewall/check?network=` (normalized
+  form, covers you?, would you pass after adding?), `PUT /api/firewall/mode`, `POST /api/firewall/entries` (201/409/422),
+  `PATCH|DELETE /api/firewall/entries/{id}`. Audited: `firewall.mode_changed`, `firewall.entry_added`,
+  `firewall.entry_updated`, `firewall.entry_removed`.
+- **Guest role**: `DashboardSession.role` (`admin`/`guest`, additive column). Settings-table keys
+  `guest_access_enabled`, `guest_password` (`{hash, salt}`, scrypt like the admin password). `GET /api/auth/status`
+  adds `role`, `guest_access_enabled`, `guest_password_required`. `POST /api/auth/guest/login {password?}` (409 without a
+  dashboard password, 403 when off, 401 wrong password, shares the login throttle; audited `auth.guest_login` with
+  actor `guest`, failures committed). `GET/PATCH /api/auth/guest {enabled?, password?, clear_password?}` (admin;
+  enabling needs a dashboard password; disabling or changing the password revokes every guest session; audited
+  `auth.guest_access_enabled/disabled`, `auth.guest_password_set/cleared`). **Enforcement is in
+  `require_management_auth`**: a guest session gets 403 "read-only guest access cannot change anything" on every
+  non-GET/HEAD/OPTIONS management route (router-level dependency, plus every auth route that uses `ManagementAuthDep`).
+  Guest sessions whose access was switched off resolve as signed-out. Secrets: masked hints only; checked that
+  accounts/keys/audit/settings/status payloads carry no credential, key secret, password or bootstrap token.
+- **Automations** (`modules/automations/{schedule,service,scheduler,api}.py`, tables `automation_jobs`,
+  `automation_runs`): job = name, enabled (default **on**, codex-lb parity), weekdays + `HH:MM` + IANA timezone +
+  spread 0–120 min, model, prompt (≤ 2000 chars), `max_tokens` 1–1024 (default 16), target account ids (empty = all,
+  paused excluded unless `include_paused_accounts`), `armed_at`. Schedule math is pure (`schedule.py`): DST
+  nonexistent local time fires at the pre-gap offset (02:30 → 03:30 EDT), ambiguous time fires once (first
+  occurrence). **Firing**: `AutomationScheduler` ticks once per minute aligned to `:02`; a job's latest slot fires if it
+  is ≤ 15 min old (`GRACE`) and not before `armed_at` (set on create / enable / schedule change, so moving or
+  re-enabling a job never fires a past slot). A cycle = one `AutomationRun` per target, `slot_key`
+  (`<job>:<local date>T<time>@<tz>:<account>`) is **unique** → idempotent across restarts and workers (inserted in a
+  savepoint). Runs are claimed with a conditional UPDATE and sent through `ProxyService.forward(pin_account_id=…,
+  force_account=paused&&include_paused)` (new params; sticky off for pinned requests; one account, no spill), logged as a
+  normal request with UA `claude-lb-automation/<version>` (no API key) so spend/quota/rollups update. Skips without a
+  request: account paused (unless included), breaker-disabled, deleted, or **model refused** (active block); an upstream
+  model refusal during the run marks `skipped: model refused` and records the block. Pending runs older than `GRACE`
+  → `skipped (missed)`; `running` older than 15 min → `failed (interrupted)`. **Run now** `POST /api/automations/{id}/run`
+  → 202, runs in a background task; 429 + `retry-after` if the job had a cycle in the last 5 min (manual or
+  scheduled). `GET /api/automations` → jobs with targets, missing ids, `next_run_at`, `last_cycle`, `estimate`
+  (prompt tokens ≈ chars/4 + 8, `per_request_usd` upper bound with `max_tokens` output, API-key vs subscription
+  counts, `per_run_usd` for API-key accounts) + caps. `GET /api/automations/runs?job_id*&status*&trigger&account_id&
+  limit&offset` → cycles (aggregate status pending/running/success/partial/failed/skipped, counts, tokens, cost, runs).
+  `POST`, `GET|PATCH|DELETE /api/automations/{id}` (delete removes the run records; request logs stay). Audited
+  `automation.created/updated/enabled/disabled/deleted/run_now`.
+- **Frontend**
+  - Auth: `AuthStatusSchema` gains `role`/`guestAccessEnabled`/`guestPasswordRequired`; store derives `role`,
+    `permissions`, `canWrite = authenticated && role !== guest`, new `loginAsGuest`. `GuestLogin` under the sign-in form
+    ("Continue as guest", password field when required). `ReadOnlyBanner` on every page of a guest session.
+  - Settings: `GuestAccessSettings` card (admin only; switch + set/change/remove guest password, all behind confirms
+    that spell out the exposure) and `FirewallSettings` card (`features/firewall`, codex code replaced): mode radio with
+    confirm (warns when your address is not covered / list empty), "your address as seen by claude-lb: … proxy
+    allowed/blocked", add form (preview via `/check`; in allowlist mode an entry that leaves you out asks "Add anyway"),
+    table with IPv4/6 tag, "you" badge, inline note edit, remove confirm (warns when it is the last entry covering you).
+    Read-only for guests.
+  - `/automations` under Advanced (`features/automations`): jobs table (search, enabled filter, schedule summary + spread,
+    model + max tokens, targets "+N more"/missing, next run + countdown, last cycle badge, max cost/run with API-key vs
+    subscription counts, enable switch, Run now (confirm with cost warning), Edit, Delete (confirm)); job dialog (name,
+    enabled, day toggles + Weekdays/Every day, time, spread, timezone with IANA datalist defaulting to the browser zone,
+    "a 5-hour window started at 07:00 resets around 12:00" hint, model with catalog datalist, prompt, max tokens with
+    cap, account multi-select (empty = all) + include paused, cost note; edit sends only changed fields); recent runs
+    grouped by cycle with filters (automation, result, trigger), expandable per-account rows (status, HTTP, duration,
+    error, tokens, cost), pagination; 3 s polling while a cycle is in flight.
+  - Audit: 15 new actions in `action-labels.ts` + area dots for `firewall`/`automation`.
+  - i18n: en +224 / ko +213 keys (`firewall.*`, `settings.guest.*`, `auth.guest.*`, `automations.*`, audit labels);
+    17 codex keys removed from en/ko and 22 from zh-CN (zh-CN falls back to English for all G2 strings).
+  - MSW: `g2Handlers` (guest login/config, firewall incl. CIDR coverage, automations incl. run-now cycles; writes return
+    403 for a guest session), factories `createFirewallEntryWire`, `createAutomation{Job,Run,Cycle}Wire`,
+    `createDefaultAutomationWires`; helpers `setMockGuest`, `setMockFirewall`/`getMockFirewall`,
+    `setMockAutomations`/`getMockAutomations`; legacy codex firewall handlers removed; coverage test updated.
+
+**Results**: `pytest` 588 passed (+44: `test_firewall.py` 17, `test_guest_role.py` 8 — incl. a sweep over every
+write route in the app's OpenAPI schema (34) asserting 403 for a guest —, `test_automations.py` 19 — schedule
+timezone/DST/validation, slot idempotency across "restarts", grace/armed/disabled, spread, missed/interrupted, skips,
+include-paused, upstream model refusal, upstream error, API CRUD/estimate/run-now/429/runs/audit); `ruff` clean;
+`npm test` 75 files / 422 tests (new: firewall-settings 8, guest-access-settings 3, automations-page 7, schedule 3,
+`__integration__/guest-flow` 3; header/advanced-pages/auth/settings tests updated); `npm run lint` clean;
+`npm run build` OK.
+Browser + curl (demo on :2461, fresh data dir, Korean + dark): added `10.0.0.0/8 (사무실)`, switched to 허용 목록 → confirm
+warned "내 주소(127.0.0.1)가 목록에 없어서…" → curl `POST /v1/messages` from 127.0.0.1 with the demo key = **403
+permission_error** while `GET /api/firewall` = 200; added `127.0.0.1` ("내 주소" badge, status "프록시 허용") → curl
+**200**; removing it showed the "유일한 항목" warning (cancelled). Set a dashboard password, enabled guest access (confirm
+text shown), created "출근 전 5시간 창 시작" (평일 07:00 Asia/Seoul, claude-max-5x + prod-eu, est. "≤ $0.0001 · API 키 1개
+· 구독 1개(정액)"), Run now → cycle "2개 중 2개 성공", per-account HTTP 200 rows; `/api/request-logs?search=claude-lb-
+automation` → 2 rows (both accounts, UA `claude-lb-automation/0.6.1`); a second run now → 429. Second isolated browser
+context: sign-in screen shows "게스트로 보기 / 게스트로 계속" → read-only banner, no create/run/edit/delete buttons,
+switch disabled; `fetch POST /api/automations` and `PUT /api/firewall/mode` from the guest page → **403**. Audit log
+shows all firewall/guest/automation events (guest login with actor `guest`). 390 px: `/automations` (guest) and
+`/settings` firewall card scrollWidth 390. Console: only the two deliberate 403s.
+
+**Known issues**
+- Firewall and its cache are per process (5 s TTL; other workers pick up a change within that). No trusted-proxy
+  support: behind a reverse proxy every client is the proxy's address.
+- Automations scheduler runs in every worker; `slot_key` uniqueness prevents double sends, but each worker will try
+  to plan (harmless IntegrityError, logged at INFO). Runs are executed inside the tick, so a very slow upstream delays
+  that worker's next tick (grace is 15 min).
+- The 5-minute minimum interval is enforced for Run now (and is implied by the one-time-per-day schedule); there is no
+  multi-time-per-day schedule.
+- Cost estimate is an upper bound from the built-in price table (chars/4 token guess); unknown models estimate $0.
+- The demo's fake upstream ignores `max_tokens`, so demo automation runs report ~1k output tokens.
+- Guest role keeps masked credential/key hints and request-log client IPs visible (same as admin).
+- zh-CN lacks all G2 strings.
+
+**Notes for Step H**
+- Old `index.html` still exists; nothing in G2 depends on it. `features/quota-planner` is still a codex-lb leftover with
+  legacy MSW handlers (unused by any page) — remove in H.
+- README/CHANGELOG should document: firewall semantics (proxy-only, no loopback exemption, no X-Forwarded-For),
+  guest role, automations (UA `claude-lb-automation`, grace/idempotency, 5-min cooldown, `max_tokens` ≤ 1024).

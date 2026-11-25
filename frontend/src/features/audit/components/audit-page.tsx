@@ -30,6 +30,8 @@ const AREA_DOT: Record<string, string> = {
   health: "bg-emerald-500",
   settings: "bg-slate-400",
   sticky: "bg-pink-500",
+  firewall: "bg-red-500",
+  automation: "bg-teal-500",
 };
 
 function EventRow({ event }: { event: AuditEvent }) {

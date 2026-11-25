@@ -10,6 +10,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { InsecureModeBanner } from "@/features/auth/components/insecure-mode-banner";
+import { ReadOnlyBanner } from "@/features/auth/components/read-only-banner";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
@@ -33,6 +34,9 @@ const StickySessionsPage = lazy(() =>
   import("@/features/sticky-sessions/components/sticky-sessions-page").then((m) => ({
     default: m.StickySessionsPage,
   })),
+);
+const AutomationsPage = lazy(() =>
+  import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
 );
 const SettingsPage = lazy(() =>
   import("@/features/settings/components/settings-page").then((m) => ({ default: m.SettingsPage })),
@@ -59,6 +63,7 @@ function AppLayout() {
         showLogout={authEnabled && passwordRequired}
       />
       <InsecureModeBanner />
+      <ReadOnlyBanner />
       <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
         <Suspense fallback={null}>
           <Outlet />
@@ -85,6 +90,7 @@ export default function App() {
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/models" element={<ModelCatalogPage />} />
             <Route path="/sticky-sessions" element={<StickySessionsPage />} />
+            <Route path="/automations" element={<AutomationsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Route>
         </Routes>

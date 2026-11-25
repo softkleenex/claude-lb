@@ -1,0 +1,1 @@
+import{r as e}from"./rolldown-runtime-XKyaHtl9.js";import{S as t}from"./vendor-query-DS9m2DBb.js";var n=e(t(),1);function r(){let[e,t]=(0,n.useState)(!1),[r,i]=(0,n.useState)(null),a=(0,n.useCallback)(e=>{i(e??null),t(!0)},[]),o=(0,n.useCallback)(()=>{t(!1),i(null)},[]);return{open:e,data:r,onOpenChange:(0,n.useCallback)(e=>{e?t(!0):o()},[o]),show:a,hide:o}}export{r as t};

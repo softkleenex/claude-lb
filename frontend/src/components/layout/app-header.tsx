@@ -33,6 +33,7 @@ const ADVANCED_NAV_ITEMS: ReadonlyArray<{ to: string; labelKey: string }> = [
   { to: "/audit", labelKey: "nav.audit" },
   { to: "/models", labelKey: "nav.models" },
   { to: "/sticky-sessions", labelKey: "nav.stickySessions" },
+  { to: "/automations", labelKey: "nav.automations" },
 ];
 
 export type AppHeaderProps = {

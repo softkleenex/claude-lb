@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import {
   getAuthStatus,
+  guestLogin as guestLoginRequest,
   login as loginRequest,
   logout as logoutRequest,
   setPassword as setPasswordRequest,
@@ -25,8 +26,11 @@ type AuthState = {
   /** Signed in without any password protecting the management plane. */
   insecure: boolean;
   reason: string;
-  // Role plumbing for the guest role (Step G). Today every signed-in user is an admin.
+  /** `guest` = read-only session; every write control is hidden or disabled. */
   role: DashboardRole;
+  /** Guest sign-in is offered on the sign-in screen. */
+  guestAccessEnabled: boolean;
+  guestPasswordRequired: boolean;
   permissions: DashboardPermission[];
   canWrite: boolean;
   loading: boolean;
@@ -34,6 +38,7 @@ type AuthState = {
   error: string | null;
   refreshSession: () => Promise<AuthStatus>;
   login: (password: string, totpCode?: string) => Promise<AuthStatus>;
+  loginAsGuest: (password?: string) => Promise<AuthStatus>;
   setupPassword: (password: string, bootstrapToken?: string) => Promise<AuthStatus>;
   logout: () => Promise<void>;
   clearError: () => void;
@@ -41,6 +46,7 @@ type AuthState = {
 
 function deriveState(status: AuthStatus): Partial<AuthState> {
   const authEnabled = status.authEnabled;
+  const guest = status.authenticated && status.role === "guest";
   return {
     passwordRequired: status.configured,
     authenticated: status.authenticated,
@@ -49,9 +55,11 @@ function deriveState(status: AuthStatus): Partial<AuthState> {
     bootstrapRequired: authEnabled && !status.configured && !status.authenticated,
     insecure: status.authenticated && (!authEnabled || !status.configured),
     reason: status.reason,
-    role: "admin",
-    permissions: status.authenticated ? ["read", "write"] : [],
-    canWrite: status.authenticated,
+    role: guest ? "guest" : "admin",
+    guestAccessEnabled: status.guestAccessEnabled,
+    guestPasswordRequired: status.guestPasswordRequired,
+    permissions: !status.authenticated ? [] : guest ? ["read"] : ["read", "write"],
+    canWrite: status.authenticated && !guest,
   };
 }
 
@@ -69,6 +77,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   insecure: false,
   reason: "",
   role: "admin",
+  guestAccessEnabled: false,
+  guestPasswordRequired: false,
   permissions: [],
   canWrite: false,
   loading: false,
@@ -110,6 +120,26 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ loading: false, initialized: true });
     }
   },
+  loginAsGuest: async (password) => {
+    set({ loading: true, error: null });
+    isLoginInProgress = true;
+    try {
+      const status = await guestLoginRequest(password || undefined);
+      return applyStatus(set, status);
+    } catch (error) {
+      const message =
+        error instanceof ApiError && error.status === 401
+          ? INVALID_CREDENTIALS_KEY
+          : error instanceof Error
+            ? error.message
+            : "Login failed";
+      set({ error: message });
+      throw error;
+    } finally {
+      isLoginInProgress = false;
+      set({ loading: false, initialized: true });
+    }
+  },
   setupPassword: async (password, bootstrapToken) => {
     set({ loading: true, error: null });
     try {
@@ -126,7 +156,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ loading: true, error: null });
     try {
       await logoutRequest();
-      set({ authenticated: false, permissions: [], canWrite: false });
+      set({ authenticated: false, role: "admin", permissions: [], canWrite: false });
       await useAuthStore.getState().refreshSession();
     } finally {
       set({ loading: false });

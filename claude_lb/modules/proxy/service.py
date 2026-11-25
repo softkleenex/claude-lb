@@ -199,9 +199,16 @@ class ProxyService:
         body: bytes,
         api_key: ApiKey | None,
         session_key: str | None = None,
+        pin_account_id: str | None = None,
+        force_account: bool = False,
     ) -> ProxyOutcome:
         """``session_key`` is the conversation key when the caller already computed it
-        (it is logged as well); otherwise it is derived here when sticky routing needs it."""
+        (it is logged as well); otherwise it is derived here when sticky routing needs it.
+
+        ``pin_account_id`` sends the request through that account only (automations);
+        ``force_account`` additionally ignores its availability — used for a paused
+        account an automation was told to include. Neither is reachable from clients.
+        """
         env = get_settings()
         async with session_scope() as session:
             runtime = await settings_service.load(session)
@@ -209,7 +216,7 @@ class ProxyService:
         model, wants_stream = self._peek_request(body)
         sticky_key = (
             (session_key or sticky.session_key(body, api_key_id=api_key.id if api_key else None))
-            if runtime.sticky_sessions_enabled
+            if runtime.sticky_sessions_enabled and pin_account_id is None
             else None
         )
         assigned_ids = api_key.assigned_account_ids if api_key else None
@@ -230,9 +237,12 @@ class ProxyService:
                         raise UpstreamExhausted(
                             "none of the accounts assigned to this API key exist any more", status_code=503
                         )
-                accounts = await self._filter_by_model(
-                    session, all_accounts, model, keep_id=api_key.pinned_account_id if api_key else None
-                )
+                if pin_account_id is not None:
+                    all_accounts = [a for a in all_accounts if a.id == pin_account_id]
+                    if not all_accounts:
+                        raise UpstreamExhausted("the account this request is pinned to no longer exists")
+                pinned_id = pin_account_id or (api_key.pinned_account_id if api_key else None)
+                accounts = await self._filter_by_model(session, all_accounts, model, keep_id=pinned_id)
                 preferred = (
                     sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
                     # Only honour affinity on the first attempt; after a failure the whole
@@ -241,13 +251,18 @@ class ProxyService:
                     else None
                 )
                 try:
-                    account = lb.select_account(
-                        accounts,
-                        strategy=runtime.routing_strategy,
-                        exclude_ids=tried,
-                        pinned_account_id=api_key.pinned_account_id if api_key else None,
-                        preferred_account_id=preferred,
-                    )
+                    if force_account and pin_account_id is not None:
+                        if pin_account_id in tried:
+                            raise lb.NoAccountAvailable("pinned account already tried")
+                        account = all_accounts[0]
+                    else:
+                        account = lb.select_account(
+                            accounts,
+                            strategy=runtime.routing_strategy,
+                            exclude_ids=tried,
+                            pinned_account_id=pinned_id,
+                            preferred_account_id=preferred,
+                        )
                 except lb.NoAccountAvailable as exc:
                     if tried:
                         break

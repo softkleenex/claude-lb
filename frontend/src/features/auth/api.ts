@@ -1,6 +1,8 @@
-import { del, get, post } from "@/lib/api-client";
+import { del, get, patch, post } from "@/lib/api-client";
 import {
   AuthStatusSchema,
+  type GuestConfigPatch,
+  GuestConfigSchema,
   type LoginRequest,
   type SetPasswordRequest,
   TotpEnrollmentSchema,
@@ -20,6 +22,22 @@ export function login(payload: LoginRequest) {
     body: payload.totpCode ? payload : { password: payload.password },
     suppressUnauthorizedHandler: true,
   });
+}
+
+/** Read-only session. `password` only when guest access has one. */
+export function guestLogin(password?: string) {
+  return post(`${AUTH_BASE_PATH}/guest/login`, AuthStatusSchema, {
+    body: password ? { password } : {},
+    suppressUnauthorizedHandler: true,
+  });
+}
+
+export function getGuestConfig() {
+  return get(`${AUTH_BASE_PATH}/guest`, GuestConfigSchema);
+}
+
+export function updateGuestConfig(changes: GuestConfigPatch) {
+  return patch(`${AUTH_BASE_PATH}/guest`, GuestConfigSchema, { body: changes });
 }
 
 export function logout() {

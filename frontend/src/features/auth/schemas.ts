@@ -9,7 +9,6 @@ const dashboardPasswordSchema = z.string().min(MIN_DASHBOARD_PASSWORD_LENGTH, {
   message: "settings.password.validation.minLength",
 });
 
-// Guest access arrives in Step G; until then every signed-in user is an admin.
 export const DashboardRoleSchema = z.enum(["admin", "guest"]);
 export const DashboardPermissionSchema = z.enum(["read", "write"]);
 
@@ -19,8 +18,24 @@ export const AuthStatusSchema = z.object({
   totpEnabled: z.boolean(),
   authenticated: z.boolean(),
   reason: z.string().default(""),
+  /** `guest` sessions are read-only: the backend answers every write with 403. */
+  role: z.enum(["admin", "guest"]).catch("admin").default("admin"),
+  guestAccessEnabled: z.boolean().default(false),
+  guestPasswordRequired: z.boolean().default(false),
   authEnabled: z.boolean().default(true),
 });
+
+/** `GET/PATCH /api/auth/guest`. */
+export const GuestConfigSchema = z.object({
+  enabled: z.boolean(),
+  passwordSet: z.boolean(),
+});
+
+export type GuestConfigPatch = {
+  enabled?: boolean;
+  password?: string;
+  clearPassword?: boolean;
+};
 
 export const LoginRequestSchema = z.object({
   password: z.string().min(1, { message: PASSWORD_REQUIRED_MESSAGE }),
@@ -66,6 +81,7 @@ export const TotpEnrollmentSchema = z.object({
 });
 
 export type AuthStatus = z.infer<typeof AuthStatusSchema>;
+export type GuestConfig = z.infer<typeof GuestConfigSchema>;
 export type DashboardRole = z.infer<typeof DashboardRoleSchema>;
 export type DashboardPermission = z.infer<typeof DashboardPermissionSchema>;
 export type LoginRequest = z.infer<typeof LoginRequestSchema>;

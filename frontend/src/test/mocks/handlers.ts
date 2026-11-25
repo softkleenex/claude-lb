@@ -46,6 +46,14 @@ import {
   createCatalogWire,
   createDefaultAuditEventWires,
   createDefaultStickyEntryWires,
+  type AutomationCycleWire,
+  type AutomationJobWire,
+  type FirewallEntryWire,
+  createAutomationCycleWire,
+  createAutomationJobWire,
+  createAutomationRunWire,
+  createDefaultAutomationWires,
+  createFirewallEntryWire,
 } from "@/test/mocks/factories";
 
 const REQUEST_STATUS_ORDER = [
@@ -59,10 +67,6 @@ const REQUEST_STATUS_ORDER = [
 ] as const;
 
 // ── Zod schemas for mock request bodies ──
-
-const FirewallIpCreatePayloadSchema = z.looseObject({
-  ipAddress: z.string().optional(),
-});
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
   mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
@@ -132,7 +136,10 @@ type MockState = {
   quotaPlannerDecisions: QuotaPlannerDecision[];
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKeyWire[];
-  firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
+  firewall: { mode: "allow_all" | "allowlist"; entries: FirewallEntryWire[]; clientIp: string };
+  guest: { enabled: boolean; password: string | null };
+  automationJobs: AutomationJobWire[];
+  automationCycles: AutomationCycleWire[];
   reportOverrides: Partial<ReportWire>;
   stickyEntries: StickyEntryWire[];
   auditEvents: AuditEventWire[];
@@ -153,7 +160,10 @@ function createInitialState(): MockState {
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeyWires(),
-    firewallEntries: [],
+    firewall: { mode: "allow_all", entries: [createFirewallEntryWire()], clientIp: "127.0.0.1" },
+    guest: { enabled: false, password: null },
+    automationJobs: createDefaultAutomationWires().jobs,
+    automationCycles: createDefaultAutomationWires().cycles,
     reportOverrides: {},
     stickyEntries: createDefaultStickyEntryWires(),
     auditEvents: createDefaultAuditEventWires(),
@@ -742,13 +752,13 @@ const claudeLbHandlers = [
     if (!passwordOk || !totpOk) {
       return detail(401, "invalid credentials");
     }
-    state.authStatus = { ...state.authStatus, authenticated: true, reason: "", totp_enabled: state.totpEnabled };
+    state.authStatus = { ...state.authStatus, authenticated: true, role: "admin", reason: "", totp_enabled: state.totpEnabled };
     return HttpResponse.json(state.authStatus);
   }),
 
   http.post("/api/auth/logout", () => {
     // Loopback without a password stays trusted after logout, as on the real server.
-    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured };
+    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured, role: "admin" };
     return new HttpResponse(null, { status: 204 });
   }),
 
@@ -822,7 +832,7 @@ const claudeLbHandlers = [
   http.post("/api/auth/sessions/revoke-all", () => {
     const denied = managementAuthError();
     if (denied) return denied;
-    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured };
+    state.authStatus = { ...state.authStatus, authenticated: !state.authStatus.configured, role: "admin" };
     return new HttpResponse(null, { status: 204 });
   }),
 
@@ -1171,7 +1181,329 @@ const extrasHandlers = [
   }),
 ];
 
+// ── Step G2: firewall, guest role, automations ──
+
+/** `require_management_auth` for a write route: 401 signed out, 403 for a guest. */
+function writeAuthError(): Response | null {
+  const denied = managementAuthError();
+  if (denied) return denied;
+  if (state.authStatus.role === "guest") {
+    return detail(403, "read-only guest access cannot change anything", { "x-claude-lb-auth": "read-only" });
+  }
+  return null;
+}
+
+/** Mirrors `firewall.service.normalize` for the shapes the tests use. */
+function normalizeNetwork(raw: string): string | null {
+  const value = raw.trim();
+  const v4 = /^(\d{1,3})(\.\d{1,3}){3}(\/(\d{1,2}))?$/.exec(value);
+  if (v4) {
+    const [address, prefix] = value.split("/");
+    if (address.split(".").some((part) => Number(part) > 255)) return null;
+    if (prefix !== undefined && Number(prefix) > 32) return null;
+    return prefix === undefined || prefix === "32" ? address : value;
+  }
+  if (/^[0-9a-f:]+(\/\d{1,3})?$/i.test(value) && value.includes(":")) {
+    return value.toLowerCase().replace(/\/128$/, "");
+  }
+  return null;
+}
+
+function coversMockClient(network: string): boolean {
+  const ip = state.firewall.clientIp;
+  if (network === ip) return true;
+  const [base, prefix] = network.split("/");
+  if (prefix === undefined || base.includes(":") || ip.includes(":")) return false;
+  const toInt = (address: string) => address.split(".").reduce((acc, part) => acc * 256 + Number(part), 0);
+  const block = 2 ** (32 - Number(prefix));
+  return Math.floor(toInt(base) / block) === Math.floor(toInt(ip) / block);
+}
+
+function firewallState() {
+  const entries = state.firewall.entries.map((entry) => ({ ...entry, covers_client: coversMockClient(entry.network) }));
+  const covered = entries.some((entry) => entry.covers_client);
+  return {
+    mode: state.firewall.mode,
+    entries,
+    client_ip: state.firewall.clientIp,
+    client_allowed: state.firewall.mode === "allow_all" || covered,
+    client_covered: covered,
+  };
+}
+
+function guestStatusFields() {
+  const enabled = state.guest.enabled && state.authStatus.configured;
+  return { guest_access_enabled: enabled, guest_password_required: enabled && state.guest.password !== null };
+}
+
+let automationSeq = 100;
+
+function automationTargets(accountIds: string[], includePaused: boolean) {
+  const accounts = state.accounts.filter((account) =>
+    accountIds.length ? accountIds.includes(account.id) : includePaused || !account.paused,
+  );
+  return accounts.map((account) => ({ id: account.id, name: account.name, plan_type: account.plan_type, paused: account.paused }));
+}
+
+function jobFromBody(body: Record<string, unknown>, base: AutomationJobWire): AutomationJobWire | Response {
+  const schedule = (body.schedule ?? base.schedule) as Record<string, unknown>;
+  const maxTokens = body.max_tokens ?? base.max_tokens;
+  if (typeof maxTokens !== "number" || maxTokens < 1 || maxTokens > 1024) {
+    return detail(422, "max_tokens: Input should be less than or equal to 1024");
+  }
+  const days = (schedule.days as string[] | undefined) ?? base.schedule.days;
+  if (days.length === 0) return detail(422, "pick at least one weekday");
+  const accountIds = (body.account_ids as string[] | undefined) ?? base.account_ids;
+  const unknown = accountIds.filter((id) => !state.accounts.some((account) => account.id === id));
+  if (unknown.length) return detail(422, `unknown account id(s): ${unknown.join(", ")}`);
+  const includePaused = (body.include_paused_accounts as boolean | undefined) ?? base.include_paused_accounts;
+  const targets = automationTargets(accountIds, includePaused);
+  const api = targets.filter((target) => target.plan_type === "api").length;
+  const enabled = (body.enabled as boolean | undefined) ?? base.enabled;
+  return {
+    ...base,
+    name: (body.name as string | undefined) ?? base.name,
+    enabled,
+    schedule: {
+      days,
+      time: (schedule.time as string | undefined) ?? base.schedule.time,
+      timezone: (schedule.timezone as string | undefined) ?? base.schedule.timezone,
+      spread_minutes: (schedule.spread_minutes as number | undefined) ?? base.schedule.spread_minutes,
+    },
+    model: (body.model as string | undefined) ?? base.model,
+    prompt: (body.prompt as string | undefined) ?? base.prompt,
+    max_tokens: maxTokens,
+    account_ids: accountIds,
+    include_paused_accounts: includePaused,
+    targets,
+    next_run_at: enabled ? base.next_run_at ?? new Date(Date.now() + 3_600_000).toISOString() : null,
+    estimate: { ...base.estimate, api_accounts: api, subscription_accounts: targets.length - api, per_run_usd: base.estimate.per_request_usd * api },
+  };
+}
+
+const g2Handlers = [
+  http.post("/api/auth/guest/login", async ({ request }) => {
+    const body = await readJsonObject(request);
+    if (!state.authStatus.configured) return detail(409, "guest access needs a dashboard password to be set first");
+    if (!state.guest.enabled) return detail(403, "guest access is disabled");
+    if (state.guest.password !== null && body.password !== state.guest.password) return detail(401, "invalid credentials");
+    state.authStatus = { ...state.authStatus, authenticated: true, role: "guest", reason: "", ...guestStatusFields() };
+    return HttpResponse.json(state.authStatus);
+  }),
+
+  http.get("/api/auth/guest", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json({ enabled: state.guest.enabled, password_set: state.guest.password !== null });
+  }),
+
+  http.patch("/api/auth/guest", async ({ request }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    if (body.enabled === true && !state.authStatus.configured) {
+      return detail(409, "set a dashboard password before enabling guest access");
+    }
+    if (typeof body.enabled === "boolean") state.guest.enabled = body.enabled;
+    if (typeof body.password === "string") state.guest.password = body.password;
+    if (body.clear_password === true) state.guest.password = null;
+    state.authStatus = { ...state.authStatus, ...guestStatusFields() };
+    return HttpResponse.json({ enabled: state.guest.enabled, password_set: state.guest.password !== null });
+  }),
+
+  http.get("/api/firewall", () => managementAuthError() ?? HttpResponse.json(firewallState())),
+
+  http.get("/api/firewall/check", ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const raw = new URL(request.url).searchParams.get("network") ?? "";
+    const network = normalizeNetwork(raw);
+    if (!network) return detail(422, `${raw} is not a valid IPv4/IPv6 address or CIDR range`);
+    const covers = coversMockClient(network);
+    const current = firewallState();
+    return HttpResponse.json({
+      network,
+      client_ip: state.firewall.clientIp,
+      covers_client: covers,
+      client_allowed_after: current.client_allowed || covers,
+    });
+  }),
+
+  http.put("/api/firewall/mode", async ({ request }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    if (body.mode !== "allow_all" && body.mode !== "allowlist") return detail(422, "unknown mode");
+    state.firewall.mode = body.mode;
+    return HttpResponse.json(firewallState());
+  }),
+
+  http.post("/api/firewall/entries", async ({ request }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const network = normalizeNetwork(String(body.network ?? ""));
+    if (!network) return detail(422, `${String(body.network)} is not a valid IPv4/IPv6 address or CIDR range`);
+    if (state.firewall.entries.some((entry) => entry.network === network)) {
+      return detail(409, `${network} is already on the list`);
+    }
+    const entry = createFirewallEntryWire({
+      id: `fw_${state.firewall.entries.length + 2}`,
+      network,
+      note: String(body.note ?? ""),
+      version: network.includes(":") ? 6 : 4,
+      addresses: network.includes("/") ? 2 ** (32 - Number(network.split("/")[1])) : 1,
+      covers_client: coversMockClient(network),
+      created_at: new Date().toISOString(),
+    });
+    state.firewall.entries = [...state.firewall.entries, entry];
+    return HttpResponse.json(entry, { status: 201 });
+  }),
+
+  http.patch("/api/firewall/entries/:entryId", async ({ request, params }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    const entry = state.firewall.entries.find((candidate) => candidate.id === params.entryId);
+    if (!entry) return detail(404, "firewall entry not found");
+    entry.note = String(body.note ?? "");
+    return HttpResponse.json({ ...entry, covers_client: coversMockClient(entry.network) });
+  }),
+
+  http.delete("/api/firewall/entries/:entryId", ({ params }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const before = state.firewall.entries.length;
+    state.firewall.entries = state.firewall.entries.filter((entry) => entry.id !== params.entryId);
+    if (state.firewall.entries.length === before) return detail(404, "firewall entry not found");
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.get("/api/automations", () => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    return HttpResponse.json({
+      jobs: state.automationJobs,
+      total: state.automationJobs.length,
+      max_tokens_cap: 1024,
+      max_spread_minutes: 120,
+      min_interval_minutes: 5,
+    });
+  }),
+
+  http.post("/api/automations", async ({ request }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const body = await readJsonObject(request);
+    if (!body.name || !body.model) return detail(422, "name and model are required");
+    automationSeq += 1;
+    const job = jobFromBody(
+      body,
+      createAutomationJobWire({ id: `job_${automationSeq}`, enabled: true, account_ids: [], last_cycle: null, next_run_at: null }),
+    );
+    if (job instanceof Response) return job;
+    state.automationJobs = [...state.automationJobs, job];
+    return HttpResponse.json(job, { status: 201 });
+  }),
+
+  http.get("/api/automations/runs", ({ request }) => {
+    const denied = managementAuthError();
+    if (denied) return denied;
+    const url = new URL(request.url);
+    const jobIds = url.searchParams.getAll("job_id");
+    const statuses = url.searchParams.getAll("status");
+    const trigger = url.searchParams.get("trigger");
+    const limit = Number(url.searchParams.get("limit") ?? 20);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const cycles = state.automationCycles.filter(
+      (cycle) =>
+        (!jobIds.length || jobIds.includes(cycle.job_id)) &&
+        (!statuses.length || cycle.runs.some((run) => statuses.includes(run.status))) &&
+        (!trigger || cycle.trigger === trigger),
+    );
+    const page = cycles.slice(offset, offset + limit);
+    return HttpResponse.json({ cycles: page, total: cycles.length, limit, offset, has_more: offset + page.length < cycles.length });
+  }),
+
+  http.patch("/api/automations/:jobId", async ({ request, params }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const job = state.automationJobs.find((candidate) => candidate.id === params.jobId);
+    if (!job) return detail(404, "automation not found");
+    const body = await readJsonObject(request);
+    if (Object.keys(body).length === 0) return detail(422, "nothing to change");
+    const updated = jobFromBody(body, job);
+    if (updated instanceof Response) return updated;
+    state.automationJobs = state.automationJobs.map((candidate) => (candidate.id === job.id ? updated : candidate));
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/automations/:jobId", ({ params }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    if (!state.automationJobs.some((job) => job.id === params.jobId)) return detail(404, "automation not found");
+    state.automationJobs = state.automationJobs.filter((job) => job.id !== params.jobId);
+    state.automationCycles = state.automationCycles.filter((cycle) => cycle.job_id !== params.jobId);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/automations/:jobId/run", ({ params }) => {
+    const denied = writeAuthError();
+    if (denied) return denied;
+    const job = state.automationJobs.find((candidate) => candidate.id === params.jobId);
+    if (!job) return detail(404, "automation not found");
+    const cycleKey = `${job.id}:manual:${automationSeq++}`;
+    const now = new Date().toISOString();
+    const cycle = createAutomationCycleWire(
+      job.targets.map((target, index) =>
+        createAutomationRunWire({
+          id: `${cycleKey}:${index}`,
+          job_id: job.id,
+          job_name: job.name,
+          cycle_key: cycleKey,
+          trigger: "manual",
+          scheduled_for: now,
+          started_at: now,
+          finished_at: now,
+          account_id: target.id,
+          account_name: target.name,
+          model: job.model,
+        }),
+      ),
+    );
+    state.automationCycles = [cycle, ...state.automationCycles];
+    state.automationJobs = state.automationJobs.map((candidate) =>
+      candidate.id === job.id ? { ...candidate, last_cycle: cycle } : candidate,
+    );
+    return HttpResponse.json({ cycle_key: cycleKey, runs: cycle.total }, { status: 202 });
+  }),
+];
+
+/** Test helpers for the G2 mocks. */
+export function setMockGuest(guest: { enabled: boolean; password?: string | null }): void {
+  state.guest = { enabled: guest.enabled, password: guest.password ?? null };
+  state.authStatus = { ...state.authStatus, ...guestStatusFields() };
+}
+
+export function setMockFirewall(overrides: Partial<MockState["firewall"]>): void {
+  state.firewall = { ...state.firewall, ...overrides };
+}
+
+export function getMockFirewall(): MockState["firewall"] {
+  return state.firewall;
+}
+
+export function setMockAutomations(jobs: AutomationJobWire[], cycles: AutomationCycleWire[] = []): void {
+  state.automationJobs = jobs;
+  state.automationCycles = cycles;
+}
+
+export function getMockAutomations(): AutomationJobWire[] {
+  return state.automationJobs;
+}
+
 export const handlers = [
+  ...g2Handlers,
   ...extrasHandlers,
   ...claudeLbHandlers,
   ...accountHandlers,
@@ -1298,51 +1630,6 @@ export const handlers = [
           }
         : null,
     });
-  }),
-
-  http.get("/api/firewall/ips", () => {
-    return HttpResponse.json({
-      mode:
-        state.firewallEntries.length === 0 ? "allow_all" : "allowlist_active",
-      entries: state.firewallEntries,
-    });
-  }),
-
-  http.post("/api/firewall/ips", async ({ request }) => {
-    const payload = await parseJsonBody(request, FirewallIpCreatePayloadSchema);
-    const ipAddress = String(payload?.ipAddress || "").trim();
-    if (!ipAddress) {
-      return HttpResponse.json(
-        { error: { code: "invalid_ip", message: "IP address is required" } },
-        { status: 400 },
-      );
-    }
-    if (state.firewallEntries.some((entry) => entry.ipAddress === ipAddress)) {
-      return HttpResponse.json(
-        { error: { code: "ip_exists", message: "IP address already exists" } },
-        { status: 409 },
-      );
-    }
-    const created = { ipAddress, createdAt: new Date().toISOString() };
-    state.firewallEntries = [...state.firewallEntries, created];
-    return HttpResponse.json(created);
-  }),
-
-  http.delete("/api/firewall/ips/:ipAddress", ({ params }) => {
-    const ipAddress = decodeURIComponent(String(params.ipAddress));
-    const exists = state.firewallEntries.some(
-      (entry) => entry.ipAddress === ipAddress,
-    );
-    if (!exists) {
-      return HttpResponse.json(
-        { error: { code: "ip_not_found", message: "IP address not found" } },
-        { status: 404 },
-      );
-    }
-    state.firewallEntries = state.firewallEntries.filter(
-      (entry) => entry.ipAddress !== ipAddress,
-    );
-    return HttpResponse.json({ status: "deleted" });
   }),
 
   http.get("/api/quota-planner/settings", () =>

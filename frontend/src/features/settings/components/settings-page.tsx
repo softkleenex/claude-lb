@@ -5,6 +5,8 @@ import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { FirewallSettings } from "@/features/firewall/components/firewall-settings";
+import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { BackgroundJobSettings, DataRetentionSettings } from "@/features/settings/components/maintenance-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetSettings } from "@/features/settings/components/reset-settings";
@@ -15,9 +17,8 @@ import { useSettings } from "@/features/settings/hooks/use-settings";
 import type { SettingsPatch } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
-// Not rendered until their backends exist (Step G): firewall, sticky-session browser,
-// guest access. codex-only cards (warm-up, reset credits, transport, quota planner,
-// upstream proxy, telemetry, session TTL) were removed for good.
+// codex-only cards (warm-up, reset credits, transport, quota planner, upstream proxy,
+// telemetry, session TTL) were removed for good.
 
 export function SettingsPage() {
   const { t } = useTranslation();
@@ -72,6 +73,8 @@ export function SettingsPage() {
 
         {canWrite ? <PasswordSettings disabled={busy} /> : null}
         {canWrite && authEnabled && passwordRequired ? <TotpSettings disabled={busy} /> : null}
+        {canWrite && authEnabled ? <GuestAccessSettings /> : null}
+        <FirewallSettings canWrite={canWrite} />
 
         {envelope && canWrite ? (
           <ResetSettings disabled={controlsDisabled} onReset={() => resetSettingsMutation.mutate()} />

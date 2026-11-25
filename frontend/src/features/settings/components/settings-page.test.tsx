@@ -27,7 +27,9 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("heading", { name: "Dashboard password" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Two-factor authentication (TOTP)" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Reset to defaults" })).toBeInTheDocument();
-    for (const gone of [/warm-?up/i, /reset credit/i, /websocket/i, /quota planner/i, /upstream proxy/i, /firewall/i, /guest/i]) {
+    expect(await screen.findByRole("heading", { name: "Guest access" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "IP firewall" })).toBeInTheDocument();
+    for (const gone of [/warm-?up/i, /reset credit/i, /websocket/i, /quota planner/i, /upstream proxy/i]) {
       expect(screen.queryByText(gone)).not.toBeInTheDocument();
     }
   });

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import { AuthScreenLayout } from "@/features/auth/components/auth-screen-layout";
 import { BootstrapSetupScreen } from "@/features/auth/components/bootstrap-setup-screen";
+import { GuestLogin } from "@/features/auth/components/guest-login";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 
@@ -15,7 +16,8 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
  * management plane. States:
  *
  * - remote visitor, no password yet → first-time setup (needs the bootstrap token)
- * - password set, not signed in → sign-in (password, then a TOTP step when enabled)
+ * - password set, not signed in → sign-in (password, then a TOTP step when enabled),
+ *   plus "continue as guest" (read-only) when guest access is on
  * - signed in, or loopback with no password (the app shows an insecure-mode banner)
  */
 export function AuthGate({ children }: PropsWithChildren) {
@@ -26,6 +28,7 @@ export function AuthGate({ children }: PropsWithChildren) {
   const authenticated = useAuthStore((state) => state.authenticated);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
+  const guestAccessEnabled = useAuthStore((state) => state.guestAccessEnabled);
   const error = useAuthStore((state) => state.error);
 
   useEffect(() => {
@@ -52,6 +55,7 @@ export function AuthGate({ children }: PropsWithChildren) {
     return (
       <AuthScreenLayout title={t("auth.appTitle")} subtitle={t("auth.appSubtitle")}>
         <LoginForm />
+        {guestAccessEnabled ? <GuestLogin /> : null}
       </AuthScreenLayout>
     );
   }

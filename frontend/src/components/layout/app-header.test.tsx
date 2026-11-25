@@ -38,7 +38,7 @@ describe("AppHeader", () => {
     expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
   });
 
-  it("lists the audit log, model catalog and sticky sessions under Advanced", async () => {
+  it("lists the audit log, model catalog, sticky sessions and automations under Advanced", async () => {
     const user = userEvent.setup();
     renderHeader();
 
@@ -46,6 +46,7 @@ describe("AppHeader", () => {
     expect(await screen.findByRole("menuitem", { name: "Audit log" })).toHaveAttribute("href", "/audit");
     expect(screen.getByRole("menuitem", { name: "Model catalog" })).toHaveAttribute("href", "/models");
     expect(screen.getByRole("menuitem", { name: "Sticky sessions" })).toHaveAttribute("href", "/sticky-sessions");
+    expect(screen.getByRole("menuitem", { name: "Automations" })).toHaveAttribute("href", "/automations");
   });
 
   it("shows the Advanced pages in the mobile menu", async () => {
@@ -57,6 +58,7 @@ describe("AppHeader", () => {
     expect(within(dialog).getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/audit");
     expect(within(dialog).getByRole("link", { name: "Model catalog" })).toHaveAttribute("href", "/models");
     expect(within(dialog).getByRole("link", { name: "Sticky sessions" })).toHaveAttribute("href", "/sticky-sessions");
+    expect(within(dialog).getByRole("link", { name: "Automations" })).toHaveAttribute("href", "/automations");
   });
 
   it("badges Accounts with the number of available accounts", async () => {

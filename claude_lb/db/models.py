@@ -312,6 +312,8 @@ class DashboardSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     client: Mapped[str] = mapped_column(String(255), default="")
+    role: Mapped[str] = mapped_column(String(16), default="admin")
+    """``admin`` (signed in with the dashboard password) or ``guest`` (read-only)."""
 
 
 class AuditEvent(Base):
@@ -413,3 +415,86 @@ class QuotaHistory(Base):
 
 
 Index("ix_quota_history_account_recorded", QuotaHistory.account_id, QuotaHistory.recorded_at)
+
+
+class FirewallEntry(Base):
+    """One IP address or CIDR range allowed to call the proxy (`/v1/*`) in allowlist mode."""
+
+    __tablename__ = "firewall_entries"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    network: Mapped[str] = mapped_column(String(64), unique=True)
+    """Normalized: a bare address for a single host (``10.0.0.5``), else ``net/prefix``."""
+    note: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AutomationJob(Base):
+    """A prompt sent through the pool on a weekly schedule, one request per target account."""
+
+    __tablename__ = "automation_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    schedule_days: Mapped[str] = mapped_column(String(64), default="mon,tue,wed,thu,fri,sat,sun")
+    schedule_time: Mapped[str] = mapped_column(String(5), default="07:00")
+    """Local wall-clock time ``HH:MM`` in ``schedule_timezone``."""
+    schedule_timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    spread_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    """Each account's request is sent at a random offset in ``[0, spread]`` minutes."""
+    model: Mapped[str] = mapped_column(String(128))
+    prompt: Mapped[str] = mapped_column(Text, default="ping")
+    max_tokens: Mapped[int] = mapped_column(Integer, default=16)
+    account_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    """JSON list of target account ids. Empty = every account."""
+    include_paused_accounts: Mapped[bool] = mapped_column(Boolean, default=False)
+    armed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    """Slots before this instant never fire (set on create, enable and schedule change)."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    @property
+    def account_ids(self) -> list[str]:
+        return _json_list(self.account_ids_json) or []
+
+    @account_ids.setter
+    def account_ids(self, value: list[str]) -> None:
+        self.account_ids_json = json.dumps(list(value))
+
+
+class AutomationRun(Base):
+    """One request of an automation cycle, sent through one account.
+
+    A cycle (``cycle_key``) is every account's run for one scheduled slot or one manual
+    trigger. ``slot_key`` is unique, which is what keeps a slot from firing twice — across
+    restarts and across workers.
+    """
+
+    __tablename__ = "automation_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(String(32), index=True)
+    job_name: Mapped[str] = mapped_column(String(128), default="")
+    cycle_key: Mapped[str] = mapped_column(String(160), index=True)
+    slot_key: Mapped[str] = mapped_column(String(200), unique=True)
+    trigger: Mapped[str] = mapped_column(String(16), default="scheduled")
+    """scheduled | manual"""
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    """pending | running | success | failed | skipped"""
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    account_name: Mapped[str] = mapped_column(String(128), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+Index("ix_automation_runs_job_scheduled", AutomationRun.job_id, AutomationRun.scheduled_for)

@@ -1,29 +1,36 @@
 import { z } from "zod";
 
-const FIREWALL_MODES = ["allow_all", "allowlist_active"] as const;
+/** `allow_all` or `allowlist` (only listed addresses may call `/v1/*`). */
+export const FirewallModeSchema = z.enum(["allow_all", "allowlist"]);
 
-const FirewallModeSchema = z.enum(FIREWALL_MODES);
-
-export const FirewallIpEntrySchema = z.object({
-  ipAddress: z.string().min(1),
-  createdAt: z.iso.datetime({ offset: true }),
+export const FirewallEntrySchema = z.object({
+  id: z.string(),
+  network: z.string(),
+  note: z.string(),
+  version: z.number().int(),
+  addresses: z.number(),
+  coversClient: z.boolean().default(false),
+  createdAt: z.string(),
 });
 
-export const FirewallIpsResponseSchema = z.object({
+/** `GET /api/firewall` (also returned by `PUT /api/firewall/mode`). */
+export const FirewallStateSchema = z.object({
   mode: FirewallModeSchema,
-  entries: z.array(FirewallIpEntrySchema).default([]),
+  entries: z.array(FirewallEntrySchema),
+  clientIp: z.string(),
+  clientAllowed: z.boolean(),
+  clientCovered: z.boolean(),
 });
 
-export const FirewallIpCreateRequestSchema = z.object({
-  ipAddress: z.string().min(1),
-});
-
-export const FirewallDeleteResponseSchema = z.object({
-  status: z.string().min(1),
+/** `GET /api/firewall/check?network=`. */
+export const FirewallCheckSchema = z.object({
+  network: z.string(),
+  clientIp: z.string(),
+  coversClient: z.boolean(),
+  clientAllowedAfter: z.boolean(),
 });
 
 export type FirewallMode = z.infer<typeof FirewallModeSchema>;
-export type FirewallIpEntry = z.infer<typeof FirewallIpEntrySchema>;
-export type FirewallIpsResponse = z.infer<typeof FirewallIpsResponseSchema>;
-export type FirewallIpCreateRequest = z.infer<typeof FirewallIpCreateRequestSchema>;
-export type FirewallDeleteResponse = z.infer<typeof FirewallDeleteResponseSchema>;
+export type FirewallEntry = z.infer<typeof FirewallEntrySchema>;
+export type FirewallState = z.infer<typeof FirewallStateSchema>;
+export type FirewallCheck = z.infer<typeof FirewallCheckSchema>;

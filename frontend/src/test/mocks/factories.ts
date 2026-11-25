@@ -109,6 +109,9 @@ export type AuthStatusWire = {
 	authenticated: boolean;
 	reason: string;
 	auth_enabled: boolean;
+	role: "admin" | "guest";
+	guest_access_enabled: boolean;
+	guest_password_required: boolean;
 };
 
 export function createAuthStatus(overrides: Partial<AuthStatusWire> = {}): AuthStatusWire {
@@ -118,6 +121,9 @@ export function createAuthStatus(overrides: Partial<AuthStatusWire> = {}): AuthS
 		authenticated: true,
 		reason: "",
 		auth_enabled: true,
+		role: "admin",
+		guest_access_enabled: false,
+		guest_password_required: false,
 		...overrides,
 	};
 }
@@ -1343,4 +1349,197 @@ export function createDefaultStickyEntryWires(): StickyEntryWire[] {
 			expired: true,
 		}),
 	];
+}
+
+/** `FirewallEntryOut` from `claude_lb.modules.firewall.api`. */
+export type FirewallEntryWire = {
+	id: string;
+	network: string;
+	note: string;
+	version: number;
+	addresses: number;
+	covers_client: boolean;
+	created_at: string;
+};
+
+export function createFirewallEntryWire(overrides: Partial<FirewallEntryWire> = {}): FirewallEntryWire {
+	return {
+		id: "fw_1",
+		network: "10.0.0.0/8",
+		note: "office",
+		version: 4,
+		addresses: 16_777_216,
+		covers_client: false,
+		created_at: hoursFromNow(-24).replace("Z", ""),
+		...overrides,
+	};
+}
+
+/** `RunOut` from `claude_lb.modules.automations.api`. */
+export type AutomationRunWire = {
+	id: string;
+	job_id: string;
+	job_name: string;
+	cycle_key: string;
+	trigger: "scheduled" | "manual";
+	status: "pending" | "running" | "success" | "failed" | "skipped";
+	scheduled_for: string;
+	started_at: string | null;
+	finished_at: string | null;
+	account_id: string | null;
+	account_name: string;
+	model: string;
+	http_status: number | null;
+	input_tokens: number;
+	output_tokens: number;
+	cost_usd: number;
+	duration_ms: number | null;
+	error: string | null;
+};
+
+export type AutomationCycleWire = {
+	cycle_key: string;
+	job_id: string;
+	job_name: string;
+	trigger: "scheduled" | "manual";
+	status: "pending" | "running" | "success" | "partial" | "failed" | "skipped";
+	scheduled_for: string;
+	finished_at: string | null;
+	total: number;
+	succeeded: number;
+	failed: number;
+	skipped: number;
+	pending: number;
+	input_tokens: number;
+	output_tokens: number;
+	cost_usd: number;
+	runs: AutomationRunWire[];
+};
+
+export type AutomationJobWire = {
+	id: string;
+	name: string;
+	enabled: boolean;
+	schedule: { days: string[]; time: string; timezone: string; spread_minutes: number };
+	model: string;
+	prompt: string;
+	max_tokens: number;
+	account_ids: string[];
+	include_paused_accounts: boolean;
+	targets: Array<{ id: string; name: string; plan_type: string; paused: boolean }>;
+	missing_account_ids: string[];
+	next_run_at: string | null;
+	last_cycle: AutomationCycleWire | null;
+	estimate: {
+		prompt_tokens: number;
+		per_request_usd: number;
+		api_accounts: number;
+		subscription_accounts: number;
+		per_run_usd: number;
+	};
+	created_at: string;
+	updated_at: string;
+};
+
+export function createAutomationRunWire(overrides: Partial<AutomationRunWire> = {}): AutomationRunWire {
+	return {
+		id: "run_1",
+		job_id: "job_1",
+		job_name: "Morning window",
+		cycle_key: "job_1:2026-11-26T07:00@Asia/Seoul",
+		trigger: "scheduled",
+		status: "success",
+		scheduled_for: hoursFromNow(-3).replace("Z", ""),
+		started_at: hoursFromNow(-3).replace("Z", ""),
+		finished_at: hoursFromNow(-3).replace("Z", ""),
+		account_id: "acc_max",
+		account_name: "alice-max",
+		model: "claude-haiku-4-5",
+		http_status: 200,
+		input_tokens: 12,
+		output_tokens: 4,
+		cost_usd: 0,
+		duration_ms: 820,
+		error: null,
+		...overrides,
+	};
+}
+
+/** Builds a cycle with the same aggregation rules as the backend's `_cycle_out`. */
+export function createAutomationCycleWire(runs: AutomationRunWire[]): AutomationCycleWire {
+	const statuses = runs.map((run) => run.status);
+	const ok = statuses.filter((status) => status === "success").length;
+	const failed = statuses.filter((status) => status === "failed").length;
+	const skipped = statuses.filter((status) => status === "skipped").length;
+	const pending = statuses.filter((status) => status === "pending" || status === "running").length;
+	const status: AutomationCycleWire["status"] = pending
+		? "running"
+		: ok && (failed || skipped)
+			? "partial"
+			: ok
+				? "success"
+				: failed
+					? "failed"
+					: "skipped";
+	const first = runs[0];
+	return {
+		cycle_key: first.cycle_key,
+		job_id: first.job_id,
+		job_name: first.job_name,
+		trigger: first.trigger,
+		status,
+		scheduled_for: first.scheduled_for,
+		finished_at: pending ? null : first.finished_at,
+		total: runs.length,
+		succeeded: ok,
+		failed,
+		skipped,
+		pending,
+		input_tokens: runs.reduce((sum, run) => sum + run.input_tokens, 0),
+		output_tokens: runs.reduce((sum, run) => sum + run.output_tokens, 0),
+		cost_usd: runs.reduce((sum, run) => sum + run.cost_usd, 0),
+		runs,
+	};
+}
+
+export function createAutomationJobWire(overrides: Partial<AutomationJobWire> = {}): AutomationJobWire {
+	return {
+		id: "job_1",
+		name: "Morning window",
+		enabled: true,
+		schedule: { days: ["mon", "tue", "wed", "thu", "fri"], time: "07:00", timezone: "Asia/Seoul", spread_minutes: 0 },
+		model: "claude-haiku-4-5",
+		prompt: "Reply with OK.",
+		max_tokens: 16,
+		account_ids: ["acc_max", "acc_console"],
+		include_paused_accounts: false,
+		targets: [
+			{ id: "acc_max", name: "alice-max", plan_type: "max_5x", paused: false },
+			{ id: "acc_console", name: "console", plan_type: "api", paused: false },
+		],
+		missing_account_ids: [],
+		next_run_at: hoursFromNow(20).replace("Z", ""),
+		last_cycle: null,
+		estimate: { prompt_tokens: 12, per_request_usd: 0.0001, api_accounts: 1, subscription_accounts: 1, per_run_usd: 0.0001 },
+		created_at: hoursFromNow(-48).replace("Z", ""),
+		updated_at: hoursFromNow(-48).replace("Z", ""),
+		...overrides,
+	};
+}
+
+/** One job with a partially failed scheduled cycle. */
+export function createDefaultAutomationWires(): { jobs: AutomationJobWire[]; cycles: AutomationCycleWire[] } {
+	const cycle = createAutomationCycleWire([
+		createAutomationRunWire(),
+		createAutomationRunWire({
+			id: "run_2",
+			account_id: "acc_console",
+			account_name: "console",
+			status: "failed",
+			http_status: 400,
+			cost_usd: 0,
+			error: "max_tokens: too small",
+		}),
+	]);
+	return { jobs: [createAutomationJobWire({ last_cycle: cycle })], cycles: [cycle] };
 }

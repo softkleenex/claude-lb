@@ -17,6 +17,10 @@ class AuthStatusOut(BaseModel):
     totp_enabled: bool
     authenticated: bool
     reason: str = ""
+    role: str = "admin"
+    """``admin`` or ``guest`` (read-only: every write endpoint answers 403)."""
+    guest_access_enabled: bool = False
+    guest_password_required: bool = False
     auth_enabled: bool = Field(
         default_factory=lambda: get_settings().dashboard_auth_enabled,
         description="False when CLAUDE_LB_DASHBOARD_AUTH_ENABLED=false turns the gate off entirely.",
@@ -31,6 +35,23 @@ class LoginRequest(BaseModel):
 class SetPasswordRequest(BaseModel):
     password: str = Field(min_length=auth.MIN_PASSWORD_LENGTH)
     current_password: str | None = Field(default=None, description="Required once a password is already set.")
+
+
+class GuestLoginRequest(BaseModel):
+    password: str | None = None
+
+
+class GuestConfigOut(BaseModel):
+    enabled: bool
+    password_set: bool
+
+
+class GuestConfigPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool | None = None
+    password: str | None = Field(default=None, min_length=auth.MIN_PASSWORD_LENGTH)
+    clear_password: bool = False
 
 
 class TotpEnrollment(BaseModel):
@@ -92,6 +113,92 @@ async def login(payload: LoginRequest, request: Request, response: Response, ses
     return AuthStatusOut(
         configured=True, totp_enabled=bool(credential and credential.totp_enabled), authenticated=True
     )
+
+
+@router.post("/guest/login", response_model=AuthStatusOut)
+async def guest_login(payload: GuestLoginRequest, request: Request, response: Response, session: SessionDep):
+    """Start a read-only session. Needs guest access switched on (and its password, if set)."""
+    from claude_lb.modules.auth.dependencies import evaluate
+
+    client = client_ip(request)
+    try:
+        auth.check_login_allowed(client)
+    except auth.AuthError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    if not get_settings().dashboard_auth_enabled or not await auth.is_configured(session):
+        raise HTTPException(409, "guest access needs a dashboard password to be set first")
+    enabled, password_set = await auth.guest_config(session)
+    if not enabled:
+        raise HTTPException(403, "guest access is disabled")
+    if not await auth.verify_guest_password(session, payload.password):
+        auth.record_login_failure(client)
+        await audit.record_and_commit(
+            session, action="auth.guest_login", ok=False, detail="invalid guest password", actor="guest",
+            client_ip=client,
+        )
+        raise HTTPException(401, "invalid credentials")
+
+    auth.record_login_success(client)
+    token = await auth.create_session(
+        session, client=request.headers.get("user-agent", ""), role=auth.ROLE_GUEST
+    )
+    await audit.record(
+        session,
+        action="auth.guest_login",
+        detail="with guest password" if password_set else "no guest password",
+        actor="guest",
+        client_ip=client,
+    )
+    _set_session_cookie(response, token, secure=request.url.scheme == "https")
+    result = await evaluate(request, session)
+    return AuthStatusOut(**{**result.__dict__, "authenticated": True, "role": auth.ROLE_GUEST})
+
+
+@router.get("/guest", response_model=GuestConfigOut)
+async def read_guest_config(session: SessionDep, _: ManagementAuthDep) -> GuestConfigOut:
+    enabled, password_set = await auth.guest_config(session)
+    return GuestConfigOut(enabled=enabled, password_set=password_set)
+
+
+@router.patch("/guest", response_model=GuestConfigOut)
+async def update_guest_config(
+    payload: GuestConfigPatch, request: Request, session: SessionDep, _: ManagementAuthDep
+) -> GuestConfigOut:
+    """Switch guest access on/off and set or clear its optional password.
+
+    Switching it off or changing the password ends every guest session.
+    """
+    if payload.enabled is None and payload.password is None and not payload.clear_password:
+        raise HTTPException(422, "nothing to change")
+    if payload.password is not None and payload.clear_password:
+        raise HTTPException(422, "set a password or clear it, not both")
+    if payload.enabled and not await auth.is_configured(session):
+        raise HTTPException(409, "set a dashboard password before enabling guest access")
+    enabled, password_set = await auth.guest_config(session)
+    ip = client_ip(request)
+    revoke = False
+    if payload.enabled is not None and payload.enabled != enabled:
+        await auth.set_guest_enabled(session, payload.enabled)
+        await audit.record(
+            session,
+            action="auth.guest_access_enabled" if payload.enabled else "auth.guest_access_disabled",
+            client_ip=ip,
+        )
+        revoke = revoke or not payload.enabled
+    if payload.password is not None:
+        try:
+            await auth.set_guest_password(session, payload.password)
+        except auth.AuthError as exc:
+            raise HTTPException(exc.status_code, exc.message) from exc
+        await audit.record(session, action="auth.guest_password_set", client_ip=ip)
+        revoke = True
+    elif payload.clear_password and password_set:
+        await auth.set_guest_password(session, None)
+        await audit.record(session, action="auth.guest_password_cleared", client_ip=ip)
+    if revoke:
+        await auth.revoke_guest_sessions(session)
+    enabled, password_set = await auth.guest_config(session)
+    return GuestConfigOut(enabled=enabled, password_set=password_set)
 
 
 @router.post("/logout", status_code=204)

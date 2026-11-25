@@ -15,6 +15,7 @@ describe("Advanced pages", () => {
     ["/audit", "Audit log", "audit-row-evt_0004"],
     ["/models", "Model catalog", "models-table"],
     ["/sticky-sessions", "Sticky sessions", "sticky-table"],
+    ["/automations", "Automations", "automation-job_1"],
   ])("lazy-loads %s", async (path, title, testId) => {
     window.history.pushState({}, "", path);
     renderWithProviders(<App />);
