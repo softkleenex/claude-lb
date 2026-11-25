@@ -61,14 +61,27 @@ SYSTEM_PROMPTS = [
 ]
 
 
-def prepare_environment(port: int) -> Path:
+def default_host() -> str:
+    # Inside a container, 127.0.0.1 is unreachable through a published port.
+    return "0.0.0.0" if os.environ.get("CLAUDE_LB_IN_DOCKER") == "1" else "127.0.0.1"
+
+
+def is_loopback_bind(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def prepare_environment(port: int, host: str = "127.0.0.1") -> Path:
     """Point settings at a fresh temp dir. Must run before anything reads settings."""
     data_dir = Path(tempfile.mkdtemp(prefix="claude-lb-demo-"))
     os.environ["CLAUDE_LB_DATA_DIR"] = str(data_dir)
     os.environ["CLAUDE_LB_DATABASE_URL"] = f"sqlite+aiosqlite:///{data_dir / 'demo.db'}"
     os.environ["CLAUDE_LB_REQUIRE_API_KEY"] = "true"
-    os.environ["CLAUDE_LB_HOST"] = "127.0.0.1"
+    os.environ["CLAUDE_LB_HOST"] = host
     os.environ["CLAUDE_LB_PORT"] = str(port)
+    # Reached from outside (a published container port), requests do not come from
+    # loopback, so the dashboard would demand the bootstrap token. The demo holds only
+    # simulated data and fake credentials, so it opens the dashboard instead.
+    os.environ["CLAUDE_LB_DASHBOARD_AUTH_ENABLED"] = "true" if is_loopback_bind(host) else "false"
     os.environ.pop("CLAUDE_LB_SECRET_KEY", None)
 
     from claude_lb.core import crypto
@@ -358,7 +371,7 @@ async def generate_traffic(port: int, keys: list[str], stop: asyncio.Event) -> N
                 pass
 
 
-async def run(port: int, *, traffic: bool, on_ready) -> None:
+async def run(port: int, *, traffic: bool, on_ready, host: str = "127.0.0.1") -> None:
     import logging
 
     import uvicorn
@@ -371,7 +384,7 @@ async def run(port: int, *, traffic: bool, on_ready) -> None:
     app = create_app()
     app.include_router(build_fake_upstream())
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve())
     while not server.started:

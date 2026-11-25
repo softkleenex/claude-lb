@@ -17,6 +17,8 @@ keep prompt caches warm, and see what every client and model costs.
 
 ```bash
 uvx claude-lb demo
+# or
+docker run --rm -p 2457:2457 ghcr.io/softkleenex/claude-lb demo
 ```
 
 ## Why

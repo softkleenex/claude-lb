@@ -5,6 +5,13 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-25
+
+### Fixed
+- `claude-lb demo` inside the Docker image bound to the container's loopback, so a published
+  port could not reach it. It now binds 0.0.0.0 in Docker (and takes `--host`); off loopback, its
+  dashboard needs no sign-in, since it holds only simulated data.
+
 ## [0.6.0] — 2026-11-25
 
 ### Added
@@ -80,7 +87,8 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - Initial release: key pooling, rate-limit-aware routing, failover, `clb_` client keys with
   budgets, usage and cost tracking, SSE passthrough, and the dashboard.
 
-[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/softkleenex/claude-lb/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/softkleenex/claude-lb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/softkleenex/claude-lb/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/softkleenex/claude-lb/compare/v0.3.0...v0.4.0
