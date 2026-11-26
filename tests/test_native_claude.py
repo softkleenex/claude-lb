@@ -296,9 +296,7 @@ async def test_switching_transport_clears_model_blocks():
         transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     ) as client:
         async with app.router.lifespan_context(app):
-            res = await client.patch(
-                "/api/accounts/switch-id", json={"transport": "claude_code"}
-            )
+            res = await client.patch("/api/accounts/switch-id", json={"transport": "claude_code"})
 
     assert res.status_code == 200
     body = res.json()
