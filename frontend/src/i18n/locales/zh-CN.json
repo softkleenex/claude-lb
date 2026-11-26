@@ -263,6 +263,7 @@
   "statusBar.updateAvailable": "有新版本可用。打开发布说明。",
   "statusBar.updateAvailableWithVersion": "有新版本可用：{{version}}。打开发布说明。",
   "statusBar.repositoryLabel": "打开官方 GitHub 仓库",
+  "statusBar.detailsLabel": "查看服务状态详情",
   "statusBar.routingLabels.sticky": "粘性",
   "statusBar.routingLabels.withSticky": "{{strategy}} + {{sticky}}",
   "dashboard.page.title": "仪表盘",

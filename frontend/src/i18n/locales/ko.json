@@ -358,6 +358,7 @@
   "statusBar.synced": "최신",
   "statusBar.stale": "오래됨",
   "statusBar.repositoryLabel": "GitHub 저장소 열기",
+  "statusBar.detailsLabel": "서비스 상태 자세히 보기",
   "statusBar.routing": "라우팅:",
   "statusBar.routingLabels.sticky": "세션 고정",
   "statusBar.routingLabels.withSticky": "{{strategy}} + {{sticky}}",

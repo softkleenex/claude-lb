@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -203,6 +204,44 @@ describe("StatusBar", () => {
     } finally {
       resizeObserver.mockRestore();
       offsetHeight.mockRestore();
+    }
+  });
+
+  it("collapses into one tappable line on small screens and reveals details on tap", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) =>
+        ({
+          matches: query === "(max-width: 639px)",
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as unknown as MediaQueryList) as typeof window.matchMedia;
+    mockAccounts([naiveUtc(new Date(Date.now() - 30_000))]);
+    mockSettings({ routing_strategy: "reset_drain", sticky_sessions_enabled: true });
+    server.use(http.get("/health", () => HttpResponse.json({ status: "ok", version: "9.9.9" })));
+
+    try {
+      renderStatusBar();
+
+      const trigger = screen.getByRole("button", { name: "Show service status details" });
+      expect(await screen.findByText("Ready")).toBeInTheDocument();
+      expect(await screen.findByText(/Up to date/)).toBeInTheDocument();
+      expect(await screen.findByText("v9.9.9")).toBeInTheDocument();
+      // Labels and the long routing text stay out of the compact line.
+      expect(screen.queryByText("Service:")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Reset drain/)).not.toBeInTheDocument();
+
+      await userEvent.click(trigger);
+
+      expect(await screen.findByText("Reset drain + Sticky sessions")).toBeInTheDocument();
+      expect(screen.getByText("Routing:")).toBeInTheDocument();
+      expect(screen.getByText("Version:")).toBeInTheDocument();
+    } finally {
+      window.matchMedia = originalMatchMedia;
     }
   });
 

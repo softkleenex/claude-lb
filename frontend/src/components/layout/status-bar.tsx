@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowRightLeft, Tag } from "lucide-react";
+import { ArrowRightLeft, ChevronUp, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { usePoolStatus } from "@/features/accounts/pool-status";
 import { getHealth, getServiceReadiness } from "@/features/health/api";
 import { useSettingsQuery } from "@/features/settings/hooks/use-settings";
@@ -17,6 +18,33 @@ const STATUS_REFRESH_INTERVAL_MS = 60_000;
 /** Fallback when settings are unavailable; otherwise two probe intervals plus slack. */
 const DEFAULT_USAGE_FRESHNESS_MS = 5 * 60_000;
 export const STATUS_BAR_DEFAULT_HEIGHT_PX = 40;
+/** Below Tailwind's `sm` breakpoint the full row wraps into several lines, so it collapses. */
+const COMPACT_MEDIA_QUERY = "(max-width: 639px)";
+
+function useIsCompact(): boolean {
+  const [compact, setCompact] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(COMPACT_MEDIA_QUERY).matches,
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(COMPACT_MEDIA_QUERY);
+    const handler = (event: MediaQueryListEvent) => setCompact(event.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, []);
+
+  return compact;
+}
+
+type Readiness = "checking" | "ready" | "notReady";
+
+function StatusDot({ className }: { className: string }) {
+  return <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${className}`} />;
+}
+
+function readinessDotClass(readiness: Readiness): string {
+  return readiness === "ready" ? "bg-emerald-500" : readiness === "checking" ? "bg-amber-500" : "bg-red-500";
+}
 
 export interface StatusBarProps {
   onHeightChange?: (height: number) => void;
@@ -108,45 +136,75 @@ export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
     return () => observer.disconnect();
   }, [onHeightChange]);
 
+  const showUsage = Boolean(pool && pool.total > 0);
+  const usageDotClass = isUsageSynced ? "bg-emerald-500" : "bg-amber-500";
+  const isCompact = useIsCompact();
+
+  const statusItems = (
+    <>
+      <span className="inline-flex items-center gap-1.5">
+        <StatusDot className={readinessDotClass(serviceReadiness)} />
+        <span className="font-medium">{t("statusBar.serviceReady")}</span> <span>{serviceStatusLabel}</span>
+      </span>
+      {showUsage ? (
+        <span className="inline-flex items-center gap-1.5">
+          <StatusDot className={usageDotClass} />
+          <span className="font-medium">{t("statusBar.usageSynced")}</span> <span>{usageStatusLabel}</span>
+          {lastSyncAt !== null ? <> · {lastSync.time}</> : null}
+        </span>
+      ) : null}
+      <span className="inline-flex items-center gap-1.5">
+        <ArrowRightLeft className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="font-medium">{t("statusBar.routing")}</span> {routingLabel}
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <Tag className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="font-medium">{t("statusBar.version")}</span> {currentVersion}
+      </span>
+    </>
+  );
+
   return (
     <footer
       ref={footerRef}
-      className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]"
+      className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]"
     >
       <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 text-xs text-muted-foreground">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">
-          <span className="inline-flex items-center gap-1.5">
-            <span
-              aria-hidden="true"
-              className={`h-1.5 w-1.5 rounded-full ${
-                serviceReadiness === "ready"
-                  ? "bg-emerald-500"
-                  : serviceReadiness === "checking"
-                    ? "bg-amber-500"
-                    : "bg-red-500"
-              }`}
-            />
-            <span className="font-medium">{t("statusBar.serviceReady")}</span> <span>{serviceStatusLabel}</span>
-          </span>
-          {pool && pool.total > 0 ? (
-            <span className="inline-flex items-center gap-1.5">
-              <span
-                aria-hidden="true"
-                className={`h-1.5 w-1.5 rounded-full ${isUsageSynced ? "bg-emerald-500" : "bg-amber-500"}`}
-              />
-              <span className="font-medium">{t("statusBar.usageSynced")}</span> <span>{usageStatusLabel}</span>
-              {lastSyncAt !== null ? <> · {lastSync.time}</> : null}
-            </span>
-          ) : null}
-          <span className="inline-flex items-center gap-1.5">
-            <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">{t("statusBar.routing")}</span> {routingLabel}
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <Tag className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">{t("statusBar.version")}</span> {currentVersion}
-          </span>
-        </div>
+        {isCompact ? (
+          <Popover>
+            <PopoverTrigger
+              aria-label={t("statusBar.detailsLabel")}
+              className="-mx-1 flex min-w-0 items-center gap-3 rounded px-1 py-0.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="status-bar-compact"
+            >
+              <span className="inline-flex min-w-0 items-center gap-1.5">
+                <StatusDot className={readinessDotClass(serviceReadiness)} />
+                <span className="truncate">{serviceStatusLabel}</span>
+              </span>
+              {showUsage ? (
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                  <StatusDot className={usageDotClass} />
+                  <span className="truncate">
+                    {usageStatusLabel}
+                    {lastSyncAt !== null ? <> · {lastSync.time}</> : null}
+                  </span>
+                </span>
+              ) : null}
+              <span className="truncate">v{currentVersion}</span>
+              <ChevronUp className="h-3 w-3 shrink-0" aria-hidden="true" />
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              side="top"
+              sideOffset={10}
+              className="flex w-auto max-w-[calc(100vw-2rem)] flex-col gap-2 p-3 text-xs text-muted-foreground"
+            >
+              {statusItems}
+            </PopoverContent>
+          </Popover>
+        ) : (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">{statusItems}</div>
+        )}
         <a
           aria-label={t("statusBar.repositoryLabel")}
           className="ml-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border/70 bg-background/70 text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"

@@ -366,6 +366,7 @@
   "statusBar.updateAvailable": "New version available. Open release notes.",
   "statusBar.updateAvailableWithVersion": "New version available: {{version}}. Open release notes.",
   "statusBar.repositoryLabel": "Open the GitHub repository",
+  "statusBar.detailsLabel": "Show service status details",
   "statusBar.routingLabels.sticky": "Sticky sessions",
   "statusBar.routingLabels.withSticky": "{{strategy}} + {{sticky}}",
   "auth.bootstrap.tokenRequired": "Enter the bootstrap token from the server log.",
