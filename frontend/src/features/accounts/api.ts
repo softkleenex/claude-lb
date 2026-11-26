@@ -39,6 +39,7 @@ export async function importAccount(payload: AccountImportRequest) {
   };
   if (payload.planType) body.plan_type = payload.planType;
   if (payload.routingPolicy) body.routing_policy = payload.routingPolicy;
+  if (payload.transport) body.transport = payload.transport;
   const raw = await post(`${BASE}/import`, z.unknown(), { body, rawKeys: true });
   return AccountSchema.parse(camelizeKeys(raw));
 }

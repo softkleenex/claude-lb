@@ -5,7 +5,7 @@ import { buildAddSubscriptionCommand, shellQuote } from "@/features/accounts/lib
 describe("buildAddSubscriptionCommand", () => {
   it("builds the CLI command from the form fields", () => {
     expect(buildAddSubscriptionCommand("alice", "max_5x", "burn_first")).toBe(
-      "uv run claude-lb account add-subscription alice --plan-type max_5x --routing-policy burn_first",
+      "uv run claude-lb account add-subscription alice --plan-type max_5x --routing-policy burn_first --transport claude_code",
     );
   });
 

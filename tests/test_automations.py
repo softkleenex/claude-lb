@@ -205,7 +205,7 @@ class TestSchedulerTick:
         assert {r.status for r in result.values()} == {"skipped"}
         assert result["paused"].error == "account is paused"
         assert "disabled" in result["broken"].error
-        assert result["refused"].error.startswith("model refused")
+        assert result["refused"].error.startswith("model temporarily unavailable")
 
     async def test_include_paused_sends_through_a_paused_account(self):
         paused = await add_account(
@@ -217,7 +217,7 @@ class TestSchedulerTick:
         assert [r.headers["x-api-key"] for r in calls] == ["sk-ant-paused"]
         assert (await runs())[0].status == "success"
 
-    async def test_upstream_model_refusal_marks_skipped_and_records_the_block(self):
+    async def test_unavailable_upstream_model_marks_skipped_and_records_the_route(self):
         sub = await add_account("sub", plan_type="max_5x", auth_scheme="bearer")
         await add_job(account_ids=[sub])
         calls: list[httpx.Request] = []
@@ -231,7 +231,7 @@ class TestSchedulerTick:
         await service.tick(mock_client(calls, refuse), now=utc(2026, 11, 30, 7, 0, 30))
         assert len(calls) == 1, "one attempt only: the run is pinned"
         run = (await runs())[0]
-        assert run.status == "skipped" and run.error.startswith("model refused")
+        assert run.status == "skipped" and run.error.startswith("model temporarily unavailable")
         async with session_scope() as session:
             account = await session.get(Account, sub)
             assert model_blocks.is_blocked(account, "claude-haiku-4-5")

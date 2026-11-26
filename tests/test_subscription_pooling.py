@@ -280,6 +280,7 @@ async def test_accounts_and_quota_summary_api(monkeypatch):
             assert imported["plan_type"] == "max_20x"
             assert imported["effective_capacity"] == 2000.0
             assert imported["routing_policy"] == "burn_first"
+            assert imported["transport"] == "claude_code"
     finally:
         monkeypatch.delenv("CLAUDE_LB_DASHBOARD_AUTH_ENABLED", raising=False)
         get_settings.cache_clear()
@@ -564,9 +565,8 @@ async def test_spend_cap_api_roundtrip():
             assert cleared.json()["spend_cap_usd"] is None
 
 
-async def test_subscription_model_refusal_routes_that_model_elsewhere_only():
-    """A subscription that refuses Sonnet (429, no unified headers) keeps serving Haiku;
-    Sonnet goes to the API key without the subscription being cooled down."""
+async def test_temporary_subscription_route_unavailability_keeps_other_models_active():
+    """One temporarily unavailable route does not cool down the whole subscription."""
     from claude_lb.modules.proxy import model_blocks
 
     async with session_scope() as session:
@@ -617,7 +617,7 @@ async def test_subscription_model_refusal_routes_that_model_elsewhere_only():
     assert r1.headers["x-claude-lb-account"] == "console"
     assert r2.headers["x-claude-lb-account"] == "console"
     assert r3.headers["x-claude-lb-account"] == "sub"
-    # The refusal was learned once; the second Sonnet request never touched the subscription.
+    # Availability was learned once; the second Sonnet request uses the working route.
     assert calls == [
         ("sub", "claude-sonnet-5-5"),
         ("console", "claude-sonnet-5-5"),
@@ -631,14 +631,14 @@ async def test_subscription_model_refusal_routes_that_model_elsewhere_only():
         assert lb.is_available(sub)
 
 
-def test_real_quota_429_is_not_mistaken_for_a_model_refusal():
+def test_real_quota_429_is_not_mistaken_for_route_unavailability():
     from claude_lb.modules.proxy import model_blocks
 
     sub = _make_account("sub", plan_type="pro")
-    assert model_blocks.is_model_refusal(sub, 429, {})
-    assert not model_blocks.is_model_refusal(sub, 429, {"anthropic-ratelimit-unified-status": "rejected"})
-    assert not model_blocks.is_model_refusal(_api_key_account("k"), 429, {})
-    assert not model_blocks.is_model_refusal(sub, 500, {})
+    assert model_blocks.is_route_unavailable(sub, 429, {})
+    assert not model_blocks.is_route_unavailable(sub, 429, {"anthropic-ratelimit-unified-status": "rejected"})
+    assert not model_blocks.is_route_unavailable(_api_key_account("k"), 429, {})
+    assert not model_blocks.is_route_unavailable(sub, 500, {})
 
 
 def test_token_candidates_survive_ansi_and_line_wrapping():
@@ -667,8 +667,8 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
     )
     seen: list[str] = []
 
-    async def fake_verify(_client, _base, tok):
-        seen.append(tok)
+    async def fake_verify(_client, _base, tok, model):
+        seen.append((tok, model))
         return subscription_login.VerifyResult(
             True,
             200,
@@ -677,6 +677,7 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
                 "anthropic-ratelimit-unified-5h-utilization": "0.23",
             },
             "ok",
+            model,
         )
 
     monkeypatch.setattr(subscription_login, "verify_token", fake_verify)
@@ -684,7 +685,8 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
     result = CliRunner().invoke(app, ["account", "add-subscription", "alice", "--plan-type", "max_5x"])
     assert result.exit_code == 0, result.output
     assert "Added" in result.output and "5h 23%" in result.output
-    assert seen == [token]
+    assert "Quota probe model: claude-sonnet-5-5" in result.output
+    assert seen == [(token, "claude-sonnet-5-5")]
 
     async def _check():
         from sqlalchemy import select
@@ -693,7 +695,7 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
 
         async with session_scope() as session:
             acct = (await session.execute(select(Account).where(Account.name == "alice"))).scalar_one()
-            return acct.plan_type, acct.auth_scheme, decrypt(acct.encrypted_credential)
+            return acct.plan_type, acct.auth_scheme, acct.transport, decrypt(acct.encrypted_credential)
 
     import asyncio as _asyncio
 
@@ -706,7 +708,7 @@ def test_add_subscription_cli_logs_in_verifies_and_stores(monkeypatch):
         finally:
             await dispose_db()
 
-    assert _asyncio.run(_run_check()) == ("max_5x", "bearer", token)
+    assert _asyncio.run(_run_check()) == ("max_5x", "bearer", "claude_code", token)
 
 
 def test_unavailable_message_counts_reasons_and_logs_the_details(caplog):
@@ -724,8 +726,8 @@ def test_unavailable_message_counts_reasons_and_logs_the_details(caplog):
     message = explain_unavailable([capped, sub], "claude-sonnet-5-5")
     # The client sees categories only; names and amounts are for the operator's log.
     assert message == (
-        "no account can serve claude-sonnet-5-5 right now: 1 at spend cap, 1 does not serve this model"
+        "no account can serve claude-sonnet-5-5 right now: 1 at spend cap, 1 model temporarily unavailable"
     )
     assert "console: spend cap $1.00 reached" in caplog.text
-    assert "sub: subscription does not serve claude-sonnet-5-5" in caplog.text
+    assert "sub: claude-sonnet-5-5 is temporarily unavailable" in caplog.text
     assert "add one" in explain_unavailable([], "x")

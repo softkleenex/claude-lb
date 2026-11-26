@@ -286,6 +286,7 @@ const accountHandlers = [
         id: newAccountId(),
         name,
         provider,
+        transport: body.transport === "claude_code" ? "claude_code" : "http",
         plan_type: planType,
         auth_scheme:
           typeof body.auth_scheme === "string" ? body.auth_scheme : provider === "oauth" ? "bearer" : "x-api-key",
@@ -331,6 +332,7 @@ const accountHandlers = [
         id: newAccountId(),
         name,
         provider: "oauth",
+        transport: body.transport === "http" ? "http" : "claude_code",
         auth_scheme: "bearer",
         plan_type: typeof body.plan_type === "string" ? body.plan_type : "pro",
         routing_policy: typeof body.routing_policy === "string" ? body.routing_policy : "normal",

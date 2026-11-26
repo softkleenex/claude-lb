@@ -51,6 +51,7 @@ class AccountCreate(BaseModel):
         default_factory=dict, description="Extra headers this upstream requires."
     )
     base_url: str | None = None
+    transport: Literal["http", "claude_code"] = "http"
 
     oauth_refresh_token: str | None = None
     oauth_token_endpoint: str | None = Field(
@@ -101,6 +102,7 @@ class AccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     api_key: str | None = Field(default=None, min_length=8)
     base_url: str | None = None
+    transport: Literal["http", "claude_code"] | None = None
     weight: float | None = None
     priority: int | None = None
     enabled: bool | None = None
@@ -133,6 +135,7 @@ class AccountOut(BaseModel):
     provider: str
     credential_hint: str
     base_url: str | None
+    transport: str
     weight: float
     priority: int
     enabled: bool
@@ -230,6 +233,7 @@ async def create_account(payload: AccountCreate, request: Request, session: Sess
         auth_scheme=payload.resolved_auth_scheme(),
         extra_headers_json=json.dumps(payload.extra_headers),
         base_url=payload.base_url,
+        transport=payload.transport,
         weight=payload.weight,
         priority=payload.priority,
         enabled=payload.enabled,
@@ -295,8 +299,10 @@ async def update_account(
         account.refresh_failures = 0
     if payload.extra_headers is not None:
         account.extra_headers_json = json.dumps(payload.extra_headers)
+    transport_changed = payload.transport is not None and payload.transport != account.transport
     for field in (
         "base_url",
+        "transport",
         "weight",
         "priority",
         "enabled",
@@ -309,6 +315,8 @@ async def update_account(
         value = getattr(payload, field)
         if value is not None:
             setattr(account, field, value)
+    if transport_changed:
+        model_blocks.clear_blocks(account)
     if "spend_cap_usd" in payload.model_fields_set:
         account.spend_cap_usd = payload.spend_cap_usd
 
@@ -371,6 +379,7 @@ class AccountImport(BaseModel):
     base_url: str | None = None
     token_endpoint: str | None = None
     client_id: str | None = None
+    transport: Literal["http", "claude_code"] = "claude_code"
 
     @model_validator(mode="after")
     def _check_plan(self) -> AccountImport:
@@ -399,6 +408,7 @@ async def import_account(payload: AccountImport, request: Request, session: Sess
         auth_scheme="bearer",
         extra_headers_json=json.dumps(parsed.extra_headers),
         base_url=payload.base_url or parsed.base_url,
+        transport=payload.transport,
         weight=payload.weight,
         priority=payload.priority,
         plan_type=payload.plan_type or parsed.plan_type,
@@ -500,7 +510,7 @@ async def clear_model_blocks(
     session: SessionDep,
     model: str | None = Query(default=None, description="Lift only this model; omit to lift all."),
 ) -> AccountOut:
-    """Try models this subscription refused again right away instead of after the 12 h block."""
+    """Retry temporarily unavailable account-model routes before their 12 h expiry."""
     account = await session.get(Account, account_id)
     if account is None:
         raise HTTPException(404, "account not found")

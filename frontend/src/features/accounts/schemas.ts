@@ -23,6 +23,7 @@ export const AccountSchema = z.object({
   id: z.string(),
   name: z.string(),
   provider: z.string(),
+  transport: z.enum(["http", "claude_code"]).default("http"),
   credentialHint: z.string(),
   baseUrl: z.string().nullable(),
   weight: z.number(),
@@ -147,6 +148,7 @@ export type AccountCreateRequest = {
   apiKey: string;
   provider?: "anthropic_api_key" | "oauth";
   authScheme?: "x-api-key" | "bearer";
+  transport?: "http" | "claude_code";
   planType?: string;
   routingPolicy?: RoutingPolicy;
   weight?: number;
@@ -163,6 +165,7 @@ export type AccountUpdateRequest = {
   weight?: number;
   priority?: number;
   spendCapUsd?: number | null;
+  transport?: "http" | "claude_code";
 };
 
 /** `POST /api/accounts/import` body. `credentials` is sent with its own keys untouched. */
@@ -171,4 +174,5 @@ export type AccountImportRequest = {
   credentials: Record<string, unknown>;
   planType?: string;
   routingPolicy?: RoutingPolicy;
+  transport?: "http" | "claude_code";
 };

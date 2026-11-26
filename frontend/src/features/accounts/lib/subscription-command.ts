@@ -14,5 +14,5 @@ export function shellQuote(value: string): string {
 export function buildAddSubscriptionCommand(name: string, planType: string, routingPolicy: string): string {
   const label = name.trim();
   const quoted = label ? shellQuote(label) : "<name>";
-  return `uv run claude-lb account add-subscription ${quoted} --plan-type ${planType} --routing-policy ${routingPolicy}`;
+  return `uv run claude-lb account add-subscription ${quoted} --plan-type ${planType} --routing-policy ${routingPolicy} --transport claude_code`;
 }

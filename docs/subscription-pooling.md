@@ -1,8 +1,10 @@
 # Subscription Pooling
 
-`claude-lb` supports pooling **Claude subscription accounts** (Pro, Max 5x, Max 20x, Team, Enterprise) alongside standard Console API keys in a single unified pool — modeled after [`codex-lb`](https://github.com/Soju06/codex-lb).
+`claude-lb` supports multi-model pooling for **Claude subscription accounts** (Pro, Max 5x, Max 20x, Team, Enterprise) alongside standard Console API keys in a single unified pool — modeled after [`codex-lb`](https://github.com/Soju06/codex-lb).
 
-> **Credentials remain yours to supply.** `claude-lb` ships no first-party OAuth client constants. You can add subscription accounts via `claude-lb account login` (PKCE), `claude-lb account add-oauth`, or `claude-lb account import --file ...` using your own exported credentials JSON.
+Subscription accounts use Claude Code as their native execution backend. Console API
+keys use direct HTTP, and both transports participate in the same routing strategies,
+quota accounting, sticky sessions, and failover.
 
 ---
 
@@ -87,7 +89,8 @@ Supports both Claude Code's `claudeAiOauth` format (`~/.claude/.credentials.json
 ```bash
 claude-lb account import my-max \
   --file ~/.claude/.credentials.json \
-  --routing-policy burn_first
+  --routing-policy burn_first \
+  --transport claude_code
 ```
 
 ### Add manually with OAuth tokens (CLI)
@@ -111,6 +114,7 @@ curl -X POST http://127.0.0.1:2456/api/accounts/import \
     "name": "team-max-20x",
     "plan_type": "max_20x",
     "routing_policy": "burn_first",
+    "transport": "claude_code",
     "credentials": { ... }
   }'
 ```
@@ -127,7 +131,7 @@ curl -X POST http://127.0.0.1:2456/api/accounts/import \
   - `claude_lb_account_capacity_credits`
 - **Dashboard**:
   - *Dashboard* page: 5h / 7d capacity donuts over the enabled subscription accounts (one segment per account, remaining in the centre, a safe-pace tick, risk badge, burn rate and projected run-out), a weekly pace forecast (`GET /api/dashboard/projections`), and API-key spend against caps.
-  - *Accounts* page: plan / policy / depletion-risk badges, 5h / 7d bars with absolute reset times and countdowns, unified / overage status, an hourly 5h / 7d chart from `QuotaHistory`, per-model refusals with *Try again*, spend-cap progress, and the plan / policy / weight / priority / cap editors.
+  - *Accounts* page: plan / policy / depletion-risk badges, 5h / 7d bars with absolute reset times and countdowns, unified / overage status, an hourly 5h / 7d chart from `QuotaHistory`, learned model availability with *Try again*, spend-cap progress, and the plan / policy / weight / priority / cap editors.
   - *Automations* page (Advanced): schedule a tiny prompt per account, e.g. weekdays 07:00 in your timezone, so a 5-hour window starts before you do.
 
 ## Spend-capped API key in front of subscriptions
@@ -152,31 +156,52 @@ claude-lb account set-spend-cap console-first 2    # raise later; omit the amoun
 ## Adding a subscription account
 
 ```bash
-claude-lb account add-subscription alice --plan-type max_5x
+claude-lb account add-subscription alice --plan-type max_5x --transport claude_code
 ```
 
 A browser opens; log in with the account to add (paste the code back if the terminal
 asks). claude-lb runs Claude Code's own `claude setup-token` in a throwaway config
 directory, so the Claude Code login you are using right now is not touched. It then
-sends one tiny Haiku request to confirm the token and prints the current 5h/7d usage.
+sends a tiny quota probe and prints the probe model plus current 5h/7d usage. The stored
+account then runs `/v1/messages` through an isolated Claude Code profile, using the
+model named by each client request. Override the quota-probe order by repeating
+`--verify-model MODEL`.
 Requires Claude Code (`claude`) on `PATH`.
 
 The dashboard (Accounts → *Add account* → Subscription) shows the exact command for the plan
 and policy you pick, and also accepts a pasted `sk-ant-oat…` token or a credential file.
 
-claude-lb ships no OAuth client id and does not present itself as Claude Code.
+For an account that was added by an older release, switch it in place:
 
-## Models a subscription refuses
+```bash
+claude-lb account set-transport alice claude_code
+```
 
-Called from outside Claude Code, a subscription token may be refused for some models
-(observed: Haiku works, Sonnet/Opus get `429` with message `"Error"` and no
-`anthropic-ratelimit-unified-*` headers). claude-lb tells this apart from a real quota
-rejection, which always carries those headers:
+## Multi-model availability
 
-- The account is **not** cooled down; it keeps serving models it can.
-- That model is routed to other accounts for 12 hours, then tried again.
-- `claude-lb account list` shows `alice: refuses claude-sonnet-5-5 — those requests go to other accounts.`
-- The dashboard shows it on the account (Accounts page) and in the *Refused by subscriptions* list
-  on the Model catalog page; *Try again* clears it early (`DELETE /api/accounts/{id}/model-blocks?model=…`).
+claude-lb forwards every requested model to the selected account's native Claude Code
+backend and combines model sync with live results to maintain an account-specific
+availability map. If a route is temporarily unavailable:
 
-Keep at least one API-key account in the pool for the models subscriptions refuse.
+- The account stays active for every other model it serves.
+- That model is routed to another eligible account for 12 hours, then tried again.
+- `claude-lb account list` shows the temporary reroute and its destination policy.
+- The dashboard shows it under *Model availability*; *Try again* clears it early
+  (`DELETE /api/accounts/{id}/model-blocks?model=…`).
+
+Direct subscription accounts and API-key accounts coexist, so the pool keeps serving
+the requested model as each account's availability changes.
+
+### Messages compatibility
+
+- Text, system prompts, assistant turns, client tool definitions, `tool_use`, and
+  `tool_result` are converted in both directions.
+- Built-in Claude Code tools and MCP servers are disabled; client tools are returned to
+  the caller instead of running on the gateway host.
+- `stream: true` returns the standard Anthropic SSE event sequence after the native run
+  finishes. It is wire-compatible but buffered rather than token-live.
+- Image/document content blocks and exact `max_tokens` enforcement require a direct
+  HTTP/API-key account because the Claude Code print interface does not expose an
+  equivalent request contract.
+- Each account has its own mode-0700 Claude config directory. Its token is supplied only
+  in the child-process environment and never placed in command-line arguments.

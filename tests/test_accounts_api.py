@@ -47,6 +47,26 @@ class TestRename:
         assert response.status_code == 422
 
 
+class TestTransport:
+    async def test_create_and_update_transport(self):
+        async for client in make_client(ok_json([])):
+            created = await client.post(
+                "/api/accounts",
+                json={
+                    "name": "native-subscription",
+                    "api_key": "sk-ant-oat-test",
+                    "provider": "oauth",
+                    "transport": "claude_code",
+                },
+            )
+            updated = await client.patch(f"/api/accounts/{created.json()['id']}", json={"transport": "http"})
+
+        assert created.status_code == 201
+        assert created.json()["transport"] == "claude_code"
+        assert updated.status_code == 200
+        assert updated.json()["transport"] == "http"
+
+
 class TestPauseResume:
     async def test_pause_marks_the_account_paused(self):
         account_id = await add_account("acct")

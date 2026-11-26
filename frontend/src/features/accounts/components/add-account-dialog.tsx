@@ -272,6 +272,7 @@ function SubscriptionForm({ onCreate, onDone }: { onCreate: AddAccountDialogProp
               apiKey: trimmedToken,
               provider: "oauth",
               authScheme: "bearer",
+              transport: "claude_code",
               planType: plan,
               routingPolicy: policy,
             });
@@ -337,6 +338,7 @@ function ImportForm({ onImport, onDone }: { onImport: AddAccountDialogProps["onI
             credentials,
             planType: plan === "detect" ? undefined : plan,
             routingPolicy: policy,
+            transport: "claude_code",
           });
           onDone();
         } catch (caught) {

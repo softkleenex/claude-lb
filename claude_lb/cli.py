@@ -18,7 +18,7 @@ from claude_lb.db.models import Account
 from claude_lb.db.session import dispose_db, init_db, session_scope
 from claude_lb.modules.accounts import credentials, importer, oauth_flow, subscription_login
 from claude_lb.modules.api_keys.service import create_api_key
-from claude_lb.modules.proxy import model_blocks
+from claude_lb.modules.proxy import model_blocks, native_claude
 from claude_lb.modules.proxy.load_balancer import STRATEGIES, headroom, is_available, spend_cap_reached
 from claude_lb.modules.proxy.quota import (
     PLAN_TYPES,
@@ -358,6 +358,17 @@ def account_add_subscription(
         str, typer.Option(help=f"Routing policy ({', '.join(ROUTING_POLICIES)}).")
     ] = "normal",
     verify: Annotated[bool, typer.Option(help="Send one tiny request to confirm the token works.")] = True,
+    verify_models: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--verify-model",
+            help="Model to try during verification. Repeat to set the fallback order.",
+        ),
+    ] = None,
+    transport: Annotated[
+        str,
+        typer.Option(help="Request transport (claude_code recommended; http for direct API calls)."),
+    ] = native_claude.TRANSPORT_CLAUDE_CODE,
 ) -> None:
     """Log in to a Claude subscription in the browser and add it to the pool.
 
@@ -369,6 +380,9 @@ def account_add_subscription(
         raise typer.Exit(1)
     if routing_policy not in ROUTING_POLICIES:
         console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
+        raise typer.Exit(1)
+    if transport not in native_claude.TRANSPORTS:
+        console.print(f"[red]--transport must be one of {', '.join(native_claude.TRANSPORTS)}.[/red]")
         raise typer.Exit(1)
     claude_path = subscription_login.claude_cli()
     if claude_path is None:
@@ -401,14 +415,17 @@ def account_add_subscription(
 
     candidates = subscription_login.token_candidates(output)
 
+    models = verify_models or list(subscription_login.DEFAULT_VERIFY_MODELS)
+
     async def _verify(tokens: list[str]) -> tuple[str | None, subscription_login.VerifyResult | None]:
         base_url = get_settings().upstream_base_url
         last = None
         async with httpx.AsyncClient() as client:
             for token in tokens:
-                last = await subscription_login.verify_token(client, base_url, token)
-                if last.ok:
-                    return token, last
+                for model in models:
+                    last = await subscription_login.verify_token(client, base_url, token, model)
+                    if last.ok:
+                        return token, last
         return None, last
 
     token: str | None = None
@@ -435,6 +452,7 @@ def account_add_subscription(
                 encrypted_credential=encrypt(token),
                 credential_hint=mask_secret(token),
                 auth_scheme="bearer",
+                transport=transport,
                 plan_type=plan_type,
                 routing_policy=routing_policy,
             )
@@ -449,17 +467,20 @@ def account_add_subscription(
     pri = effective_primary_used(account)
     sec = effective_secondary_used(account)
     console.print(
-        f"\n[green]Added[/green] {name} ({mask_secret(token)}) · plan {plan_type} · {routing_policy}"
+        f"\n[green]Added[/green] {name} ({mask_secret(token)}) · plan {plan_type} · "
+        f"{routing_policy} · {transport}"
     )
     if pri is not None or sec is not None:
         pri_str = f"{pri:.0f}%" if pri is not None else "-"
         sec_str = f"{sec:.0f}%" if sec is not None else "-"
         console.print(f"  Quota right now: 5h {pri_str} used · 7d {sec_str} used")
+    if result is not None and result.ok:
+        console.print(f"  Quota probe model: {result.model}")
     if plan_type == "pro":
         console.print("  [dim]Max plan? Fix the label with --plan-type max_5x or max_20x when adding.[/dim]")
     console.print(
-        "  [dim]Note: through claude-lb a subscription may only serve some models (e.g. Haiku). "
-        "Requests for models it refuses go to your other accounts automatically.[/dim]"
+        "  [dim]Multi-model routing is active. claude-lb learns each account's current "
+        "model availability and retries temporarily unavailable models later.[/dim]"
     )
 
 
@@ -627,6 +648,9 @@ def account_import(
     base_url: Annotated[str | None, typer.Option(help="Override the upstream base URL.")] = None,
     weight: Annotated[float, typer.Option(help="Relative share under weighted routing.")] = 1.0,
     priority: Annotated[int, typer.Option(help="Higher drains first under fill_first.")] = 0,
+    transport: Annotated[
+        str, typer.Option(help="Request transport (claude_code recommended; http for direct API calls).")
+    ] = native_claude.TRANSPORT_CLAUDE_CODE,
 ) -> None:
     """Import an OAuth/subscription account from a local JSON credential file."""
     if plan_type is not None and plan_type not in PLAN_TYPES:
@@ -634,6 +658,9 @@ def account_import(
         raise typer.Exit(1)
     if routing_policy not in ROUTING_POLICIES:
         console.print(f"[red]--routing-policy must be one of {', '.join(ROUTING_POLICIES)}.[/red]")
+        raise typer.Exit(1)
+    if transport not in native_claude.TRANSPORTS:
+        console.print(f"[red]--transport must be one of {', '.join(native_claude.TRANSPORTS)}.[/red]")
         raise typer.Exit(1)
     if not file.exists():
         console.print(f"[red]Credential file not found:[/red] {file}")
@@ -662,6 +689,7 @@ def account_import(
                     auth_scheme="bearer",
                     extra_headers_json=json.dumps(parsed.extra_headers),
                     base_url=base_url or parsed.base_url,
+                    transport=transport,
                     weight=weight,
                     priority=priority,
                     plan_type=resolved_plan,
@@ -701,7 +729,17 @@ def account_list() -> None:
             return
 
         table = Table(title="Accounts")
-        for column in ("Name", "Plan", "Policy", "Status", "5h / 7d", "Headroom", "Requests", "Cost"):
+        for column in (
+            "Name",
+            "Transport",
+            "Plan",
+            "Policy",
+            "Status",
+            "5h / 7d",
+            "Headroom",
+            "Requests",
+            "Cost",
+        ):
             table.add_column(column, justify="right" if column in ("Requests", "Cost") else "left")
         for account in accounts:
             if is_available(account):
@@ -719,6 +757,7 @@ def account_list() -> None:
             quota_str = "-" if pri is None and sec is None else f"{pri_str} / {sec_str}"
             table.add_row(
                 account.name,
+                account.transport,
                 account.plan_type,
                 account.routing_policy,
                 status,
@@ -733,11 +772,39 @@ def account_list() -> None:
             blocked = model_blocks.active_blocks(account)
             if blocked:
                 console.print(
-                    f"[dim]{account.name}: refuses {', '.join(blocked)} — "
-                    "those requests go to other accounts.[/dim]"
+                    f"[dim]{account.name}: temporarily reroutes {', '.join(blocked)} "
+                    "to other eligible accounts.[/dim]"
                 )
 
     _run(_list())
+
+
+@account_app.command("set-transport")
+def account_set_transport(
+    name: Annotated[str, typer.Argument(help="Account name.")],
+    transport: Annotated[
+        str,
+        typer.Argument(help="http or claude_code."),
+    ],
+) -> None:
+    """Choose direct HTTP or native Claude Code for an existing account."""
+    if transport not in native_claude.TRANSPORTS:
+        console.print(f"[red]transport must be one of {', '.join(native_claude.TRANSPORTS)}.[/red]")
+        raise typer.Exit(1)
+
+    async def _set() -> None:
+        async with session_scope() as session:
+            result = await session.execute(select(Account).where(Account.name == name))
+            account = result.scalar_one_or_none()
+            if account is None:
+                console.print(f"[red]No account named {name!r}.[/red]")
+                raise typer.Exit(1)
+            if account.transport != transport:
+                account.transport = transport
+                model_blocks.clear_blocks(account)
+        console.print(f"[green]{name} now uses {transport}.[/green]")
+
+    _run(_set())
 
 
 @account_app.command("set-spend-cap")

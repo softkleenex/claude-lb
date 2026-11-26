@@ -38,7 +38,7 @@ describe("accounts flow integration", () => {
 
     const layout = await screen.findByTestId("accounts-layout");
     expect(within(layout).getByText("5시간 한도")).toBeInTheDocument();
-    expect(within(layout).getByText("이 구독이 거부하는 모델")).toBeInTheDocument();
+    expect(within(layout).getByText("일시적으로 우회 중인 모델")).toBeInTheDocument();
     expect(within(layout).getByRole("button", { name: "지금 점검" })).toBeInTheDocument();
     expect(within(layout).getAllByText("우선 소진").length).toBeGreaterThan(0);
   });

@@ -13,8 +13,8 @@ export type AccountModelBlocksProps = {
 };
 
 /**
- * Models this subscription refused when called through claude-lb. Those requests are
- * routed to other accounts until the block lifts (12 h) or it is cleared here.
+ * Models currently unavailable on this account. Requests use another eligible account
+ * until the learned route expires (12 h) or an operator retries it here.
  */
 export function AccountModelBlocks({ account, now, disabled = false, onClear }: AccountModelBlocksProps) {
   const { t } = useTranslation();

@@ -14,8 +14,9 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
   - `POST /api/accounts/import`, `POST /api/accounts/{id}/reset-quota`, `GET /api/usage/quota`, `GET /api/usage/quota/{id}/history`, `claude-lb account import`, Prometheus quota metrics, and live dashboard/demo support.
   - Documentation in [docs/subscription-pooling.md](docs/subscription-pooling.md).
 - **Per-account spend cap** (`spend_cap_usd`): stop routing to an account once its estimated spend reaches the cap. `claude-lb account add --spend-cap-usd`, `claude-lb account set-spend-cap <name> [usd]`, and `spend_cap_usd` on the accounts API.
-- **`claude-lb account add-subscription <name>`**: one command to add a Claude subscription. It runs Claude Code's own `claude setup-token` in a throwaway config directory (existing logins and sessions are untouched), reads the token from its output, verifies it with one tiny request, and shows current 5h/7d usage.
-- **Per-model routing for subscriptions**: when a subscription refuses a model (a `429` without `anthropic-ratelimit-unified-*` headers), only that model is routed elsewhere for 12 hours; the account keeps serving the models it can. Shown in `account list` and as `blocked_models` on the accounts API; `POST /api/accounts/{id}/reset-quota` clears it.
+- **`claude-lb account add-subscription <name>`**: one command to add a Claude subscription. It runs Claude Code's own `claude setup-token` in a throwaway config directory (existing logins and sessions are untouched), reads the token from its output, runs a tiny quota probe, and shows current 5h/7d usage.
+- **Native Claude Code transport**: subscription accounts run the requested model through an isolated Claude Code process, then return Messages-compatible JSON or buffered SSE. Client tools round-trip as `tool_use` / `tool_result`, built-in tools remain disabled, tokens stay out of process arguments, and failures continue through the normal account failover path. Existing accounts can switch with `claude-lb account set-transport NAME claude_code`.
+- **Multi-model routing for subscriptions**: runtime traffic learns per-account availability. A temporarily unavailable account-model route is sent elsewhere for 12 hours while the account keeps serving its other models. Shown in `account list` and as `blocked_models` on the accounts API; `POST /api/accounts/{id}/reset-quota` clears it.
 - **New dashboard** (React + Vite, derived from the codex-lb frontend, MIT © 2025 Soju06 — see
   `frontend/LICENSE`). Replaces the single-file dashboard. The build is committed under
   `claude_lb/modules/dashboard/static/`, so running claude-lb still needs no Node; any non-API GET
@@ -28,12 +29,12 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
   rate, weekly pace); `GET /api/request-logs` (+ `/options`, `/{id}` with cost breakdown);
   `GET /api/conversations` (+ `/{session_key}`); `GET /api/reports` (+ `/options`; previous-period
   comparison, median TTFT/TPS, user-agent distribution); `GET /api/audit/events` (+ `/actions`);
-  `GET /api/health/catalog` (models with prices and active refusals); `/api/sticky-sessions`
+  `GET /api/health/catalog` (models with prices and learned temporary reroutes); `/api/sticky-sessions`
   (browse, delete, purge); `GET /health/ready`; `auth_enabled` on `/api/auth/status`.
 - **Request log columns** `ttft_ms`, `session_key` (the prompt-cache conversation key), `user_agent`
   and `client_ip`, added to existing databases on startup.
 - **Accounts**: pause/resume (`PATCH enabled`, kept across health probes), rename, probe one account
-  (`POST /api/accounts/{id}/probe`), clear model refusals (`DELETE /api/accounts/{id}/model-blocks`),
+  (`POST /api/accounts/{id}/probe`), retry temporary model reroutes (`DELETE /api/accounts/{id}/model-blocks`),
   hourly 5h/7d and daily usage trends (`GET /api/accounts/{id}/trends`), delete with history.
 - **API key rules**: model allowlist (403 `permission_error` for other models), enforced model
   (rewrites `model`), assigned accounts (routes only to those, never spills), and any number of
@@ -92,7 +93,7 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - **Automations**: disabling a job, changing its schedule, or dropping an account from its targets
   cancels runs that were planned but not sent (a spread can hold them for two hours), and every run
   re-checks the job right before sending. A run forced through a paused account still respects the
-  spend cap, model refusals and breaker-disabled accounts. One job with a broken schedule or
+  spend cap, temporarily unavailable models and breaker-disabled accounts. One job with a broken schedule or
   timezone no longer fails the whole scheduler tick, and long error text is clipped to the column.
 - **Guests** no longer see firewall addresses: entries show `hidden` (no note), firewall audit
   events have no target/detail, and searching the audit log cannot confirm an address.

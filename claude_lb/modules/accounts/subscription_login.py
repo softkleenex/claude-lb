@@ -22,7 +22,11 @@ TOKEN_PREFIX = "sk-ant-oat"
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-Z\\-_]")
 _TOKEN = re.compile(r"sk-ant-oat\d*-[A-Za-z0-9_\-]+")
 _CONTINUATION = re.compile(r"[A-Za-z0-9_\-]+")
-VERIFY_MODEL = "claude-haiku-4-5"
+DEFAULT_VERIFY_MODELS = (
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-haiku-4-5",
+)
 
 
 class SubscriptionLoginError(RuntimeError):
@@ -92,10 +96,11 @@ class VerifyResult:
     status_code: int | None
     headers: dict[str, str]
     detail: str
+    model: str
 
 
-async def verify_token(client: httpx.AsyncClient, base_url: str, token: str) -> VerifyResult:
-    """One tiny request: proves the token works and reads the 5h/7d quota headers."""
+async def verify_token(client: httpx.AsyncClient, base_url: str, token: str, model: str) -> VerifyResult:
+    """One tiny request: proves the token can use ``model`` and reads quota headers."""
     try:
         response = await client.post(
             f"{base_url.rstrip('/')}/v1/messages",
@@ -104,14 +109,15 @@ async def verify_token(client: httpx.AsyncClient, base_url: str, token: str) -> 
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
-            json={"model": VERIFY_MODEL, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
             timeout=30,
         )
     except httpx.HTTPError as exc:
-        return VerifyResult(False, None, {}, f"{type(exc).__name__}: {exc}")
+        return VerifyResult(False, None, {}, f"{type(exc).__name__}: {exc}", model)
     return VerifyResult(
         response.status_code == 200,
         response.status_code,
         dict(response.headers),
         "ok" if response.status_code == 200 else response.text[:200],
+        model,
     )

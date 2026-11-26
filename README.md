@@ -5,8 +5,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/claude-lb)](https://pypi.org/project/claude-lb/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**A self-hosted gateway for your Anthropic API keys.** Pool them behind one endpoint,
-keep prompt caches warm, and see what every client and model costs.
+**A self-hosted gateway for Claude subscriptions and Anthropic API keys.** Pool them
+behind one endpoint, keep prompt caches warm, and see what every client and model uses.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
@@ -55,7 +55,7 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 
 | | |
 |---|---|
-| **Key pooling** | Route across many Anthropic keys — separate workspaces, orgs, or billing buckets |
+| **Subscription + key pooling** | Route requested models across Claude subscriptions and Anthropic API keys in one pool |
 | **Bring-your-own credentials** | `x-api-key` or bearer, with RFC 6749 refresh, token rotation, and 401 self-healing |
 | **Rate-limit aware** | Reads `anthropic-ratelimit-*` response headers and steers traffic toward headroom |
 | **Prompt-cache affinity** | Pins a conversation to one account so its cache stays warm (0.025–0.1x reads, not 1.25x writes) |
@@ -71,7 +71,7 @@ Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anth
 | **Prometheus metrics** | `/metrics` exposes per-account health, headroom, tokens, and spend |
 | **Audit log** | Append-only record of every management change and sign-in |
 | **Cost reports** | Date-range breakdown by day, account, key, or model, with CSV export |
-| **Streaming passthrough** | SSE bytes are relayed unmodified; usage is sniffed out of the stream |
+| **Streaming responses** | API-key SSE is relayed unmodified; native Claude Code responses use Anthropic-compatible buffered SSE |
 | **Scoped key rules** | Per-key model allowlist, enforced model, assigned accounts, and several limit rules (requests, tokens, USD) over 5h / 7d / daily / weekly / monthly / custom windows |
 | **IP firewall** | Optional allowlist of addresses / CIDR ranges for the proxy |
 | **Guest role** | Read-only dashboard access with its own optional password |
@@ -166,11 +166,11 @@ phone width.
 |---|---|
 | **Dashboard** | Requests, tokens, cost, cache savings, error rate and conversations for 1h / 24h / 7d / 30d with sparklines and deltas against the previous window; 5h / 7d subscription capacity donuts with a safe-pace line, weekly pace forecast, API-key spend vs caps; account cards with pause / probe; usage by model; 28-day cost chart; the request log (search, filters, column chooser, per-request details with cost breakdown) and a **Conversations** view grouped by prompt-cache session |
 | **Reports** | Cost and usage over any UTC date range (≤ 366 days) with account / API key / model / user-agent filters, comparison with the previous period, cost / token / request / TTFT / TPS charts, model and user-agent distributions, and a breakdown by day, account, key, model or user agent with CSV export |
-| **Accounts** | Every upstream account with status, 5h / 7d bars and reset countdowns, spend-cap progress, per-model refusals, hourly quota and daily usage charts; pause / resume, probe now, rename, plan / policy / weight / priority / cap, reset quota state, delete (optionally with history); add an API key, paste a subscription token, or import a credential file |
+| **Accounts** | Every upstream account with status, 5h / 7d bars and reset countdowns, spend-cap progress, learned model availability, hourly quota and daily usage charts; pause / resume, probe now, rename, plan / policy / weight / priority / cap, reset quota state, delete (optionally with history); add an API key, paste a subscription token, or import a credential file |
 | **APIs** | Client (`clb_…`) keys: create with expiry, allowed models, enforced model, assigned accounts and limit rules; usage per rule with reset times; regenerate, disable, delete; 7-day trends by account and model; a ready-to-paste Claude Code snippet |
 | **Settings** | Routing strategy (with a guide to all nine), retries, prompt-cache affinity, background jobs, log retention, dashboard password, TOTP, guest access, IP firewall, reset to defaults |
 | **Audit log** *(Advanced)* | Every management change and sign-in, searchable and filterable by action, target, result and time |
-| **Model catalog** *(Advanced)* | The synced model catalog with built-in prices (incl. long-context tiers), per-account availability, active per-model refusals with "try again", sync and probe buttons |
+| **Model catalog** *(Advanced)* | The synced model catalog with built-in prices (incl. long-context tiers), per-account availability, temporary model reroutes with "try again", sync and probe buttons |
 | **Sticky sessions** *(Advanced)* | The in-memory conversation → account map: filter by account, delete entries, purge expired |
 | **Automations** *(Advanced)* | Scheduled prompts per account (weekdays, time, IANA timezone, random spread), cost estimate, run now, and a run history per cycle |
 
@@ -259,24 +259,29 @@ claude-lb then handles the operational half:
 Tokens, refresh tokens, and client secrets are all encrypted at rest, and API-key and
 bearer accounts route side by side in one pool.
 
-### Subscription pooling
+### Multi-model subscription pooling
 
 Add your own Claude Pro, Max (`max_5x`, `max_20x`), Team, and Enterprise subscriptions
 alongside Console API keys with `codex-lb`-style dual-window quota tracking.
 `claude-lb account add-subscription <name>` runs Claude Code's own `claude setup-token`
 in a throwaway config directory, so your current Claude Code login is untouched.
 
-> **Know the limits before you rely on it.** Called from outside Claude Code, a
-> subscription token may be refused for some models (observed: Haiku works, Sonnet and
-> Opus get a `429` without quota headers). claude-lb learns these refusals per model and
-> routes those requests to your API-key accounts, so keep at least one in the pool.
-> Subscriptions are for **your own** accounts: sharing a subscription with other people
-> is against Anthropic's terms. claude-lb does not impersonate Claude Code and never will.
+Subscription accounts use the `claude_code` transport by default. Each `/v1/messages`
+request runs the requested model through an isolated, unmodified Claude Code process
+for that account; Console accounts continue to use direct Anthropic HTTP. claude-lb
+learns account-specific availability and fails over to another subscription or API key
+without imposing a model-family allowlist.
+
+The native transport converts text and client `tool_use` / `tool_result` turns to the
+Messages response shape. Non-streaming responses are returned as JSON; streaming
+requests receive valid, buffered Anthropic SSE after the Claude Code run completes.
+Image/document blocks and exact `max_tokens` enforcement are not available through the
+CLI transport, so use a Console API-key account for those request features.
 
 - **5h + 7d quota tracking**: Reads `anthropic-ratelimit-unified-*` headers on every
   response, tracks `rate_limited` (5h) and `quota_exceeded` (7d) states, and
   auto-recovers as soon as the reset timestamp passes.
-- **Subscription routing**: Use `relative_availability`, `usage_weighted`, `reset_drain`,
+- **Multi-model subscription routing**: Use `relative_availability`, `usage_weighted`, `reset_drain`,
   or `sequential_drain`, plus per-account `routing_policy` (`burn_first` > `normal` >
   `preserve`).
 - **Depletion risk**: Records `QuotaHistory` snapshots to compute EWMA burn rate and
@@ -284,6 +289,8 @@ in a throwaway config directory, so your current Claude Code login is untouched.
 - **Credential import**: Import an existing OAuth/subscription JSON file (including
   `claudeAiOauth` bundles) via `claude-lb account import <name> --file <path>` or
   `POST /api/accounts/import`.
+- **Capability learning**: Runtime traffic and model sync keep the per-account routing
+  map current automatically for every requested model.
 
 See [docs/subscription-pooling.md](docs/subscription-pooling.md) for the full guide.
 
@@ -454,10 +461,10 @@ claude-lb key list                 List issued keys
 | `GET` | `/api/request-logs` · `/options` · `/{id}` | Paged, filtered request log; filter options; one request with cost breakdown |
 | `GET` | `/api/conversations` · `/{session_key}` | Request logs grouped by conversation |
 | `GET` | `/api/reports` · `/options` | Date-range report with comparison, medians, distributions |
-| `GET` / `POST` | `/api/accounts/{id}/probe` · `/trends` · `/model-blocks` | Per-account probe, trends, clear refusals |
+| `GET` / `POST` | `/api/accounts/{id}/probe` · `/trends` · `/model-blocks` | Per-account probe, trends, retry learned routes |
 | `GET` / `POST` | `/api/keys/{id}/trends` · `/regenerate`, `/api/keys/overview` | Key trends, new secret, totals |
 | `GET` | `/api/audit/events` · `/actions` | Filtered, paged audit log |
-| `GET` | `/api/health/catalog` | Model catalog with prices and refusals |
+| `GET` | `/api/health/catalog` | Model catalog with prices and temporary reroutes |
 | `GET` / `POST` / `DELETE` | `/api/sticky-sessions` … | Browse and delete sticky-session entries |
 | `GET` / `PUT` / `POST` / `PATCH` / `DELETE` | `/api/firewall` … | IP allowlist mode and entries |
 | `GET` / `PATCH` / `POST` | `/api/auth/guest`, `/api/auth/guest/login` | Guest access config and sign-in |

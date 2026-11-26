@@ -185,7 +185,7 @@ async def catalog(session: SessionDep, _: ManagementAuthDep) -> CatalogOut:
     """Everything the model catalog page shows, in one call.
 
     Models come from the upstream sync (one row per account that can reach them); prices
-    from the built-in table; refusals from what live traffic taught each subscription.
+    from the built-in table; reroutes from what live traffic learned for each account.
     """
     accounts = list((await session.execute(select(Account).order_by(Account.name))).scalars())
     names = {a.id: a.name for a in accounts}

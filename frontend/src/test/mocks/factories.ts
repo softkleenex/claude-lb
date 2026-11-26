@@ -87,6 +87,7 @@ export type AccountWire = {
 	id: string;
 	name: string;
 	provider: string;
+	transport: "http" | "claude_code";
 	credential_hint: string;
 	base_url: string | null;
 	weight: number;
@@ -157,6 +158,7 @@ export function createAccountWire(overrides: Partial<AccountWire> = {}): Account
 		id: "acc_console",
 		name: "console",
 		provider: "anthropic_api_key",
+		transport: "http",
 		credential_hint: "sk-ant-…a1b2",
 		base_url: null,
 		weight: 1,
@@ -213,6 +215,7 @@ export function createSubscriptionAccountWire(overrides: Partial<AccountWire> = 
 		id: "acc_max",
 		name: "alice-max",
 		provider: "oauth",
+		transport: "claude_code",
 		credential_hint: "sk-ant-oat01-…z9y8",
 		plan_type: "max_5x",
 		routing_policy: "burn_first",

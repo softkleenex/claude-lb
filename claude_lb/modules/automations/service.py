@@ -15,7 +15,7 @@ How a slot fires:
    through `ProxyService.forward` pinned to their account, so they are logged like any
    request (user agent `USER_AGENT`), counted in spend, and update quota state.
 
-A run whose account refuses the model, is paused (unless the job includes paused
+A run whose account cannot currently route the model, is paused (unless the job includes paused
 accounts) or is disabled is *skipped* without a request. A run that could not be sent
 within `GRACE` of its due time (the server was down) is skipped as missed.
 """
@@ -340,7 +340,9 @@ async def execute_run(client: httpx.AsyncClient, run_id: str) -> str:
             return "skipped"
         if model_blocks.is_blocked(account, job.model):
             await _finish(
-                run_id, status="skipped", error=f"model refused: {account.name} does not serve {job.model}"
+                run_id,
+                status="skipped",
+                error=f"model temporarily unavailable: {account.name} cannot currently serve {job.model}",
             )
             return "skipped"
         if lb.spend_cap_reached(account):
@@ -400,7 +402,7 @@ async def execute_run(client: httpx.AsyncClient, run_id: str) -> str:
                 status="skipped",
                 http_status=exc.status_code,
                 duration_ms=duration,
-                error=f"model refused: the subscription does not serve {model}",
+                error=f"model temporarily unavailable: the account cannot currently serve {model}",
             )
             return "skipped"
         await _finish(

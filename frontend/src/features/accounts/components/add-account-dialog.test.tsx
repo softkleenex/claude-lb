@@ -69,7 +69,7 @@ describe("AddAccountDialog", () => {
     await user.click(within(dialog).getByRole("tab", { name: "Subscription" }));
     const command = within(dialog).getByTestId("add-subscription-command");
     expect(command).toHaveTextContent(
-      "uv run claude-lb account add-subscription <name> --plan-type pro --routing-policy normal",
+      "uv run claude-lb account add-subscription <name> --plan-type pro --routing-policy normal --transport claude_code",
     );
 
     await user.type(within(dialog).getByLabelText("Name"), "alice");
@@ -79,7 +79,7 @@ describe("AddAccountDialog", () => {
     await user.click(await screen.findByRole("option", { name: "Preserve" }));
 
     expect(command).toHaveTextContent(
-      "uv run claude-lb account add-subscription alice --plan-type max_20x --routing-policy preserve",
+      "uv run claude-lb account add-subscription alice --plan-type max_20x --routing-policy preserve --transport claude_code",
     );
     expect(within(dialog).getByRole("button", { name: "Copy command" })).toBeInTheDocument();
   });
@@ -99,7 +99,12 @@ describe("AddAccountDialog", () => {
     await user.click(within(dialog).getByRole("button", { name: "Add subscription" }));
 
     await waitFor(() => expect(added("bob")).toBeDefined());
-    expect(added("bob")).toMatchObject({ provider: "oauth", auth_scheme: "bearer", plan_type: "pro" });
+    expect(added("bob")).toMatchObject({
+      provider: "oauth",
+      auth_scheme: "bearer",
+      transport: "claude_code",
+      plan_type: "pro",
+    });
   });
 
   it("imports a credentials JSON file without renaming its keys", async () => {
@@ -117,7 +122,11 @@ describe("AddAccountDialog", () => {
     await user.click(within(dialog).getByRole("button", { name: "Import" }));
 
     await waitFor(() => expect(added("imported")).toBeDefined());
-    expect(added("imported")).toMatchObject({ provider: "oauth", auth_scheme: "bearer" });
+    expect(added("imported")).toMatchObject({
+      provider: "oauth",
+      auth_scheme: "bearer",
+      transport: "claude_code",
+    });
   });
 
   it("rejects a file that is not a JSON object", async () => {

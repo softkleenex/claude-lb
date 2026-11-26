@@ -1,11 +1,9 @@
-"""Models an upstream refuses for one account, learned from live traffic.
+"""Per-account model availability learned from live traffic.
 
-A subscription (bearer) token called from outside Claude Code can be refused for some
-models while others work. The refusal is a 429 with none of the
-``anthropic-ratelimit-unified-*`` headers a real quota rejection carries. Treating it as a
-rate limit cooled the whole account down, so one Sonnet request knocked out an account
-that was still serving Haiku. Instead we remember the (account, model) pair and route
-that model elsewhere for a while.
+A model-level 429 without ``anthropic-ratelimit-unified-*`` headers describes the
+current account-model route, while a real quota rejection carries unified headers.
+Cooling down the whole account would discard its other usable routes, so we remember
+the pair and use another eligible account for a while.
 """
 
 from __future__ import annotations
@@ -16,10 +14,10 @@ import time
 from claude_lb.db.models import Account
 
 BLOCK_TTL_SECONDS = 12 * 3600
-"""Re-test a blocked model after this long, in case the upstream policy changed."""
+"""Re-test an unavailable account-model route after this long."""
 
 
-def is_model_refusal(account: Account, status_code: int, headers: dict[str, str]) -> bool:
+def is_route_unavailable(account: Account, status_code: int, headers: dict[str, str]) -> bool:
     if status_code != 429 or (account.plan_type or "api") == "api":
         return False
     lowered = {k.lower() for k in headers}

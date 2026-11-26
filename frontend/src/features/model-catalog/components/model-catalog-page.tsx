@@ -114,7 +114,7 @@ function ProbeResultCard({ result, onDismiss }: { result: ProbeResult; onDismiss
   );
 }
 
-function RefusalsSection({ catalog, canWrite }: { catalog: Catalog; canWrite: boolean }) {
+function ReroutesSection({ catalog, canWrite }: { catalog: Catalog; canWrite: boolean }) {
   const { t } = useTranslation();
   const now = useNow();
   const queryClient = useQueryClient();
@@ -130,18 +130,18 @@ function RefusalsSection({ catalog, canWrite }: { catalog: Catalog; canWrite: bo
   };
 
   return (
-    <section className="space-y-3" aria-labelledby="models-refusals-title">
+    <section className="space-y-3" aria-labelledby="models-reroutes-title">
       <div className="flex items-center gap-3">
-        <h2 id="models-refusals-title" className={SECTION_TITLE}>
-          {t("models.refusals.title")}
+        <h2 id="models-reroutes-title" className={SECTION_TITLE}>
+          {t("models.reroutes.title")}
         </h2>
         <div className="h-px min-w-8 flex-1 bg-border" />
       </div>
-      <p className="text-xs text-muted-foreground">{t("models.refusals.description")}</p>
+      <p className="text-xs text-muted-foreground">{t("models.reroutes.description")}</p>
       {catalog.blocks.length === 0 ? (
-        <p className="rounded-xl border bg-card p-4 text-sm text-muted-foreground">{t("models.refusals.empty")}</p>
+        <p className="rounded-xl border bg-card p-4 text-sm text-muted-foreground">{t("models.reroutes.empty")}</p>
       ) : (
-        <ul className="divide-y rounded-xl border bg-card" data-testid="model-refusals">
+        <ul className="divide-y rounded-xl border bg-card" data-testid="model-reroutes">
           {catalog.blocks.map((block) => (
             <li
               key={`${block.accountId}:${block.model}`}
@@ -149,15 +149,15 @@ function RefusalsSection({ catalog, canWrite }: { catalog: Catalog; canWrite: bo
             >
               <div className="min-w-0 text-sm">
                 <p>
-                  {t("models.refusals.item", { account: block.accountName })}{" "}
+                  {t("models.reroutes.item", { account: block.accountName })}{" "}
                   <span className="font-mono text-xs" translate="no">
                     {block.model}
                   </span>
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {t("models.refusals.until", {
+                  {t("models.reroutes.until", {
                     time: formatAbsolute(block.until),
-                    left: formatUntil(block.until, now) ?? t("models.refusals.soon"),
+                    left: formatUntil(block.until, now) ?? t("models.reroutes.soon"),
                   })}
                 </p>
               </div>
@@ -169,7 +169,7 @@ function RefusalsSection({ catalog, canWrite }: { catalog: Catalog; canWrite: bo
                 disabled={!canWrite || clearBlocks.isPending}
                 onClick={() => void retry(block.accountId, block.model)}
               >
-                {t("models.refusals.retry")}
+                {t("models.reroutes.retry")}
               </Button>
             </li>
           ))}
@@ -407,7 +407,7 @@ export function ModelCatalogPage() {
             <p className="text-xs text-muted-foreground">{t("models.summary.hint")}</p>
           </div>
 
-          <RefusalsSection catalog={catalog} canWrite={canWrite} />
+          <ReroutesSection catalog={catalog} canWrite={canWrite} />
 
           <section className="space-y-3" aria-labelledby="models-list-title">
             <div className="flex flex-wrap items-center gap-3">

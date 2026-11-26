@@ -21,7 +21,7 @@ from claude_lb.db.session import session_scope
 from claude_lb.modules.accounts import credentials
 from claude_lb.modules.health import service as health_service
 from claude_lb.modules.proxy import load_balancer as lb
-from claude_lb.modules.proxy import model_blocks, sticky
+from claude_lb.modules.proxy import model_blocks, native_claude, sticky
 from claude_lb.modules.proxy import quota as quota_mod
 from claude_lb.modules.proxy.usage_parser import StreamUsageCollector, Usage, parse_json_usage
 from claude_lb.modules.settings import service as settings_service
@@ -95,7 +95,7 @@ def _unavailable_reason(account: Account, model: str | None) -> tuple[str, str] 
     if lb.spend_cap_reached(account):
         return "at spend cap", f"spend cap ${account.spend_cap_usd:.2f} reached"
     if model_blocks.is_blocked(account, model):
-        return "does not serve this model", f"subscription does not serve {model}"
+        return "model temporarily unavailable", f"{model} is temporarily unavailable"
     if not lb.is_available(account):
         return "cooling down", account.quota_status or "cooling down"
     return None
@@ -127,17 +127,17 @@ def explain_unavailable(accounts: list[Account], model: str | None) -> str | Non
     return f"no account can serve {target} right now: {summary}"
 
 
-def forced_refusal(account: Account, model: str | None) -> str | None:
+def forced_unavailable_reason(account: Account, model: str | None) -> str | None:
     """Why even a forced send (an automation told to include a paused account) must not
-    go through this account. Forcing skips the *pause* only — never the spend cap, a model
-    the subscription refuses, or a breaker that took the account out (auth failure, out
-    of credit)."""
+    go through this account. Forcing skips the *pause* only — never the spend cap, a
+    temporarily unavailable account-model route, or a breaker that took the account out
+    (auth failure, out of credit)."""
     if not account.enabled and not lb.is_paused(account):
         return f"account is disabled ({account.disabled_reason or 'breaker'})"
     if lb.spend_cap_reached(account):
         return f"account reached its spend cap (${account.spend_cap_usd:.2f})"
     if model_blocks.is_blocked(account, model):
-        return f"model refused: {account.name} does not serve {model}"
+        return f"model temporarily unavailable: {account.name} cannot currently serve {model}"
     return None
 
 
@@ -311,9 +311,9 @@ class ProxyService:
                         if pin_account_id in tried:
                             raise lb.NoAccountAvailable("pinned account already tried")
                         account = all_accounts[0]
-                        refusal = forced_refusal(account, model)
-                        if refusal is not None:
-                            raise UpstreamExhausted(refusal, status_code=503)
+                        unavailable = forced_unavailable_reason(account, model)
+                        if unavailable is not None:
+                            raise UpstreamExhausted(unavailable, status_code=503)
                     else:
                         account = lb.select_account(
                             accounts,
@@ -347,6 +347,65 @@ class ProxyService:
                 logger.warning("could not resolve credential for account=%s: %s", account_name, exc)
                 continue
 
+            if account_snapshot.transport == native_claude.TRANSPORT_CLAUDE_CODE and path == "/v1/messages":
+                try:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        raise native_claude.NativeRequestError("request body must be a JSON object")
+                    native = await native_claude.invoke(
+                        account_id=account_id,
+                        token=credential.token,
+                        payload=payload,
+                    )
+                except (ValueError, UnicodeDecodeError) as exc:
+                    error = {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "request body must be valid JSON",
+                        },
+                    }
+                    raise UpstreamExhausted(
+                        "request body must be valid JSON",
+                        status_code=400,
+                        last_body=json.dumps(error).encode(),
+                    ) from exc
+                except native_claude.NativeRequestError as exc:
+                    error = {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}}
+                    raise UpstreamExhausted(
+                        str(exc), status_code=400, last_body=json.dumps(error).encode()
+                    ) from exc
+                except native_claude.NativeClaudeError as exc:
+                    last_error = str(exc)
+                    last_status = 502
+                    last_body = None
+                    await self._record_attempt_failure(account_id, status_code=None, reason=last_error)
+                    logger.warning("native Claude Code error on account=%s: %s", account_name, last_error)
+                    continue
+
+                account_obj = await self._refresh_account(account_id, {})
+                if native.stream:
+                    sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
+                    return ProxyOutcome(
+                        status_code=200,
+                        headers={"content-type": "text/event-stream"},
+                        account=account_obj,
+                        attempts=attempt,
+                        streaming=True,
+                        stream=native_claude.one_chunk(native.body),
+                        usage=native.usage,
+                    )
+                sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
+                return ProxyOutcome(
+                    status_code=200,
+                    headers={"content-type": "application/json"},
+                    account=account_obj,
+                    attempts=attempt,
+                    streaming=False,
+                    body=native.body,
+                    usage=native.usage,
+                )
+
             upstream_headers = credential.apply(self._build_upstream_headers(headers))
 
             request = self._client.build_request(method, url, headers=upstream_headers, content=body or None)
@@ -359,17 +418,17 @@ class ProxyService:
                 logger.warning("upstream transport error on account=%s: %s", account_id, last_error)
                 continue
 
-            if model and model_blocks.is_model_refusal(
+            if model and model_blocks.is_route_unavailable(
                 account_snapshot, response.status_code, dict(response.headers)
             ):
-                # This model is off-limits for this subscription; the account itself is
-                # fine for others. Route the model elsewhere instead of cooling down.
+                # This account-model route is unavailable; the account itself can still
+                # serve others. Route elsewhere instead of cooling down the account.
                 last_body = await response.aread()
                 await response.aclose()
                 last_status = 429
-                last_error = f"upstream refused model {model} for this subscription"
+                last_error = f"model {model} is temporarily unavailable on this account"
                 await self._record_model_block(account_id, model)
-                logger.info("account=%s refuses model=%s; routing it elsewhere", account_name, model)
+                logger.info("account=%s model=%s unavailable; routing elsewhere", account_name, model)
                 continue
 
             if response.status_code in RETRYABLE_STATUS:

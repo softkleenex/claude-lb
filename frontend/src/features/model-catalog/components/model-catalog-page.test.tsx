@@ -45,22 +45,22 @@ describe("ModelCatalogPage", () => {
     expect(screen.getByText("backup-key · not synced")).toBeInTheDocument();
   });
 
-  it("lists runtime refusals and lets an operator try a model again", async () => {
+  it("lists learned reroutes and lets an operator try a model again", async () => {
     const { user } = await renderPage();
 
-    const refusals = screen.getByTestId("model-refusals");
-    expect(within(refusals).getByText("alice-max refuses")).toBeInTheDocument();
-    expect(within(refusals).getByText("claude-sonnet-5-5")).toBeInTheDocument();
+    const reroutes = screen.getByTestId("model-reroutes");
+    expect(within(reroutes).getByText("Temporarily unavailable on alice-max:")).toBeInTheDocument();
+    expect(within(reroutes).getByText("claude-sonnet-5-5")).toBeInTheDocument();
 
     const deletes: string[] = [];
     server.events.on("request:start", ({ request }) => {
       if (request.method === "DELETE") deletes.push(new URL(request.url).pathname + new URL(request.url).search);
     });
     setMockCatalog({ blocks: [] });
-    await user.click(within(refusals).getByRole("button", { name: "Try again" }));
+    await user.click(within(reroutes).getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(deletes).toEqual(["/api/accounts/acc_max/model-blocks?model=claude-sonnet-5-5"]));
-    expect(await screen.findByText("No account is refusing a model right now.")).toBeInTheDocument();
+    expect(await screen.findByText("Every learned account-model route is currently available.")).toBeInTheDocument();
     server.events.removeAllListeners();
   });
 

@@ -38,13 +38,13 @@ describe("AccountsPage", () => {
     expect(within(list).getByText("Max 5x")).toBeInTheDocument();
     expect(within(list).getAllByText("Burn first").length).toBeGreaterThan(0);
     expect(within(list).getByText("Paused")).toBeInTheDocument();
-    expect(within(list).getByText("1 model refused")).toBeInTheDocument();
+    expect(within(list).getByText("1 model rerouted")).toBeInTheDocument();
     // The subscription shows its 5h/7d bars; the API key shows rate-limit headroom.
     expect(within(screen.getByTestId("account-item-acc_max")).getByText("42%")).toBeInTheDocument();
     expect(within(screen.getByTestId("account-item-acc_console")).getByText("92% left")).toBeInTheDocument();
   });
 
-  it("shows the selected subscription's usage, risk and refused models", async () => {
+  it("shows the selected subscription's usage, risk and learned model routes", async () => {
     await renderPage();
 
     expect(screen.getByRole("heading", { name: "alice-max" })).toBeInTheDocument();
@@ -53,7 +53,7 @@ describe("AccountsPage", () => {
     expect(screen.getByText("Allowed")).toBeInTheDocument();
     expect((await screen.findAllByText("Warning")).length).toBe(2);
     expect(
-      screen.getByText(/alice-max refuses claude-sonnet-5 via claude-lb — routed to other accounts until/),
+      screen.getByText(/claude-sonnet-5 is temporarily unavailable on alice-max — routed to other accounts until/),
     ).toBeInTheDocument();
     expect(await screen.findByText("Last 7 days", { selector: "h3" })).toBeInTheDocument();
   });
@@ -64,7 +64,7 @@ describe("AccountsPage", () => {
     await user.click(screen.getByRole("button", { name: "Try claude-sonnet-5 on this account again" }));
 
     await waitFor(() => expect(mockAccount("acc_max").model_blocks).toEqual([]));
-    await waitFor(() => expect(screen.queryByText("Models this subscription refuses")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Temporarily rerouted models")).not.toBeInTheDocument());
   });
 
   it("selects another account and pauses and resumes it", async () => {

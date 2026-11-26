@@ -3,7 +3,7 @@
 Goal: replace the single-file vanilla dashboard (`claude_lb/modules/dashboard/index.html`)
 with a React app whose features are a **superset of codex-lb's dashboard** plus everything
 claude-lb already had (audit log, cache savings, grouped cost report + CSV, model catalog,
-spend caps, subscription 5h/7d quota, per-model refusals).
+spend caps, subscription 5h/7d quota, and learned per-model availability).
 
 Decisions (user, 2026-11-26): React + Vite stack like codex-lb; build everything in one go.
 Base: codex-lb `frontend/` (MIT, © 2025 Soju06) copied and adapted — keep its LICENSE notice.
@@ -216,13 +216,13 @@ header work. Console: only the expected 401s from the deliberate wrong sign-ins.
   Components: `account-list`, `account-list-item`, `account-badges` (status/plan/policy/provider/risk),
   `account-quota-bars` (`UsageBar` = *used* % bar, `AccountQuotaBars` = 5h/7d or rate-limit headroom),
   `account-detail` (name edit, badges, status + reason + countdown, Pause/Resume, Probe now with inline result, Reset
-  quota state (confirm), Delete (confirm + "also delete history")), `account-model-blocks` ("X refuses MODEL via
-  claude-lb — routed to other accounts until T", per-model / all "Try again"), `account-usage-panel` (5h/7d with
+  quota state (confirm), Delete (confirm + "also delete history")), `account-model-blocks` ("MODEL is temporarily
+  unavailable on X — routed to other accounts until T", per-model / all "Try again"), `account-usage-panel` (5h/7d with
   absolute reset + countdown, unified/overage status, rl_* headroom, all-time + last-7-days totals, credential type /
   hint / expiry / refresh failures / base URL), `account-trend-chart` (hourly 5h/7d area chart for subscriptions +
   daily requests bar chart), `account-settings-card` (plan, policy — save on change; weight, priority, spend cap with
   "$spent / $cap" bar, Remove cap), `add-account-dialog` (tabs: API key / Subscription = exact
-  `uv run claude-lb account add-subscription <name> --plan-type … --routing-policy …` with copy button + paste an
+  `uv run claude-lb account add-subscription <name> --plan-type … --routing-policy … --transport claude_code` with copy button + paste an
   `sk-ant-oat…` token → `POST /api/accounts {provider: oauth, auth_scheme: bearer}` / Import file → `POST
   /api/accounts/import`, sent with `rawKeys` so the credential bundle's keys are not snakified). No OAuth flow or
   client id anywhere. Depletion risk badge from `GET /api/usage/quota`.
@@ -581,7 +581,7 @@ should have an id or name" issue, count 2).
   - Model catalog page: **`GET /api/health/catalog`** → `models[{model_id, display_name, accounts[{id,name}],
     max_input_tokens, max_output_tokens, synced_at, price, price_key}]` (price = the `pricing.PRICES` entry the id
     resolves to by the same longest-prefix rule, per MTok: input/output/cache_read/cache_write_5m/cache_write_1h +
-    long-context tier), `prices` (the whole built-in table), `blocks` (active runtime refusals from
+    long-context tier), `prices` (the whole built-in table), `blocks` (learned temporary reroutes from
     `Account.model_blocks_json`: account, plan, model, until), `accounts` (models synced per account,
     `models_synced_at`, enabled/paused), `last_synced_at`. `/api/health/models`, `/sync-models`, `/probe` unchanged.
   - Sticky sessions (`modules/sticky_sessions/api.py`, helpers `entries/forget_many/forget_account/purge_expired/
@@ -612,7 +612,7 @@ should have an id or name" issue, count 2).
       (a test enforces both); unknown actions show their code.
     - `/models` (`features/model-catalog`): "Sync from upstream" and "Probe unhealthy accounts" with inline result cards
       (per-account models / pass-fail with HTTP status), summary (model count, last sync, per-account chips), **runtime
-      refusals** ("claude-pro refuses claude-opus-5-5 — routed elsewhere until … (Nh left)", "Try again" →
+      reroutes** ("claude-opus-5-5 is temporarily unavailable on claude-pro — routed elsewhere until … (Nh left)", "Try again" →
       `DELETE /api/accounts/{id}/model-blocks?model=`), searchable model table (served by, context window, max output,
       price in/out + cache read/write + long-context tier, synced), collapsible built-in price table.
     - `/sticky-sessions` (`features/sticky-sessions`, codex code replaced): status card (on/off, TTL, size/capacity,
@@ -636,7 +636,7 @@ should have an id or name" issue, count 2).
 `npm run build` OK (lazy chunks: audit 9 kB, sticky 12 kB, model catalog 18 kB). Browser (demo on :2461, Korean UI):
 conversations tab → 67 conversations with accounts/keys/models "+N more", details dialog (by-model + timeline, main
 UA `anthropic-python`), "요청 로그에서 이 요청들 보기" → `?session=…` with exactly that conversation's 3 rows; model
-sync → 3 models × 4 accounts with prices + long-context tier; a refusal seeded in the demo DB shown and cleared by
+sync → 3 models × 4 accounts with prices + long-context tier; a temporary reroute seeded in the demo DB shown and cleared by
 "다시 시도" (audited `account.model_blocks_cleared`); probe → "점검할 비정상 계정이 없습니다"; audit page in dark mode with
 translated labels; sticky: select 2 → confirm → "세션 고정 2개를 삭제했습니다", account filter → delete all for
 claude-max-5x (confirm showed the count); 390 px: `/dashboard?view=conversations`, `/audit`, `/models`,
@@ -705,8 +705,8 @@ no console messages.
   savepoint). Runs are claimed with a conditional UPDATE and sent through `ProxyService.forward(pin_account_id=…,
   force_account=paused&&include_paused)` (new params; sticky off for pinned requests; one account, no spill), logged as a
   normal request with UA `claude-lb-automation/<version>` (no API key) so spend/quota/rollups update. Skips without a
-  request: account paused (unless included), breaker-disabled, deleted, or **model refused** (active block); an upstream
-  model refusal during the run marks `skipped: model refused` and records the block. Pending runs older than `GRACE`
+  request: account paused (unless included), breaker-disabled, deleted, or **model temporarily unavailable** (active block); an upstream
+  availability response during the run marks `skipped: model temporarily unavailable` and records the reroute. Pending runs older than `GRACE`
   → `skipped (missed)`; `running` older than 15 min → `failed (interrupted)`. **Run now** `POST /api/automations/{id}/run`
   → 202, runs in a background task; 429 + `retry-after` if the job had a cycle in the last 5 min (manual or
   scheduled). `GET /api/automations` → jobs with targets, missing ids, `next_run_at`, `last_cycle`, `estimate`
@@ -744,7 +744,7 @@ no console messages.
 **Results**: `pytest` 588 passed (+44: `test_firewall.py` 17, `test_guest_role.py` 8 — incl. a sweep over every
 write route in the app's OpenAPI schema (34) asserting 403 for a guest —, `test_automations.py` 19 — schedule
 timezone/DST/validation, slot idempotency across "restarts", grace/armed/disabled, spread, missed/interrupted, skips,
-include-paused, upstream model refusal, upstream error, API CRUD/estimate/run-now/429/runs/audit); `ruff` clean;
+include-paused, temporary model unavailability, upstream error, API CRUD/estimate/run-now/429/runs/audit); `ruff` clean;
 `npm test` 75 files / 422 tests (new: firewall-settings 8, guest-access-settings 3, automations-page 7, schedule 3,
 `__integration__/guest-flow` 3; header/advanced-pages/auth/settings tests updated); `npm run lint` clean;
 `npm run build` OK.
@@ -862,7 +862,7 @@ shows all firewall/guest/automation events (guest login with actor `guest`). 390
    runs; "Run now" on a disabled job still works) and that the account is still targeted; `PATCH` cancels pending runs
    (`skipped`, error `cancelled: …`) on disable, schedule change, or dropped targets (`service.cancel_pending`).
    Deleting a job already deleted its runs. `TestAutomationChanges`.
-4. **[Low] Forced runs ignored caps** — `forced_refusal()` in `forward(force_account=True)` (spend cap, model block,
+4. **[Low] Forced runs ignored caps** — `forced_unavailable_reason()` in `forward(force_account=True)` (spend cap, model block,
    breaker-disabled); `execute_run` also skips capped accounts up front. `TestForcedAutomation`.
 5. `explain_unavailable` → category counts for clients, per-account detail logged at INFO. `TestUnavailableMessage`;
    `test_unavailable_message_counts_reasons_and_logs_the_details` updated.
@@ -902,7 +902,7 @@ no-op. **Results**: Postgres 607 passed (twice, no flakes); SQLite 607 passed; r
 ### 아침 요약 (Morning summary)
 **만든 것** — 예전 단일 HTML 대시보드를 codex-lb 기반 React 대시보드로 완전히 교체했습니다(A–H, 커밋 13개, push 안 함).
 - 페이지: 대시보드(지표·추이·5h/7d 용량 도넛·주간 속도·API 키 지출·계정 카드·모델별 사용량·요청 로그/대화 보기),
-  리포트(기간·필터·이전 기간 비교·CSV), 계정(일시 중지/점검/이름 변경/한도·정책·지출 한도/모델 거부 해제/추이),
+  리포트(기간·필터·이전 기간 비교·CSV), 계정(일시 중지/점검/이름 변경/한도·정책·지출 한도/모델 경로 재시도/추이),
   API(키 규칙: 허용 모델·강제 모델·배정 계정·여러 사용량 한도, 재발급, 추이), 설정(라우팅·백그라운드 작업·보존 기간·
   비밀번호·TOTP·게스트·IP 방화벽), 고급 메뉴의 감사 로그·모델 카탈로그·세션 고정·자동화(예약 프롬프트).
 - 백엔드: 새 API 다수, RequestLog 컬럼(ttft/session/UA/IP), API 키 규칙, 방화벽, 게스트(읽기 전용, IP 숨김), 자동화.

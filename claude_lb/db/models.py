@@ -44,6 +44,8 @@ class Account(Base):
     credential_hint: Mapped[str] = mapped_column(String(64), default="")
 
     base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    transport: Mapped[str] = mapped_column(String(32), default="http")
+    """``http`` for direct API calls, ``claude_code`` for the native CLI transport."""
 
     # --- how the credential is presented upstream ---
     auth_scheme: Mapped[str] = mapped_column(String(16), default="x-api-key")
@@ -85,7 +87,7 @@ class Account(Base):
     quota_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     model_blocks_json: Mapped[str] = mapped_column(Text, default="{}")
-    """Models the upstream refused for this account: {model: unix time the block lifts}."""
+    """Temporarily unavailable models: {model: unix time the reroute lifts}."""
     spend_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     """Stop routing to this account once its estimated lifetime spend reaches this. Null = no cap."""
 

@@ -210,7 +210,7 @@ class TestModelCatalog:
 class TestModelAwareRouting:
     async def test_requests_avoid_accounts_that_cannot_serve_the_model(self, proxy_calls):
         await add_account("opus-only", key="sk-ant-opus")
-        await add_account("haiku-only", key="sk-ant-haiku")
+        await add_account("catalog-a", key="sk-ant-catalog-a")
 
         def handler(request: httpx.Request) -> httpx.Response:
             proxy_calls.append(request)
@@ -368,15 +368,15 @@ class TestUnsupportedAccounts:
         assert excluded == set()
 
     async def test_a_synced_account_missing_the_model_is_excluded(self):
-        haiku_only = await add_account("haiku-only")
+        catalog_a = await add_account("catalog-a")
         opus_only = await add_account("opus-only")
         async with session_scope() as session:
-            session.add(ModelCatalogEntry(account_id=haiku_only, model_id="claude-haiku-4-5"))
+            session.add(ModelCatalogEntry(account_id=catalog_a, model_id="claude-haiku-4-5"))
             session.add(ModelCatalogEntry(account_id=opus_only, model_id="claude-opus-5"))
 
         async with session_scope() as session:
             excluded = await service.unsupported_accounts(session, "claude-opus-5")
-        assert excluded == {haiku_only}
+        assert excluded == {catalog_a}
 
     async def test_a_model_nobody_lists_excludes_every_synced_account(self):
         synced = await add_account("synced")
