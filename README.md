@@ -13,6 +13,14 @@ keep prompt caches warm, and see what every client and model costs.
   <img alt="claude-lb dashboard: savings from prompt caching, cost, per-account headroom" src="docs/dashboard-light.png">
 </picture>
 
+<details>
+<summary><b>Watch the 45-second tour</b> (dashboard, capacity, request details, accounts, key rules)</summary>
+
+![claude-lb dashboard tour](docs/media/claude-lb-demo.gif)
+
+[MP4 version](docs/media/claude-lb-demo.mp4)
+</details>
+
 **Try it without an API key.** Ten seconds, simulated upstream, nothing leaves your machine:
 
 ```bash
@@ -175,6 +183,12 @@ see everything an admin sees except client IP addresses, and every write returns
 like any other request. A slot fires at most once (idempotent across restarts and
 workers), only within 15 minutes of its time, and "Run now" has a 5-minute cooldown.
 
+| Accounts | API key rules | Reports |
+|---|---|---|
+| ![Accounts](docs/media/accounts.png) | ![API keys](docs/media/api-keys.png) | ![Reports](docs/media/reports.png) |
+| **Automations** | **Model catalog** | **Phone** |
+| ![Automations](docs/media/automations.png) | ![Model catalog](docs/media/model-catalog.png) | ![Mobile](docs/media/mobile-dashboard.png) |
+
 To work on the dashboard itself, see [frontend/README.md](frontend/README.md).
 
 ## Routing strategies
@@ -247,8 +261,17 @@ bearer accounts route side by side in one pool.
 
 ### Subscription pooling
 
-Pool Claude Pro, Max (`max_5x`, `max_20x`), Team, and Enterprise subscriptions alongside
-Console API keys with `codex-lb`-style dual-window quota tracking:
+Add your own Claude Pro, Max (`max_5x`, `max_20x`), Team, and Enterprise subscriptions
+alongside Console API keys with `codex-lb`-style dual-window quota tracking.
+`claude-lb account add-subscription <name>` runs Claude Code's own `claude setup-token`
+in a throwaway config directory, so your current Claude Code login is untouched.
+
+> **Know the limits before you rely on it.** Called from outside Claude Code, a
+> subscription token may be refused for some models (observed: Haiku works, Sonnet and
+> Opus get a `429` without quota headers). claude-lb learns these refusals per model and
+> routes those requests to your API-key accounts, so keep at least one in the pool.
+> Subscriptions are for **your own** accounts: sharing a subscription with other people
+> is against Anthropic's terms. claude-lb does not impersonate Claude Code and never will.
 
 - **5h + 7d quota tracking**: Reads `anthropic-ratelimit-unified-*` headers on every
   response, tracks `rate_limited` (5h) and `quota_exceeded` (7d) states, and
