@@ -36,18 +36,35 @@ MODELS = [
 ]
 
 ACCOUNTS = [
-    # name, weight, priority, simulated rate limit (requests per minute)
-    ("prod-us", 2.0, 10, 4000),
-    ("prod-eu", 1.0, 5, 2000),
-    ("batch-workspace", 1.0, 0, 1000),
+    # name, weight, priority, simulated rate limit (requests per minute), plan_type, routing_policy
+    ("prod-us", 2.0, 10, 4000, "api", "normal"),
+    ("prod-eu", 1.0, 5, 2000, "api", "normal"),
+    ("claude-max-5x", 1.0, 8, 1000, "max_5x", "burn_first"),
+    ("claude-pro", 1.0, 6, 500, "pro", "normal"),
 ]
 
 KEYS = [
     # name, budget kwargs
     ("claude-code-team", {}),
     ("ci-review-bot", {"max_cost_usd_per_window": 25.0, "window_seconds": 3600}),
-    ("support-agent", {"max_requests_per_window": 5000, "window_seconds": 3600}),
+    (
+        "support-agent",
+        {
+            "limits": [
+                {"metric": "requests", "window": "5h", "max_value": 5000},
+                {"metric": "cost_usd", "window": "monthly", "max_value": 250.0},
+                {
+                    "metric": "output_tokens",
+                    "window": "daily",
+                    "max_value": 2_000_000,
+                    "model_filter": "claude-opus-5-5",
+                },
+            ]
+        },
+    ),
 ]
+
+USER_AGENTS = ["claude-cli/2.1.3 (external, cli)", "anthropic-python/0.72.0", "ci-review-bot/1.4"]
 
 # Conversations differ in their cacheable prefix (system + tools + first turn); a
 # client keeps adding turns to one, which is what sticky routing keys on.
@@ -95,6 +112,19 @@ def prepare_environment(port: int, host: str = "127.0.0.1") -> Path:
 # ---- simulated upstream --------------------------------------------------------
 
 
+def mount_fake_upstream(app) -> None:
+    """Add the fake upstream to ``app`` ahead of every existing route.
+
+    The dashboard's SPA fallback (registered last by ``create_app``) answers any other
+    GET, so appended upstream routes would never see ``GET /v1/models`` — the health
+    probe and model sync would get the dashboard's HTML and find no models.
+    """
+    existing = list(app.router.routes)
+    app.include_router(build_fake_upstream())
+    added = app.router.routes[len(existing) :]
+    app.router.routes[:] = added + existing
+
+
 def build_fake_upstream():
     router = APIRouter(prefix=DEMO_UPSTREAM_PREFIX, include_in_schema=False)
     # (credential, prefix hash) -> cached prefix size. Scoped per credential, as
@@ -102,10 +132,23 @@ def build_fake_upstream():
     cache: dict[tuple[str, str], int] = {}
     calls: dict[str, int] = {}
 
-    def _rate_headers(credential: str, limit: int) -> dict[str, str]:
+    def _rate_headers(credential: str, limit: int, *, is_subscription: bool = False) -> dict[str, str]:
         calls[credential] = calls.get(credential, 0) + 1
         used = calls[credential] % limit
-        reset = (datetime.now(UTC) + timedelta(seconds=60 - datetime.now(UTC).second)).isoformat()
+        now_dt = datetime.now(UTC)
+        reset = (now_dt + timedelta(seconds=60 - now_dt.second)).isoformat()
+        if is_subscription:
+            pri_util = min(0.92, (calls[credential] % 80) / 100.0 + 0.12)
+            sec_util = min(0.65, (calls[credential] % 200) / 400.0 + 0.08)
+            pri_reset = int((now_dt + timedelta(hours=3, minutes=42)).timestamp())
+            sec_reset = int((now_dt + timedelta(days=4, hours=6)).timestamp())
+            return {
+                "anthropic-ratelimit-unified-status": "allowed_warning" if pri_util >= 0.75 else "allowed",
+                "anthropic-ratelimit-unified-5h-utilization": f"{pri_util:.2f}",
+                "anthropic-ratelimit-unified-5h-reset": str(pri_reset),
+                "anthropic-ratelimit-unified-7d-utilization": f"{sec_util:.2f}",
+                "anthropic-ratelimit-unified-7d-reset": str(sec_reset),
+            }
         return {
             "anthropic-ratelimit-requests-limit": str(limit),
             "anthropic-ratelimit-requests-remaining": str(max(limit - used * 7, limit // 10)),
@@ -132,8 +175,10 @@ def build_fake_upstream():
 
     @router.post("/v1/messages")
     async def messages(request: Request):
-        credential = request.headers.get("x-api-key", "")
-        limit = next((rpm for name, _, _, rpm in ACCOUNTS if credential.endswith(name)), 1000)
+        auth_header = request.headers.get("authorization", "")
+        credential = auth_header.removeprefix("Bearer ").strip() or request.headers.get("x-api-key", "")
+        is_sub = bool(auth_header)
+        limit = next((rpm for name, _, _, rpm, _, _ in ACCOUNTS if credential.endswith(name)), 1000)
         body = await request.json()
         model = body.get("model", MODELS[0][0])
 
@@ -155,7 +200,7 @@ def build_fake_upstream():
             usage = {"cache_read_input_tokens": 0, "cache_creation_input_tokens": prefix_tokens}
         usage["input_tokens"] = random.randint(40, 900)
         output_tokens = random.randint(80, 1600)
-        headers = _rate_headers(credential, limit)
+        headers = _rate_headers(credential, limit, is_subscription=is_sub)
         message_id = f"msg_demo_{random.getrandbits(48):012x}"
 
         if not body.get("stream"):
@@ -210,7 +255,7 @@ async def seed(port: int) -> list[str]:
     from claude_lb.core.pricing import estimate_cost_usd
     from claude_lb.db.models import Account, RequestLog, UsageDaily
     from claude_lb.db.session import session_scope
-    from claude_lb.modules.api_keys.service import create_api_key
+    from claude_lb.modules.api_keys.service import LimitRuleInput, create_api_key
     from claude_lb.modules.usage import rollup
 
     rng = random.Random(7)
@@ -220,21 +265,32 @@ async def seed(port: int) -> list[str]:
     plaintext_keys: list[str] = []
 
     async with session_scope() as session:
-        for name, weight, priority, _ in ACCOUNTS:
-            secret = f"sk-ant-demo-{name}"
+        for name, weight, priority, _, plan_type, routing_policy in ACCOUNTS:
+            is_sub = plan_type != "api"
+            secret = f"tok-demo-{name}" if is_sub else f"sk-ant-demo-{name}"
             account = Account(
                 name=name,
+                provider="oauth" if is_sub else "anthropic_api_key",
+                auth_scheme="bearer" if is_sub else "x-api-key",
                 encrypted_credential=encrypt(secret),
                 credential_hint=mask_secret(secret),
                 base_url=base_url,
                 weight=weight,
                 priority=priority,
+                plan_type=plan_type,
+                routing_policy=routing_policy,
+                primary_used_percent=28.0 if is_sub else None,
+                primary_reset_at=datetime.now(UTC) + timedelta(hours=3) if is_sub else None,
+                secondary_used_percent=14.0 if is_sub else None,
+                secondary_reset_at=datetime.now(UTC) + timedelta(days=5) if is_sub else None,
             )
             session.add(account)
             await session.flush()
             account_ids.append(account.id)
         for name, limits in KEYS:
-            issued = await create_api_key(session, name=name, **limits)
+            rules = [LimitRuleInput(**rule) for rule in limits.get("limits", [])]
+            budget = {k: v for k, v in limits.items() if k != "limits"}
+            issued = await create_api_key(session, name=name, limits=rules, **budget)
             key_ids.append(issued.record.id)
             plaintext_keys.append(issued.plaintext)
 
@@ -253,16 +309,23 @@ async def seed(port: int) -> list[str]:
                 "cache_creation_input_tokens": 0 if hit else prefix,
             }
             status = 200 if rng.random() > 0.015 else 529
+            streaming = rng.random() < 0.7
+            duration_ms = rng.randint(400, 9000)
             session.add(
                 RequestLog(
                     created_at=now - timedelta(seconds=rng.randint(60, 86_000)),
-                    account_id=rng.choices(account_ids, [2, 1, 1])[0],
+                    account_id=rng.choices(account_ids, [2, 1, 1, 1])[0],
                     api_key_id=rng.choices(key_ids, [5, 2, 3])[0],
                     path="/v1/messages",
                     model=model,
                     status_code=status,
-                    streaming=rng.random() < 0.7,
-                    duration_ms=rng.randint(400, 9000),
+                    streaming=streaming,
+                    duration_ms=duration_ms,
+                    ttft_ms=rng.randint(250, min(duration_ms, 2500)) if streaming else None,
+                    session_key=f"{rng.randrange(60):02x}".rjust(64, "d"),
+                    user_agent=rng.choice(USER_AGENTS),
+                    client_ip=f"10.0.0.{rng.randint(2, 40)}",
+                    error="Overloaded" if status == 529 else None,
                     attempts=1 if status == 200 else 3,
                     cost_usd=estimate_cost_usd(model, **usage) if status == 200 else 0.0,
                     **(usage if status == 200 else {}),
@@ -298,7 +361,7 @@ async def seed(port: int) -> list[str]:
             day = (now - timedelta(days=offset)).date().isoformat()
             weekday_factor = 0.45 if (now - timedelta(days=offset)).weekday() >= 5 else 1.0
             growth = 1 - offset / 45
-            for account_id, share in zip(account_ids, (0.5, 0.25, 0.25), strict=True):
+            for account_id, share in zip(account_ids, (0.45, 0.2, 0.2, 0.15), strict=True):
                 for model, model_share in zip(model_ids, weights, strict=True):
                     requests = int(
                         900 * weekday_factor * growth * share * model_share * rng.uniform(0.8, 1.2)
@@ -361,7 +424,11 @@ async def generate_traffic(port: int, keys: list[str], stop: asyncio.Event) -> N
                 await client.post(
                     "/v1/messages",
                     json=body,
-                    headers={"x-api-key": rng.choice(keys), "anthropic-version": "2023-06-01"},
+                    headers={
+                        "x-api-key": rng.choice(keys),
+                        "anthropic-version": "2023-06-01",
+                        "user-agent": rng.choice(USER_AGENTS),
+                    },
                 )
             except httpx.HTTPError:
                 pass
@@ -382,7 +449,7 @@ async def run(port: int, *, traffic: bool, on_ready, host: str = "127.0.0.1") ->
     from claude_lb.main import create_app
 
     app = create_app()
-    app.include_router(build_fake_upstream())
+    mount_fake_upstream(app)
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)

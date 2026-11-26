@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import case, delete, func, select
 
-from claude_lb.core.config import get_settings
 from claude_lb.core.pricing import cache_read_savings_usd
-from claude_lb.db.models import Account, RequestLog
+from claude_lb.db.models import Account, QuotaHistory, RequestLog
 from claude_lb.dependencies import SessionDep
+from claude_lb.modules.proxy import load_balancer as lb
+from claude_lb.modules.proxy import quota as quota_mod
+from claude_lb.modules.reports.api import report_filters
+from claude_lb.modules.settings import service as settings_service
 from claude_lb.modules.usage import reports, rollup
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
@@ -168,10 +172,15 @@ async def list_requests(
 
 
 async def prune_request_logs(session: SessionDep) -> int:
-    """Delete logs past the retention window. Called from the startup task."""
-    days = get_settings().request_log_retention_days
+    """Delete logs and quota snapshots past the retention window.
+
+    Runs at startup and periodically from the scheduler. The window is the *runtime*
+    setting (dashboard-editable), which defaults to the env value.
+    """
+    days = (await settings_service.load(session, use_cache=False)).request_log_retention_days
     cutoff = datetime.now(UTC) - timedelta(days=days)
     result = await session.execute(delete(RequestLog).where(RequestLog.created_at < cutoff))
+    await session.execute(delete(QuotaHistory).where(QuotaHistory.recorded_at < cutoff))
     return result.rowcount or 0
 
 
@@ -216,13 +225,16 @@ class ReportRowOut(BaseModel):
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+    total_tokens: int
     cost_usd: float
+    cache_savings_usd: float
 
 
 class ReportOut(BaseModel):
     group_by: str
     start: str
     end: str
+    source: str
     total_requests: int
     total_cost_usd: float
     rows: list[ReportRowOut]
@@ -231,22 +243,29 @@ class ReportOut(BaseModel):
 @router.get("/report", response_model=ReportOut)
 async def cost_report(
     session: SessionDep,
-    group_by: str = Query(default="day", description="day | account | api_key | model"),
+    group_by: str = Query(default="day", description=" | ".join(reports.GROUPINGS)),
     start: str | None = Query(default=None, description="Inclusive ISO date. Defaults to 30 days ago."),
     end: str | None = Query(default=None, description="Inclusive ISO date. Defaults to today."),
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[list[str] | None, Query()] = None,
+    user_agent: Annotated[list[str] | None, Query(description="User-agent family")] = None,
 ) -> ReportOut:
     """Cost broken down over a date range, for chargeback.
 
-    Backed by rollups, so the range is not limited by request-log retention.
+    Backed by rollups, so the range is not limited by request-log retention — except
+    when grouping or filtering by user agent, which only request logs record.
     """
+    filters = report_filters(account_id, api_key_id, model, user_agent)
     try:
-        report = await reports.build(session, group_by=group_by, start=start, end=end)
+        report = await reports.build(session, group_by=group_by, start=start, end=end, filters=filters)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return ReportOut(
         group_by=report.group_by,
         start=report.start,
         end=report.end,
+        source=report.source,
         total_requests=report.total_requests,
         total_cost_usd=report.total_cost_usd,
         rows=[ReportRowOut(**row.as_dict()) for row in report.rows],
@@ -259,10 +278,15 @@ async def cost_report_csv(
     group_by: str = Query(default="day"),
     start: str | None = None,
     end: str | None = None,
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[list[str] | None, Query()] = None,
+    user_agent: Annotated[list[str] | None, Query()] = None,
 ) -> Response:
     """The same report as a CSV download, with a TOTAL row."""
+    filters = report_filters(account_id, api_key_id, model, user_agent)
     try:
-        report = await reports.build(session, group_by=group_by, start=start, end=end)
+        report = await reports.build(session, group_by=group_by, start=start, end=end, filters=filters)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return Response(
@@ -270,3 +294,143 @@ async def cost_report_csv(
         media_type="text/csv; charset=utf-8",
         headers={"content-disposition": f'attachment; filename="{reports.filename(report)}"'},
     )
+
+
+class AccountQuotaOut(BaseModel):
+    account_id: str
+    account_name: str
+    plan_type: str
+    routing_policy: str
+    effective_capacity: float
+    available: bool
+    quota_status: str
+    primary_used_percent: float | None
+    primary_reset_at: datetime | None
+    secondary_used_percent: float | None
+    secondary_reset_at: datetime | None
+    unified_status: str | None
+    overage_status: str | None
+    depletion_risk: float
+    risk_level: str
+
+
+class PoolQuotaOut(BaseModel):
+    total_accounts: int
+    available_accounts: int
+    total_capacity_credits: float
+    remaining_capacity_credits: float
+    pool_remaining_percent: float
+    accounts: list[AccountQuotaOut]
+
+
+@router.get("/quota", response_model=PoolQuotaOut)
+async def quota_summary(session: SessionDep) -> PoolQuotaOut:
+    """Pool-wide subscription quota, dual-window utilization, and depletion risk."""
+    now = datetime.now(UTC)
+    accounts = list((await session.execute(select(Account).order_by(Account.name))).scalars())
+    since = now - timedelta(days=7)
+    hist_rows = list(
+        (
+            await session.execute(
+                select(QuotaHistory)
+                .where(QuotaHistory.recorded_at >= since)
+                .order_by(QuotaHistory.recorded_at)
+            )
+        ).scalars()
+    )
+    by_account: dict[str, list[QuotaHistory]] = {}
+    for row in hist_rows:
+        by_account.setdefault(row.account_id, []).append(row)
+
+    items: list[AccountQuotaOut] = []
+    total_cap = 0.0
+    rem_cap = 0.0
+    available_count = 0
+
+    for account in accounts:
+        cap = quota_mod.effective_capacity_credits(account)
+        avail = lb.is_available(account, now=now)
+        if avail:
+            available_count += 1
+        pri = quota_mod.effective_primary_used(account, now=now)
+        sec = quota_mod.effective_secondary_used(account, now=now)
+        used = sec if sec is not None else (pri if pri is not None else 0.0)
+        total_cap += cap
+        if account.enabled:
+            rem_cap += max(0.0, cap * (1.0 - min(used, 100.0) / 100.0))
+
+        risk, risk_level = quota_mod.compute_account_risk(by_account.get(account.id, ()), account, now=now)
+        items.append(
+            AccountQuotaOut(
+                account_id=account.id,
+                account_name=account.name,
+                plan_type=account.plan_type,
+                routing_policy=account.routing_policy,
+                effective_capacity=cap,
+                available=avail,
+                quota_status=account.quota_status,
+                primary_used_percent=pri,
+                primary_reset_at=account.primary_reset_at,
+                secondary_used_percent=sec,
+                secondary_reset_at=account.secondary_reset_at,
+                unified_status=account.unified_status,
+                overage_status=account.overage_status,
+                depletion_risk=risk,
+                risk_level=risk_level,
+            )
+        )
+
+    pool_rem_pct = round((rem_cap / total_cap) * 100.0, 2) if total_cap > 0 else 100.0
+    return PoolQuotaOut(
+        total_accounts=len(accounts),
+        available_accounts=available_count,
+        total_capacity_credits=round(total_cap, 2),
+        remaining_capacity_credits=round(rem_cap, 2),
+        pool_remaining_percent=pool_rem_pct,
+        accounts=items,
+    )
+
+
+class QuotaHistoryPointOut(BaseModel):
+    recorded_at: datetime
+    primary_used_percent: float | None
+    primary_reset_at: datetime | None
+    secondary_used_percent: float | None
+    secondary_reset_at: datetime | None
+    unified_status: str | None
+
+
+@router.get("/quota/{account_id}/history", response_model=list[QuotaHistoryPointOut])
+async def quota_history(
+    account_id: str,
+    session: SessionDep,
+    days: int = Query(default=7, ge=1, le=90),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> list[QuotaHistoryPointOut]:
+    """Return recorded dual-window quota snapshots for one account."""
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise HTTPException(404, "account not found")
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = list(
+        (
+            await session.execute(
+                select(QuotaHistory)
+                .where(QuotaHistory.account_id == account_id, QuotaHistory.recorded_at >= since)
+                .order_by(QuotaHistory.recorded_at.desc())
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    rows.reverse()
+    return [
+        QuotaHistoryPointOut(
+            recorded_at=r.recorded_at,
+            primary_used_percent=r.primary_used_percent,
+            primary_reset_at=r.primary_reset_at,
+            secondary_used_percent=r.secondary_used_percent,
+            secondary_reset_at=r.secondary_reset_at,
+            unified_status=r.unified_status,
+        )
+        for r in rows
+    ]

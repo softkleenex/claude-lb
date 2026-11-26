@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -15,12 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.core.config import get_settings
 from claude_lb.core.pricing import estimate_cost_usd
-from claude_lb.db.models import Account, ApiKey, RequestLog
+from claude_lb.db.models import Account, ApiKey, QuotaHistory, RequestLog
 from claude_lb.db.session import session_scope
 from claude_lb.modules.accounts import credentials
 from claude_lb.modules.health import service as health_service
 from claude_lb.modules.proxy import load_balancer as lb
-from claude_lb.modules.proxy import sticky
+from claude_lb.modules.proxy import model_blocks, native_claude, sticky
+from claude_lb.modules.proxy import quota as quota_mod
 from claude_lb.modules.proxy.usage_parser import StreamUsageCollector, Usage, parse_json_usage
 from claude_lb.modules.settings import service as settings_service
 from claude_lb.modules.usage import rollup
@@ -52,6 +54,91 @@ _STRIPPED_RESPONSE_HEADERS = frozenset(
 )
 
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+
+# Anthropic's own wordings for "this account cannot pay". Matched against the *whole*
+# message: an ordinary 400 can quote client input back ("<field>: Extra inputs are not
+# permitted"), and a substring match let any client switch accounts off by naming a
+# field after these phrases.
+_BILLING_MESSAGES = (
+    re.compile(
+        r"Your credit balance is too low to access the Anthropic API\. "
+        r"Please go to Plans & Billing to upgrade or purchase credits\."
+    ),
+    re.compile(r"You have reached your specified API usage limits\. You will regain access on .{1,64}\."),
+)
+
+
+def is_billing_exhausted(body: bytes) -> bool:
+    """True when a 400 says the *account* cannot pay, e.g. Console credit ran out.
+
+    Only an ``invalid_request_error`` whose message is exactly one of Anthropic's known
+    wordings counts; anything else is an ordinary 400 that belongs to the caller.
+    """
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        return False
+    if not isinstance(error, dict) or error.get("type") != "invalid_request_error":
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(pattern.fullmatch(message) for pattern in _BILLING_MESSAGES)
+
+
+def _unavailable_reason(account: Account, model: str | None) -> tuple[str, str] | None:
+    """(category shown to clients, detail for the server log), or None if usable."""
+    if not account.enabled:
+        if lb.is_paused(account):
+            return "paused", "paused by operator"
+        return "disabled", f"disabled ({account.disabled_reason or 'by operator'})"
+    if lb.spend_cap_reached(account):
+        return "at spend cap", f"spend cap ${account.spend_cap_usd:.2f} reached"
+    if model_blocks.is_blocked(account, model):
+        return "model temporarily unavailable", f"{model} is temporarily unavailable"
+    if not lb.is_available(account):
+        return "cooling down", account.quota_status or "cooling down"
+    return None
+
+
+def explain_unavailable(accounts: list[Account], model: str | None) -> str | None:
+    """Say *why* nothing can take the request.
+
+    The answer goes to whoever holds an API key, so it is by category only — how many
+    accounts are capped, paused, and so on. Names, amounts and upstream error text are
+    for the operator and go to the server log.
+    """
+    if not accounts:
+        return "no accounts configured — add one with `claude-lb account add`"
+    counts: dict[str, int] = {}
+    details: list[str] = []
+    for account in accounts:
+        reason = _unavailable_reason(account, model)
+        if reason is None:
+            continue
+        category, detail = reason
+        counts[category] = counts.get(category, 0) + 1
+        details.append(f"{account.name}: {detail}")
+    if not counts:
+        return None
+    target = model or "this request"
+    logger.info("no account can serve %s: %s", target, "; ".join(details))
+    summary = ", ".join(f"{n} {category}" for category, n in counts.items())
+    return f"no account can serve {target} right now: {summary}"
+
+
+def forced_unavailable_reason(account: Account, model: str | None) -> str | None:
+    """Why even a forced send (an automation told to include a paused account) must not
+    go through this account. Forcing skips the *pause* only — never the spend cap, a
+    temporarily unavailable account-model route, or a breaker that took the account out
+    (auth failure, out of credit)."""
+    if not account.enabled and not lb.is_paused(account):
+        return f"account is disabled ({account.disabled_reason or 'breaker'})"
+    if lb.spend_cap_reached(account):
+        return f"account reached its spend cap (${account.spend_cap_usd:.2f})"
+    if model_blocks.is_blocked(account, model):
+        return f"model temporarily unavailable: {account.name} cannot currently serve {model}"
+    return None
 
 
 class UpstreamExhausted(RuntimeError):
@@ -97,6 +184,7 @@ class ProxyService:
         other account to go to, so upstream gets to answer rather than the catalog.
         """
         excluded = await health_service.unsupported_accounts(session, model or "")
+        excluded |= {a.id for a in accounts if model_blocks.is_blocked(a, model)}
         excluded.discard(keep_id)
         if not excluded:
             return accounts
@@ -166,17 +254,29 @@ class ProxyService:
         headers: dict[str, str],
         body: bytes,
         api_key: ApiKey | None,
+        session_key: str | None = None,
+        pin_account_id: str | None = None,
+        force_account: bool = False,
     ) -> ProxyOutcome:
+        """``session_key`` is the conversation key when the caller already computed it
+        (it is logged as well); otherwise it is derived here when sticky routing needs it.
+
+        ``pin_account_id`` sends the request through that account only (automations);
+        ``force_account`` additionally ignores its availability — used for a paused
+        account an automation was told to include. Neither is reachable from clients.
+        """
         env = get_settings()
         async with session_scope() as session:
             runtime = await settings_service.load(session)
 
         model, wants_stream = self._peek_request(body)
         sticky_key = (
-            sticky.session_key(body, api_key_id=api_key.id if api_key else None)
-            if runtime.sticky_sessions_enabled
+            (session_key or sticky.session_key(body, api_key_id=api_key.id if api_key else None))
+            if runtime.sticky_sessions_enabled and pin_account_id is None
             else None
         )
+        assigned_ids = api_key.assigned_account_ids if api_key else None
+        assigned = set(assigned_ids) if assigned_ids is not None else None
         tried: list[str] = []
         reauthed: dict[str, bool] = {}
         last_error: str = "no upstream attempt was made"
@@ -185,10 +285,20 @@ class ProxyService:
 
         for attempt in range(1, runtime.max_attempts + 1):
             async with session_scope() as session:
-                accounts = await self._load_accounts(session)
-                accounts = await self._filter_by_model(
-                    session, accounts, model, keep_id=api_key.pinned_account_id if api_key else None
-                )
+                all_accounts = await self._load_accounts(session)
+                if assigned is not None:
+                    # A key restricted to some accounts never spills onto the rest.
+                    all_accounts = [a for a in all_accounts if a.id in assigned]
+                    if not all_accounts:
+                        raise UpstreamExhausted(
+                            "none of the accounts assigned to this API key exist any more", status_code=503
+                        )
+                if pin_account_id is not None:
+                    all_accounts = [a for a in all_accounts if a.id == pin_account_id]
+                    if not all_accounts:
+                        raise UpstreamExhausted("the account this request is pinned to no longer exists")
+                pinned_id = pin_account_id or (api_key.pinned_account_id if api_key else None)
+                accounts = await self._filter_by_model(session, all_accounts, model, keep_id=pinned_id)
                 preferred = (
                     sticky.resolve(sticky_key, accounts, ttl_seconds=runtime.sticky_ttl_seconds)
                     # Only honour affinity on the first attempt; after a failure the whole
@@ -197,19 +307,30 @@ class ProxyService:
                     else None
                 )
                 try:
-                    account = lb.select_account(
-                        accounts,
-                        strategy=runtime.routing_strategy,
-                        exclude_ids=tried,
-                        pinned_account_id=api_key.pinned_account_id if api_key else None,
-                        preferred_account_id=preferred,
-                    )
+                    if force_account and pin_account_id is not None:
+                        if pin_account_id in tried:
+                            raise lb.NoAccountAvailable("pinned account already tried")
+                        account = all_accounts[0]
+                        unavailable = forced_unavailable_reason(account, model)
+                        if unavailable is not None:
+                            raise UpstreamExhausted(unavailable, status_code=503)
+                    else:
+                        account = lb.select_account(
+                            accounts,
+                            strategy=runtime.routing_strategy,
+                            exclude_ids=tried,
+                            pinned_account_id=pinned_id,
+                            preferred_account_id=preferred,
+                        )
                 except lb.NoAccountAvailable as exc:
                     if tried:
                         break
-                    raise UpstreamExhausted(str(exc), status_code=503) from exc
+                    raise UpstreamExhausted(
+                        explain_unavailable(all_accounts, model) or str(exc), status_code=503
+                    ) from exc
                 account_id = account.id
                 account_name = account.name
+                account_snapshot = account
                 can_reauth = credentials.can_retry_after_auth_failure(account)
                 base_url = (account.base_url or env.upstream_base_url).rstrip("/")
                 session.expunge(account)
@@ -226,6 +347,65 @@ class ProxyService:
                 logger.warning("could not resolve credential for account=%s: %s", account_name, exc)
                 continue
 
+            if account_snapshot.transport == native_claude.TRANSPORT_CLAUDE_CODE and path == "/v1/messages":
+                try:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        raise native_claude.NativeRequestError("request body must be a JSON object")
+                    native = await native_claude.invoke(
+                        account_id=account_id,
+                        token=credential.token,
+                        payload=payload,
+                    )
+                except (ValueError, UnicodeDecodeError) as exc:
+                    error = {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "request body must be valid JSON",
+                        },
+                    }
+                    raise UpstreamExhausted(
+                        "request body must be valid JSON",
+                        status_code=400,
+                        last_body=json.dumps(error).encode(),
+                    ) from exc
+                except native_claude.NativeRequestError as exc:
+                    error = {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}}
+                    raise UpstreamExhausted(
+                        str(exc), status_code=400, last_body=json.dumps(error).encode()
+                    ) from exc
+                except native_claude.NativeClaudeError as exc:
+                    last_error = str(exc)
+                    last_status = 502
+                    last_body = None
+                    await self._record_attempt_failure(account_id, status_code=None, reason=last_error)
+                    logger.warning("native Claude Code error on account=%s: %s", account_name, last_error)
+                    continue
+
+                account_obj = await self._refresh_account(account_id, {})
+                if native.stream:
+                    sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
+                    return ProxyOutcome(
+                        status_code=200,
+                        headers={"content-type": "text/event-stream"},
+                        account=account_obj,
+                        attempts=attempt,
+                        streaming=True,
+                        stream=native_claude.one_chunk(native.body),
+                        usage=native.usage,
+                    )
+                sticky.remember(sticky_key, account_id, ttl_seconds=runtime.sticky_ttl_seconds)
+                return ProxyOutcome(
+                    status_code=200,
+                    headers={"content-type": "application/json"},
+                    account=account_obj,
+                    attempts=attempt,
+                    streaming=False,
+                    body=native.body,
+                    usage=native.usage,
+                )
+
             upstream_headers = credential.apply(self._build_upstream_headers(headers))
 
             request = self._client.build_request(method, url, headers=upstream_headers, content=body or None)
@@ -236,6 +416,19 @@ class ProxyService:
                 last_status = 502
                 await self._record_attempt_failure(account_id, status_code=None, reason=last_error)
                 logger.warning("upstream transport error on account=%s: %s", account_id, last_error)
+                continue
+
+            if model and model_blocks.is_route_unavailable(
+                account_snapshot, response.status_code, dict(response.headers)
+            ):
+                # This account-model route is unavailable; the account itself can still
+                # serve others. Route elsewhere instead of cooling down the account.
+                last_body = await response.aread()
+                await response.aclose()
+                last_status = 429
+                last_error = f"model {model} is temporarily unavailable on this account"
+                await self._record_model_block(account_id, model)
+                logger.info("account=%s model=%s unavailable; routing elsewhere", account_name, model)
                 continue
 
             if response.status_code in RETRYABLE_STATUS:
@@ -271,6 +464,17 @@ class ProxyService:
                 last_status = 403
                 last_error = "upstream refused the request (403)"
                 logger.info("upstream 403 on account=%s; trying the next account", account_name)
+                continue
+
+            if response.status_code == 400 and is_billing_exhausted(error_body := await response.aread()):
+                # Out of Console credit (or over the org's spend limit) is an account
+                # problem, not a caller problem: take this account out and try the next.
+                await response.aclose()
+                last_status = 400
+                last_body = error_body
+                last_error = "upstream account is out of credit"
+                await self._record_attempt_failure(account_id, status_code=402, reason=last_error)
+                logger.warning("disabling account=%s: %s", account_name, last_error)
                 continue
 
             if response.status_code == 401:
@@ -355,9 +559,26 @@ class ProxyService:
                 raise UpstreamExhausted("account disappeared mid-request")
             lb.apply_rate_limit_headers(account, headers)
             lb.record_success(account)
+            if quota_mod.parse_unified_headers(headers) is not None:
+                session.add(
+                    QuotaHistory(
+                        account_id=account.id,
+                        primary_used_percent=account.primary_used_percent,
+                        primary_reset_at=account.primary_reset_at,
+                        secondary_used_percent=account.secondary_used_percent,
+                        secondary_reset_at=account.secondary_reset_at,
+                        unified_status=account.unified_status,
+                    )
+                )
             await session.flush()
             session.expunge(account)
             return account
+
+    async def _record_model_block(self, account_id: str, model: str) -> None:
+        async with session_scope() as session:
+            account = await session.get(Account, account_id)
+            if account is not None:
+                model_blocks.add_block(account, model)
 
     async def _record_attempt_failure(
         self,
@@ -374,6 +595,17 @@ class ProxyService:
                 return
             if rate_limit_headers:
                 lb.apply_rate_limit_headers(account, rate_limit_headers)
+                if quota_mod.parse_unified_headers(rate_limit_headers) is not None:
+                    session.add(
+                        QuotaHistory(
+                            account_id=account.id,
+                            primary_used_percent=account.primary_used_percent,
+                            primary_reset_at=account.primary_reset_at,
+                            secondary_used_percent=account.secondary_used_percent,
+                            secondary_reset_at=account.secondary_reset_at,
+                            unified_status=account.unified_status,
+                        )
+                    )
             lb.record_failure(
                 account,
                 status_code=status_code,
@@ -394,6 +626,10 @@ async def record_request(
     attempts: int,
     usage: Usage,
     error: str | None = None,
+    ttft_ms: int | None = None,
+    session_key: str | None = None,
+    user_agent: str | None = None,
+    client_ip: str | None = None,
 ) -> None:
     """Write the request log and roll the counters onto the account and API key."""
     logged_model = _clip_model(usage.model or model)
@@ -413,6 +649,10 @@ async def record_request(
                 attempts=attempts,
                 cost_usd=cost,
                 error=error[:512] if error else None,
+                ttft_ms=ttft_ms,
+                session_key=session_key,
+                user_agent=user_agent[:255] if user_agent else None,
+                client_ip=client_ip[:64] if client_ip else None,
                 **usage.as_dict(),
             )
         )
@@ -477,6 +717,9 @@ def wrap_stream_for_accounting(
     started_at: float,
     attempts: int,
     on_finished: Callable[[], None] | None = None,
+    session_key: str | None = None,
+    user_agent: str | None = None,
+    client_ip: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Pass SSE bytes through untouched, then log usage once the stream ends.
 
@@ -488,6 +731,7 @@ def wrap_stream_for_accounting(
     were still billed upstream, but never counted against spend or budgets.
     """
     collector = StreamUsageCollector()
+    first_byte_at: list[float] = []
 
     async def _finalize(error: str | None) -> None:
         try:
@@ -510,6 +754,10 @@ def wrap_stream_for_accounting(
                 attempts=attempts,
                 usage=usage,
                 error=error,
+                ttft_ms=int((first_byte_at[0] - started_at) * 1000) if first_byte_at else None,
+                session_key=session_key,
+                user_agent=user_agent,
+                client_ip=client_ip,
             )
         except Exception:  # noqa: BLE001 - nothing upstream of a finalizer can handle it
             logger.exception("failed to record streamed request")
@@ -521,6 +769,8 @@ def wrap_stream_for_accounting(
         error: str | None = None
         try:
             async for chunk in stream:
+                if not first_byte_at:
+                    first_byte_at.append(time.perf_counter())
                 collector.feed(chunk)
                 yield chunk
         except (asyncio.CancelledError, GeneratorExit):

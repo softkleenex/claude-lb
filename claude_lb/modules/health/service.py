@@ -26,6 +26,7 @@ from claude_lb.db.models import Account, ModelCatalogEntry
 from claude_lb.db.session import session_scope
 from claude_lb.modules.accounts.credentials import ResolvedCredential, parse_extra_headers
 from claude_lb.modules.proxy import load_balancer as lb
+from claude_lb.modules.proxy.quota import reconcile_expired_quota
 from claude_lb.modules.settings import service as settings_service
 
 logger = logging.getLogger(__name__)
@@ -101,8 +102,11 @@ def _needs_probe(account: Account, *, now: datetime) -> bool:
     """Probe accounts the balancer currently refuses to use.
 
     Healthy accounts are left alone: real traffic already tells us they work, and
-    probing them would just add requests.
+    probing them would just add requests. An account the operator paused is left
+    alone too — a successful probe would put it back in rotation against their wish.
     """
+    if lb.is_paused(account):
+        return False
     if not account.enabled:
         return True
     cooldown = account.cooldown_until
@@ -122,7 +126,10 @@ async def run_health_probes(client: httpx.AsyncClient) -> list[ProbeResult]:
 
     async with session_scope() as session:
         result = await session.execute(select(Account))
-        candidates = [a for a in result.scalars() if _needs_probe(a, now=now)]
+        all_accounts = list(result.scalars())
+        for account in all_accounts:
+            reconcile_expired_quota(account, now=now)
+        candidates = [a for a in all_accounts if _needs_probe(a, now=now)]
         targets = [
             (a.id, a.name, _credential_for(a), (a.base_url or env.upstream_base_url)) for a in candidates
         ]
@@ -153,22 +160,64 @@ async def run_health_probes(client: httpx.AsyncClient) -> list[ProbeResult]:
             account = await session.get(Account, account_id)
             if account is None:
                 continue
-            account.last_probe_at = datetime.now(UTC)
-            account.last_probe_ok = outcome.ok
-            account.last_probe_detail = outcome.detail[:255]
-
-            if outcome.ok:
-                was_down = not account.enabled or account.consecutive_failures
-                account.enabled = True
-                lb.record_success(account)
-                if was_down:
-                    logger.info("account %s recovered and is back in rotation", name)
-            elif outcome.status_code in (401, 403):
-                # Still rejected: leave it disabled, but keep the reason current.
-                account.enabled = False
-                account.disabled_reason = outcome.detail[:255]
+            _fold_probe_outcome(account, outcome)
 
     return probes
+
+
+def _fold_probe_outcome(account: Account, outcome: ProbeResult, *, reset_quota_status: bool = True) -> None:
+    """Record a probe result on the account and update its breaker state.
+
+    `GET /v1/models` says nothing about 5h/7d quota, so an on-demand probe of an
+    account mid-window leaves its quota status alone (``reset_quota_status=False``).
+    """
+    account.last_probe_at = datetime.now(UTC)
+    account.last_probe_ok = outcome.ok
+    account.last_probe_detail = outcome.detail[:255]
+
+    if lb.is_paused(account):
+        # The operator's pause outranks whatever the probe found.
+        return
+    if outcome.ok:
+        was_down = not account.enabled or account.consecutive_failures
+        account.enabled = True
+        if reset_quota_status:
+            account.quota_status = "active"
+        lb.record_success(account)
+        if was_down:
+            logger.info("account %s recovered and is back in rotation", account.name)
+    elif outcome.status_code in (401, 403):
+        # Still rejected: leave it disabled, but keep the reason current.
+        account.enabled = False
+        account.disabled_reason = outcome.detail[:255]
+
+
+async def probe_one(client: httpx.AsyncClient, account_id: str) -> ProbeResult | None:
+    """Probe one account now, whatever its state, and fold the result into its row.
+
+    Returns None when the account does not exist.
+    """
+    env = get_settings()
+    async with session_scope() as session:
+        account = await session.get(Account, account_id)
+        if account is None:
+            return None
+        reconcile_expired_quota(account)
+        name = account.name
+        credential = _credential_for(account)
+        base_url = account.base_url or env.upstream_base_url
+
+    stub = Account(id=account_id, name=name)
+    try:
+        outcome = await probe_account(client, stub, base_url=base_url, credential=credential)
+    except Exception as exc:  # noqa: BLE001 - a probe failure is a result, not a crash
+        outcome = ProbeResult(account_id, name, False, None, str(exc), [])
+
+    async with session_scope() as session:
+        account = await session.get(Account, account_id)
+        if account is not None:
+            _fold_probe_outcome(account, outcome, reset_quota_status=False)
+    return outcome
 
 
 async def sync_model_catalog(client: httpx.AsyncClient) -> dict[str, int]:
@@ -261,8 +310,11 @@ async def unsupported_accounts(session: AsyncSession, model: str) -> set[str]:
     return synced - supporting
 
 
+RETENTION_INTERVAL_SECONDS = 6 * 3600
+
+
 class Scheduler:
-    """Runs the probe and sync loops for the lifetime of the app."""
+    """Runs the probe, sync and retention loops for the lifetime of the app."""
 
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -273,6 +325,7 @@ class Scheduler:
         self._tasks = [
             asyncio.create_task(self._loop("health probe", self._probe_tick), name="clb-health"),
             asyncio.create_task(self._loop("model sync", self._sync_tick), name="clb-model-sync"),
+            asyncio.create_task(self._loop("retention", self._retention_tick), name="clb-retention"),
         ]
 
     async def stop(self) -> None:
@@ -326,3 +379,13 @@ class Scheduler:
         if counts:
             logger.info("model catalog synced: %s", counts)
         return runtime.model_sync_interval_seconds
+
+    async def _retention_tick(self) -> int:
+        # Imported lazily: the usage module pulls in the proxy stack.
+        from claude_lb.modules.usage.api import prune_request_logs
+
+        async with session_scope() as session:
+            pruned = await prune_request_logs(session)
+        if pruned:
+            logger.info("pruned %d request log rows past retention", pruned)
+        return RETENTION_INTERVAL_SECONDS

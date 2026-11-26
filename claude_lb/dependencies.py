@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from claude_lb.core.config import get_settings
 from claude_lb.db.session import get_session, session_scope
 from claude_lb.modules.api_keys.service import Admission, AuthError, admit
+from claude_lb.modules.proxy import request_models
 from claude_lb.modules.proxy.service import ProxyService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -62,19 +63,30 @@ async def require_api_key(request: Request) -> Admission | None:
             },
         )
 
+    # Starlette caches the body on the request, so the proxy route reads it again for free.
+    inspected = request_models.inspect(
+        request.method,
+        request.scope["path"],
+        await request.body(),
+        content_encoding=request.headers.get("content-encoding"),
+    )
     try:
         async with session_scope() as session:
-            return await admit(session, presented)
+            return await admit(
+                session,
+                presented,
+                inspected.model,
+                batch_models=inspected.models if inspected.batch else None,
+                unreadable=inspected.unreadable,
+            )
     except AuthError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={
                 "type": "error",
-                "error": {
-                    "type": "rate_limit_error" if exc.status_code == 429 else "authentication_error",
-                    "message": exc.message,
-                },
+                "error": {"type": exc.error_type, "message": exc.message},
             },
+            headers={"retry-after": str(exc.retry_after)} if exc.retry_after is not None else None,
         ) from exc
 
 

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from claude_lb.db.models import Account, ModelCatalogEntry
 from claude_lb.db.session import session_scope
@@ -209,7 +210,7 @@ class TestModelCatalog:
 class TestModelAwareRouting:
     async def test_requests_avoid_accounts_that_cannot_serve_the_model(self, proxy_calls):
         await add_account("opus-only", key="sk-ant-opus")
-        await add_account("haiku-only", key="sk-ant-haiku")
+        await add_account("catalog-a", key="sk-ant-catalog-a")
 
         def handler(request: httpx.Request) -> httpx.Response:
             proxy_calls.append(request)
@@ -310,11 +311,33 @@ class TestScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    async def test_retention_tick_honours_the_runtime_setting(self):
+        from claude_lb.db.models import RequestLog
+
+        async with session_scope() as session:
+            await settings_service.update(session, {"request_log_retention_days": 2})
+            for age_days in (1, 3):
+                session.add(
+                    RequestLog(
+                        created_at=datetime.now(UTC) - timedelta(days=age_days),
+                        path="/v1/messages",
+                        status_code=200,
+                    )
+                )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as client:
+            interval = await service.Scheduler(client)._retention_tick()
+
+        async with session_scope() as session:
+            remaining = (await session.execute(select(RequestLog))).scalars().all()
+        assert interval == service.RETENTION_INTERVAL_SECONDS
+        assert len(remaining) == 1, "only the row inside the 2-day runtime window survives"
+
     async def test_start_then_stop_leaves_no_running_tasks(self):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as c:
             scheduler = service.Scheduler(c)
             scheduler.start()
-            assert len(scheduler._tasks) == 2
+            assert len(scheduler._tasks) == 3
             await scheduler.stop()
             assert scheduler._tasks == []
 
@@ -345,15 +368,15 @@ class TestUnsupportedAccounts:
         assert excluded == set()
 
     async def test_a_synced_account_missing_the_model_is_excluded(self):
-        haiku_only = await add_account("haiku-only")
+        catalog_a = await add_account("catalog-a")
         opus_only = await add_account("opus-only")
         async with session_scope() as session:
-            session.add(ModelCatalogEntry(account_id=haiku_only, model_id="claude-haiku-4-5"))
+            session.add(ModelCatalogEntry(account_id=catalog_a, model_id="claude-haiku-4-5"))
             session.add(ModelCatalogEntry(account_id=opus_only, model_id="claude-opus-5"))
 
         async with session_scope() as session:
             excluded = await service.unsupported_accounts(session, "claude-opus-5")
-        assert excluded == {haiku_only}
+        assert excluded == {catalog_a}
 
     async def test_a_model_nobody_lists_excludes_every_synced_account(self):
         synced = await add_account("synced")

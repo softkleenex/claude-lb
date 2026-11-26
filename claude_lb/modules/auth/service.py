@@ -42,6 +42,9 @@ _SCRYPT_DKLEN = 32
 
 _SINGLETON = "singleton"
 
+ROLE_ADMIN = "admin"
+ROLE_GUEST = "guest"
+
 # Regenerated every process start, so a restart invalidates an unused token.
 _bootstrap_token: str = secrets.token_urlsafe(24)
 
@@ -69,6 +72,10 @@ class AuthStatus:
     authenticated: bool
     """True when the caller may use the management plane right now."""
     reason: str = ""
+    role: str = "admin"
+    """``admin`` or ``guest`` (read-only). Meaningful only when authenticated."""
+    guest_access_enabled: bool = False
+    guest_password_required: bool = False
 
 
 # ---- password ------------------------------------------------------------
@@ -210,13 +217,14 @@ async def login(session: AsyncSession, *, password: str, totp_code: str | None, 
     return await create_session(session, client=client)
 
 
-async def create_session(session: AsyncSession, *, client: str = "") -> str:
+async def create_session(session: AsyncSession, *, client: str = "", role: str = ROLE_ADMIN) -> str:
     token = secrets.token_urlsafe(32)
     session.add(
         DashboardSession(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             expires_at=datetime.now(UTC) + SESSION_TTL,
             client=client[:255],
+            role=role,
         )
     )
     await session.flush()
@@ -255,6 +263,61 @@ async def revoke_session(session: AsyncSession, token: str | None) -> None:
 async def revoke_all_sessions(session: AsyncSession) -> int:
     result = await session.execute(delete(DashboardSession))
     return result.rowcount or 0
+
+
+async def revoke_guest_sessions(session: AsyncSession) -> int:
+    result = await session.execute(delete(DashboardSession).where(DashboardSession.role == ROLE_GUEST))
+    return result.rowcount or 0
+
+
+# ---- guest (read-only) access ----------------------------------------------
+#
+# Stored in the settings table under keys that are not runtime settings, so "reset
+# settings to defaults" leaves them alone. Guest access needs a dashboard password:
+# without one the management plane is loopback-only and there is nobody to keep out.
+
+GUEST_ENABLED_KEY = "guest_access_enabled"
+GUEST_PASSWORD_KEY = "guest_password"
+
+
+async def guest_config(session: AsyncSession) -> tuple[bool, bool]:
+    """``(enabled, password_set)``."""
+    from claude_lb.modules.settings import service as settings_service
+
+    enabled = bool(await settings_service.get_value(session, GUEST_ENABLED_KEY, False))
+    stored = await settings_service.get_value(session, GUEST_PASSWORD_KEY)
+    return enabled, isinstance(stored, dict) and bool(stored.get("hash"))
+
+
+async def set_guest_enabled(session: AsyncSession, enabled: bool) -> None:
+    from claude_lb.modules.settings import service as settings_service
+
+    await settings_service.set_value(session, GUEST_ENABLED_KEY, True if enabled else None)
+
+
+async def set_guest_password(session: AsyncSession, password: str | None) -> None:
+    from claude_lb.modules.settings import service as settings_service
+
+    if password is None:
+        await settings_service.set_value(session, GUEST_PASSWORD_KEY, None)
+        return
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise AuthError(f"password must be at least {MIN_PASSWORD_LENGTH} characters", status_code=422)
+    salt = secrets.token_bytes(16).hex()
+    await settings_service.set_value(
+        session, GUEST_PASSWORD_KEY, {"hash": await _hash_off_loop(password, salt), "salt": salt}
+    )
+
+
+async def verify_guest_password(session: AsyncSession, password: str | None) -> bool:
+    """True when guest sign-in may proceed with ``password`` (any value if none is set)."""
+    from claude_lb.modules.settings import service as settings_service
+
+    stored = await settings_service.get_value(session, GUEST_PASSWORD_KEY)
+    if not (isinstance(stored, dict) and stored.get("hash")):
+        return True
+    candidate = await _hash_off_loop(password or "", str(stored.get("salt", "")))
+    return hmac.compare_digest(candidate, str(stored["hash"]))
 
 
 async def prune_expired_sessions(session: AsyncSession) -> int:

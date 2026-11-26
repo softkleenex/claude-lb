@@ -9,6 +9,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from claude_lb import __version__
 from claude_lb.core.config import get_settings
@@ -21,11 +22,20 @@ from claude_lb.modules.auth import dependencies as auth_dependencies
 from claude_lb.modules.auth import service as auth_service
 from claude_lb.modules.auth.api import router as auth_router
 from claude_lb.modules.auth.dependencies import require_management_auth
+from claude_lb.modules.automations.api import router as automations_router
+from claude_lb.modules.automations.scheduler import AutomationScheduler
 from claude_lb.modules.dashboard.api import router as dashboard_router
+from claude_lb.modules.dashboard.data_api import router as dashboard_data_router
+from claude_lb.modules.firewall.api import enforce_firewall
+from claude_lb.modules.firewall.api import router as firewall_router
 from claude_lb.modules.health.api import router as health_router
 from claude_lb.modules.health.service import Scheduler
 from claude_lb.modules.proxy.api import router as proxy_router
+from claude_lb.modules.reports.api import router as reports_router
+from claude_lb.modules.request_logs.api import conversations_router
+from claude_lb.modules.request_logs.api import router as request_logs_router
 from claude_lb.modules.settings.api import router as settings_router
+from claude_lb.modules.sticky_sessions.api import router as sticky_sessions_router
 from claude_lb.modules.usage import metrics as usage_metrics
 from claude_lb.modules.usage.api import prune_request_logs
 from claude_lb.modules.usage.api import router as usage_router
@@ -83,10 +93,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler = Scheduler(app.state.http_client)
     scheduler.start()
     app.state.scheduler = scheduler
+    # Reads app.state.http_client on every tick, so tests that swap the client work.
+    automations = AutomationScheduler(lambda: app.state.http_client)
+    automations.start()
+    app.state.automations = automations
 
     try:
         yield
     finally:
+        await automations.stop()
         await scheduler.stop()
         await app.state.http_client.aclose()
         await dispose_db()
@@ -131,16 +146,22 @@ def create_app() -> FastAPI:
         accounts_router,
         api_keys_router,
         usage_router,
+        dashboard_data_router,
+        request_logs_router,
+        conversations_router,
+        sticky_sessions_router,
+        reports_router,
         settings_router,
         audit_router,
         health_router,
+        firewall_router,
+        automations_router,
     ]
     for router in guarded:
         app.include_router(router, dependencies=[Depends(require_management_auth)])
-    if settings.dashboard_enabled:
-        app.include_router(dashboard_router)
-    # Registered last: its catch-all /v1/{path} must not shadow the management API.
-    app.include_router(proxy_router)
+    # Registered after the management API: its catch-all /v1/{path} must not shadow it.
+    # The IP firewall guards the proxy only; the management plane has its own gate.
+    app.include_router(proxy_router, dependencies=[Depends(enforce_firewall)])
 
     @app.middleware("http")
     async def reject_cross_site_writes(request: Request, call_next):
@@ -193,6 +214,21 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "version": app.version})
+
+    @app.get("/health/ready", tags=["meta"])
+    async def health_ready() -> JSONResponse:
+        """Readiness: the process is up *and* the database answers."""
+        try:
+            async with session_scope() as session:
+                await session.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001 - any DB failure means not ready
+            logger.warning("readiness check failed: %s", exc)
+            return JSONResponse({"status": "unavailable", "version": app.version}, status_code=503)
+        return JSONResponse({"status": "ok", "version": app.version})
+
+    # Registered last of all: the SPA fallback answers any GET nothing else claimed.
+    if settings.dashboard_enabled:
+        app.include_router(dashboard_router)
 
     return app
 

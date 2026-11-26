@@ -29,7 +29,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 
 from claude_lb.db.models import Account
-from claude_lb.modules.proxy.load_balancer import is_available
+from claude_lb.modules.proxy.load_balancer import is_available, top_policy_tier
 
 # Bounded so a long-running proxy cannot grow this without limit.
 _MAX_ENTRIES = 10_000
@@ -123,7 +123,9 @@ def resolve(
         # Expired, or the account is down — drop it and fall through to a fresh pick.
         del _affinity[key]
 
-    return rendezvous(key, available)
+    # A fresh pick must respect routing_policy, or a new conversation can land on a
+    # `preserve` account while a `burn_first` one still has room.
+    return rendezvous(key, top_policy_tier(available))
 
 
 def remember(key: str | None, account_id: str, *, ttl_seconds: int, now: float | None = None) -> None:
@@ -148,3 +150,41 @@ def clear() -> None:
 
 def size() -> int:
     return len(_affinity)
+
+
+# ---------------------------------------------------------------- operator browsing
+
+
+def entries(*, now: float | None = None) -> list[tuple[str, str, float]]:
+    """``(key, account_id, seconds_left)`` for every entry, most recently used first.
+
+    Expired entries are included with a negative ``seconds_left``: ``resolve`` only drops
+    them lazily, when that conversation comes back.
+    """
+    now = now if now is not None else time.monotonic()
+    return [
+        (key, account_id, expires_at - now) for key, (account_id, expires_at) in reversed(_affinity.items())
+    ]
+
+
+def forget_many(keys: Sequence[str]) -> int:
+    removed = 0
+    for key in keys:
+        if _affinity.pop(key, None) is not None:
+            removed += 1
+    return removed
+
+
+def forget_account(account_id: str) -> int:
+    keys = [key for key, (owner, _) in _affinity.items() if owner == account_id]
+    return forget_many(keys)
+
+
+def purge_expired(*, now: float | None = None) -> int:
+    now = now if now is not None else time.monotonic()
+    keys = [key for key, (_, expires_at) in _affinity.items() if expires_at <= now]
+    return forget_many(keys)
+
+
+def capacity() -> int:
+    return _MAX_ENTRIES

@@ -1,0 +1,1 @@
+import{P as e}from"./api-client-79zTNHYu.js";import{x as t}from"./vendor-query-DS9m2DBb.js";var n=t();function r({className:t,...r}){return(0,n.jsx)(`div`,{"data-slot":`skeleton`,className:e(`bg-accent animate-pulse rounded-md`,t),...r})}export{r as t};

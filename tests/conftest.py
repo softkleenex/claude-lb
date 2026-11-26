@@ -35,12 +35,19 @@ async def fresh_database() -> AsyncIterator[None]:
     # has to be cleared between tests along with the database it mirrors.
     auth_service._reset_latch_for_tests()
     auth_service._reset_throttle_for_tests()
+    from claude_lb.modules.firewall import service as firewall_service
+
+    firewall_service.invalidate()
 
     await init_db()
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    # Drop the pooled connections so the test starts with none. asyncpg connections
+    # are bound to the loop that opened them, and a sync test that drives the CLI runs
+    # its own asyncio.run(); reusing this pool there fails ("attached to a different loop").
+    await dispose_db()
     yield
     await dispose_db()
 

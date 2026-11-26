@@ -122,13 +122,45 @@ async def update(session: AsyncSession, changes: dict[str, Any]) -> RuntimeSetti
 
 
 async def reset(session: AsyncSession) -> RuntimeSettings:
-    """Drop all overrides and fall back to the env defaults."""
-    result = await session.execute(select(Setting))
+    """Drop all overrides and fall back to the env defaults.
+
+    Only the keys of `RuntimeSettings`: the firewall mode and guest access live in the
+    same table but are security state, and "reset routing defaults" must not quietly
+    open the firewall or switch guest access back off/on.
+    """
+    result = await session.execute(select(Setting).where(Setting.key.in_(list(RuntimeSettings.model_fields))))
     for row in result.scalars():
         await session.delete(row)
     await session.flush()
     invalidate()
     return _defaults_from_env()
+
+
+async def get_value(session: AsyncSession, key: str, default: Any = None) -> Any:
+    """Read a stored value that is not part of `RuntimeSettings` (not cached)."""
+    row = await session.get(Setting, key)
+    if row is None:
+        return default
+    try:
+        return json.loads(row.value_json)
+    except ValueError:
+        logger.warning("ignoring unparseable setting %r", key)
+        return default
+
+
+async def set_value(session: AsyncSession, key: str, value: Any) -> None:
+    """Store (or, with ``None``, delete) a value that is not part of `RuntimeSettings`."""
+    if key in RuntimeSettings.model_fields:
+        raise ValueError(f"{key} is a runtime setting; use update()")
+    row = await session.get(Setting, key)
+    if value is None:
+        if row is not None:
+            await session.delete(row)
+    elif row is None:
+        session.add(Setting(key=key, value_json=json.dumps(value)))
+    else:
+        row.value_json = json.dumps(value)
+    await session.flush()
 
 
 def invalidate() -> None:

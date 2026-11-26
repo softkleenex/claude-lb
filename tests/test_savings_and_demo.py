@@ -96,6 +96,21 @@ class TestDemoUpstream:
         assert "anthropic-ratelimit-requests-remaining" in response.headers
         assert b'"message_delta"' in response.content and b'"output_tokens"' in response.content
 
+    async def test_model_list_is_not_shadowed_by_the_dashboard(self, tmp_path, monkeypatch):
+        """Regression: the SPA fallback used to answer the fake upstream's GETs with HTML."""
+        from claude_lb.main import create_app
+        from claude_lb.modules.dashboard import api as dashboard_api
+
+        (tmp_path / "index.html").write_text("<!doctype html><title>spa</title>")
+        monkeypatch.setattr(dashboard_api, "STATIC_DIR", tmp_path)
+        app = create_app()
+        demo.mount_fake_upstream(app)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://up") as client:
+            response = await client.get(f"{demo.DEMO_UPSTREAM_PREFIX}/v1/models")
+            assert response.headers["content-type"].startswith("application/json")
+            assert len(response.json()["data"]) == len(demo.MODELS)
+            assert "spa" in (await client.get("/dashboard")).text
+
     async def test_model_list(self, upstream):
         models = (await upstream.get(f"{demo.DEMO_UPSTREAM_PREFIX}/v1/models")).json()["data"]
         assert {m["id"] for m in models} == {m[0] for m in demo.MODELS}

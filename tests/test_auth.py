@@ -275,7 +275,7 @@ class TestProxyIsUnaffected:
         async for client in make_remote_client(ok_json([])):
             response = await client.get("/")
         assert response.status_code == 200
-        assert "<title>claude-lb</title>" in response.text
+        assert "<title>Claude LB</title>" in response.text
 
     async def test_health_stays_open_for_probes(self):
         async for client in make_remote_client(ok_json([])):
@@ -353,3 +353,26 @@ class TestGateFailsClosed:
         assert auth.password_ever_seen() is False
         async for client in make_client(ok_json([])):
             assert (await client.get("/api/accounts")).status_code == 200
+
+
+class TestStatusAndReadiness:
+    async def test_status_reports_that_auth_is_enabled(self):
+        async for client in make_remote_client(ok_json([])):
+            body = (await client.get("/api/auth/status")).json()
+        assert body["auth_enabled"] is True
+
+    async def test_status_reports_auth_disabled_by_config(self, monkeypatch):
+        from claude_lb.core.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "dashboard_auth_enabled", False)
+        async for client in make_remote_client(ok_json([])):
+            body = (await client.get("/api/auth/status")).json()
+        assert body["auth_enabled"] is False
+        assert body["authenticated"] is True
+
+    async def test_readiness_is_open_and_checks_the_database(self):
+        async for client in make_remote_client(ok_json([])):
+            response = await client.get("/health/ready")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+        assert response.json()["version"]

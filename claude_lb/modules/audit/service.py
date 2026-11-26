@@ -8,8 +8,10 @@ only names, ids, and hints reach `detail`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claude_lb.db.models import AuditEvent
@@ -17,6 +19,13 @@ from claude_lb.db.models import AuditEvent
 logger = logging.getLogger(__name__)
 
 MAX_DETAIL = 512
+
+# Actions whose target/detail is a client address (a firewall entry and its note).
+ADDRESS_ACTIONS = ("firewall.entry_added", "firewall.entry_removed", "firewall.entry_updated")
+
+
+def reveals_addresses(action: str) -> bool:
+    return action in ADDRESS_ACTIONS
 
 
 async def record(
@@ -64,6 +73,71 @@ async def recent(session: AsyncSession, *, limit: int = 100, action: str | None 
         stmt = stmt.where(AuditEvent.action == action)
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def page(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    actions: Sequence[str] = (),
+    target: str | None = None,
+    search: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    ok: bool | None = None,
+    search_client_ip: bool = True,
+) -> tuple[list[AuditEvent], int]:
+    """A filtered page of events, newest first, plus the total that matched."""
+    conditions = []
+    if actions:
+        conditions.append(AuditEvent.action.in_(list(actions)))
+    # Without client addresses (a guest), the address-bearing rows must not be findable
+    # by their address either: searching for one would confirm it is on the firewall.
+    addressless = None if search_client_ip else AuditEvent.action.not_in(ADDRESS_ACTIONS)
+    if target:
+        match = AuditEvent.target.ilike(f"%{_escape_like(target.strip())}%", escape="\\")
+        conditions.append(match if addressless is None else and_(addressless, match))
+    if since is not None:
+        conditions.append(AuditEvent.created_at >= since)
+    if until is not None:
+        conditions.append(AuditEvent.created_at < until)
+    if ok is not None:
+        conditions.append(AuditEvent.ok.is_(ok))
+    term = (search or "").strip()
+    if term:
+        pattern = f"%{_escape_like(term)}%"
+        matches = [column.ilike(pattern, escape="\\") for column in (AuditEvent.action, AuditEvent.actor)]
+        free_text = or_(
+            AuditEvent.target.ilike(pattern, escape="\\"), AuditEvent.detail.ilike(pattern, escape="\\")
+        )
+        matches.append(free_text if addressless is None else and_(addressless, free_text))
+        if search_client_ip:
+            matches.append(AuditEvent.client_ip.ilike(pattern, escape="\\"))
+        conditions.append(or_(*matches))
+    total = (await session.execute(select(func.count(AuditEvent.id)).where(*conditions))).scalar_one()
+    rows = await session.execute(
+        select(AuditEvent)
+        .where(*conditions)
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(rows.scalars()), int(total)
+
+
+async def actions(session: AsyncSession) -> list[tuple[str, int]]:
+    """Every action recorded so far, with how often."""
+    rows = await session.execute(
+        select(AuditEvent.action, func.count(AuditEvent.id))
+        .group_by(AuditEvent.action)
+        .order_by(AuditEvent.action)
+    )
+    return [(action, int(count)) for action, count in rows]
 
 
 async def prune(session: AsyncSession, *, keep: int = 5000) -> int:

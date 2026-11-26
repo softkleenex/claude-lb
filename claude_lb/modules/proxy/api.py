@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from claude_lb.dependencies import AdmissionDep, ProxyServiceDep
 from claude_lb.modules.api_keys.service import Admission
+from claude_lb.modules.auth.dependencies import client_ip
+from claude_lb.modules.proxy import request_models, sticky
 from claude_lb.modules.proxy.service import (
     ProxyService,
     UpstreamExhausted,
@@ -33,6 +35,10 @@ PROXIED_PREFIXES = ("/v1/messages", "/v1/models", "/v1/complete", "/v1/files")
 
 
 def _is_proxied(path: str) -> bool:
+    if request_models.has_unsafe_segments(path):
+        # An upstream may collapse `//`, `.` or `..` and land on another endpoint than
+        # the one admission classified (e.g. `/v1/messages/./batches`).
+        return False
     return any(path == prefix or path.startswith(prefix + "/") for prefix in PROXIED_PREFIXES)
 
 
@@ -77,9 +83,21 @@ async def _proxy(
 
     api_key = admission.key if admission else None
     body = await request.body()
+    if api_key is not None and api_key.enforced_model:
+        body = request_models.enforce(request.method, path, body, api_key.enforced_model)
     started_at = time.perf_counter()
     api_key_id = api_key.id if api_key else None
     model, _ = proxy_service._peek_request(body)  # noqa: SLF001 - same package
+    if model is None and admission is not None:
+        model = admission.model  # a batch whose entries all use one model
+    # Logged on every row (not only when sticky routing is on) so the dashboard can
+    # count and filter conversations.
+    session_key = sticky.session_key(body, api_key_id=api_key_id)
+    request_meta = {
+        "session_key": session_key,
+        "user_agent": request.headers.get("user-agent"),
+        "client_ip": client_ip(request) or None,
+    }
 
     try:
         outcome = await proxy_service.forward(
@@ -89,6 +107,7 @@ async def _proxy(
             headers=dict(request.headers),
             body=body,
             api_key=api_key,
+            session_key=session_key,
         )
     except UpstreamExhausted as exc:
         await record_request(
@@ -102,6 +121,7 @@ async def _proxy(
             attempts=0,
             usage=Usage(),
             error=str(exc),
+            **request_meta,
         )
         if exc.last_body:
             # Surface the upstream error verbatim so clients see Anthropic's own message.
@@ -130,6 +150,7 @@ async def _proxy(
                 started_at=started_at,
                 attempts=outcome.attempts,
                 on_finished=admission.release if admission else None,
+                **request_meta,
             ),
             status_code=outcome.status_code,
             headers=_response_headers(outcome.headers, outcome.account.name),
@@ -146,6 +167,7 @@ async def _proxy(
         started_at=started_at,
         attempts=outcome.attempts,
         usage=outcome.usage,
+        **request_meta,
     )
     return Response(
         content=outcome.body or b"",

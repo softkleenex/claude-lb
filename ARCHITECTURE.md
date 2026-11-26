@@ -12,8 +12,9 @@ They share a database (SQLite by default, Postgres optional) and nothing else.
 ```
 client ──► /v1/messages
             │
-            ├─ dependencies.require_api_key     auth + budget check on a short DB session;
-            │                                   reserves an in-flight slot (api_keys/service.py)
+            ├─ firewall.enforce_firewall        IP allowlist (proxy only), cached 5 s
+            ├─ dependencies.require_api_key     key auth, model allowlist / enforced model, limit
+            │                                   rules; reserves an in-flight slot (api_keys/)
             ├─ proxy/api.py                     404s unknown /v1 paths
             └─ proxy/service.py: forward()
                  │  for attempt in 1..max_attempts:
@@ -42,15 +43,21 @@ hanging up, which arrives as a cancellation.
 | `claude_lb/core/pricing.py` | Price table and cost/savings math. **Update when Anthropic changes prices** |
 | `claude_lb/core/crypto.py` | Fernet encryption at rest, `clb_` key hashing |
 | `claude_lb/db/schema.py` | Additive schema reconcile on startup (new columns, int→bigint on Postgres) |
-| `modules/proxy/` | Forwarding, failover, stickiness, usage parsing |
-| `modules/accounts/` | Upstream accounts, OAuth refresh, browser login (PKCE) |
-| `modules/api_keys/` | `clb_` keys, rolling-window budgets, in-flight slots |
+| `modules/proxy/` | Forwarding, failover, stickiness, subscription quota/depletion, usage parsing |
+| `modules/accounts/` | Upstream accounts, OAuth refresh, browser login (PKCE), credential bundle import |
+| `modules/api_keys/` | `clb_` keys, limit rules (`limits.py`), model allowlist, assigned accounts, in-flight slots |
 | `modules/health/` | Background probes that re-enable recovered accounts, and the model catalog |
 | `modules/usage/` | Summaries, daily rollups, cost reports, Prometheus `/metrics` |
-| `modules/auth/` | Dashboard password + TOTP, sessions, the bootstrap window, login throttle |
+| `modules/auth/` | Dashboard password + TOTP, sessions (admin / read-only guest), the bootstrap window, login throttle |
 | `modules/settings/` | Runtime settings, changeable without a restart |
-| `modules/audit/` | Append-only log of management actions |
-| `modules/dashboard/index.html` | The whole UI: one file, no build step |
+| `modules/audit/` | Append-only log of management actions, paged/filtered for the Audit page |
+| `modules/dashboard/` | SPA serving (`api.py`), overview / projections / weekly pace (`data_api.py`, `overview.py`, `pace.py`) |
+| `modules/request_logs/` | Paged request log, filter options, request detail, conversations (grouped by `session_key`) |
+| `modules/reports/` | Date-range report for the Reports page (rollups + request-log medians) |
+| `modules/sticky_sessions/` | Browse / delete the in-memory sticky map |
+| `modules/firewall/` | Proxy IP allowlist (`firewall_entries`, mode in `settings`) |
+| `modules/automations/` | Scheduled per-account prompts: schedule math, per-minute scheduler, idempotent runs |
+| `frontend/` | Dashboard source (React); built into `modules/dashboard/static/` |
 
 ## State that lives in memory
 
@@ -63,8 +70,46 @@ Each item below is per process. With more than one worker, each one holds its ow
 | OAuth refresh single-flight | Workers can refresh the same account concurrently |
 | Login throttle | Counted per worker |
 | Bootstrap token | Differs per worker |
+| Firewall decision cache | Up to 5 s stale on the other workers after a change |
+| Automations scheduler | Every worker plans; the unique `slot_key` lets only one send each run |
 
 Run a single worker unless you have a reason not to. One async worker handles a lot of proxy traffic.
+
+## Dashboard (frontend)
+
+`frontend/` is a React 19 + Vite + TypeScript app (Tailwind, Radix/shadcn components, React
+Query, zustand, i18next, recharts), derived from the codex-lb frontend (MIT, see
+`frontend/LICENSE`).
+
+```
+frontend/src/
+  App.tsx                 routes; every page is a lazy chunk
+  components/layout/      header (nav + Advanced menu), status bar, auth gate banners
+  components/ui/          shadcn/Radix primitives
+  features/<area>/        api.ts (calls), schemas.ts (zod), hooks/, components/
+                          accounts, api-keys, apis, audit, auth, automations, dashboard,
+                          firewall, health, model-catalog, reports, settings, sticky-sessions
+  lib/api-client.ts       fetch wrapper: snake_case <-> camelCase, zod validation, 401 handling
+  i18n/locales/           en.json, ko.json, zh-CN.json (flat dotted keys)
+  test/mocks/             MSW handlers + wire factories mirroring the FastAPI responses
+```
+
+- **Wire format.** The backend speaks snake_case. `api-client.ts` camelizes response keys before
+  zod validation and snakifies request bodies and query keys (`rawKeys: true` opts out where keys
+  are data). A response that does not match its schema fails loudly as "Response schema mismatch".
+- **Serving.** `npm run build` writes `claude_lb/modules/dashboard/static/`, which is committed, so
+  the wheel and Docker image need no Node. `modules/dashboard/api.py` serves real files from there
+  (`/assets/*` hashed and cached for a year, a missing asset is a 404), and answers every other
+  GET with `index.html` (`no-cache`) so client-side routes survive a reload. Paths whose first
+  segment is `api`, `v1`, `health`, `metrics`, `docs`, `redoc` or `openapi.json` are excluded by
+  the route class itself, so they keep their normal 404/405. The dashboard router is registered
+  last. Without a build, `/` answers 503 with the build command.
+- **Auth.** The SPA reads `/api/auth/status` and renders the gate (first-run setup, sign-in with
+  optional TOTP, guest sign-in); any 401 returns it to the gate. Guests get a read-only UI, and
+  the backend enforces it (`require_management_auth` refuses non-GET for a guest session).
+- **Contract.** `tests/test_dashboard_contract.py` checks that every `/api/...` path in the
+  frontend source is routed and that the committed build is complete; field shapes are guarded by
+  the zod schemas and the MSW mocks.
 
 ## Design rules
 
