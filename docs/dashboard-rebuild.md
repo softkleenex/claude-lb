@@ -286,8 +286,7 @@ token (oauth/bearer/pro). Console: no errors (only Chrome "form field should hav
   1h→12×5 min, 24h→24×1 h, 7d→28×6 h, 30d→30×1 d; per bucket requests/tokens/cost/savings/hit rate/error rate/
   conversations), `by_model` (same totals per model) and `meta` (version, accounts total/available, pool remaining %
   as `/api/usage/quota` computes it, routing strategy, sticky flag, log retention days, last request). Bucketing is
-  done in SQL with a dialect switch (`julianday` on SQLite, `extract(epoch)`+`floor` on Postgres — Postgres path is
-  untested locally). Reads request logs, so a window longer than retention is truncated (UI says so).
+  done in SQL with a dialect switch (`julianday` on SQLite, `extract(epoch)`+`floor` on Postgres). Reads request logs, so a window longer than retention is truncated (UI says so).
 - **`GET /api/dashboard/projections`**: `primary`/`secondary` window capacity over *enabled subscription* accounts
   (`plan_type != "api"`; paused/disabled excluded): capacity/remaining credits, remaining %, capacity-weighted safe line
   (elapsed share of each window) and risk, risk level, EWMA burn rate (credits/h), projected exhaustion, next reset,
@@ -355,7 +354,6 @@ scroll (scrollWidth 390); no console errors or warnings.
   is shown). The cost chart uses rollups and is not.
 - Burn rate often reads "Idle": the EWMA restarts whenever utilization drops (window reset or the demo's cycling fake
   utilization), so short-lived histories give no rate. Weekly pace then says "not enough recent readings".
-- Postgres bucket SQL (`extract(epoch)`/`floor`) and the `GROUP BY` on a label in the options query are untested here.
 - Cost breakdown prices all cache writes at the 5-min rate (the 1-h share is not logged); the total is authoritative.
 - `formatHours` drops minutes once a duration exceeds a day ("1d" for 24.5 h).
 - zh-CN lacks most new dashboard strings (English fallback).
@@ -428,8 +426,7 @@ horizontal scroll (scrollWidth 390), donut legends readable; no console messages
 
 **Known issues**
 - Dates are UTC days (rollups are keyed by UTC date); the UI says "UTC 기준/UTC days". No per-browser timezone like codex-lb.
-- A UA filter or UA grouping makes totals retention-limited (notice shown). Postgres paths (`_bucket_index` day buckets,
-  `count(distinct)`) untested locally, same as Step D.
+- A UA filter or UA grouping makes totals retention-limited (notice shown).
 - Medians load every streamed row in the window into Python (bounded by retention); fine for demo scale, could be heavy
   for very busy instances with long retention.
 - `breakdown_total` for non-UA groupings equals the summary; log-based error counts can differ slightly from rollup
@@ -845,7 +842,7 @@ shows all firewall/guest/automation events (guest login with actor `guest`). 390
 - `docs/dashboard-light.png` / `docs/dashboard-dark.png` (README hero image) still show the **old** dashboard.
 - Guests still see firewall entries (networks) and masked credential/key hints; only client IPs are hidden.
 - zh-CN covers only the strings that survived from codex-lb (349 keys); everything new falls back to English.
-- Inherited from earlier steps: Postgres SQL paths (bucketing, `count(distinct)`) untested locally; limits and
+- Inherited from earlier steps: limits and
   conversations are retention-bounded; sticky map / firewall cache / automations scheduler are per process; backend
   error messages are English; recharts chunk > 600 kB; `npm audit` moderate advisories in dev deps not reviewed;
   `claude-lb demo` leaves a `claude-lb-demo-*` dir in `$TMPDIR`.
@@ -886,6 +883,22 @@ after. `ruff check`/`ruff format --check` clean; `pytest` **607 passed**. Fronte
   `claude-opus-4-1-*` id — same family, but broader than an exact snapshot pin.
 - A batch's later usage is still not metered for request-count-only keys (one batch = one request).
 
+### 2026-11-26 — Postgres verification
+**Done**: full suite against PostgreSQL 16.15 (Docker `postgres:16`, `postgresql+asyncpg`, same URL form as CI).
+No application SQL needed changes — the dashboard buckets (`extract(epoch)`/`floor`), the request-log options
+`GROUP BY` on labels, report `count(distinct)`, conversations, API-key limit-rule alias matching, automations
+(unique slot keys + savepoints), firewall and schema reconcile all pass on Postgres. Two test-only failures fixed:
+- `TestSchemaUpgrade` inserted `0` into a `BOOLEAN` column with raw SQL (Postgres refuses it) — now `false`.
+- `test_add_subscription_cli_logs_in_verifies_and_stores`: the autouse `fresh_database` fixture left a pooled asyncpg
+  connection bound to its event loop, and the CLI's own `asyncio.run()` reused it ("attached to a different loop";
+  aiosqlite is not loop-bound, so SQLite hid it). The fixture now disposes the pool after creating the schema.
+
+Upgrade path: pre-change code (`057f09d^`) created and seeded a Postgres DB; HEAD on the same DB added the new columns
+(NOT NULL ones with defaults back-filled, e.g. `routing_policy='normal'`, `plan_type='api'`, `role='admin'`,
+`model_blocks_json='{}'`), the new tables (limit rules, automations, firewall, quota history) and the session index;
+every dashboard/reports/logs/keys/automations/firewall endpoint returned 200 with the old rows; a second start was a
+no-op. **Results**: Postgres 607 passed (twice, no flakes); SQLite 607 passed; ruff clean.
+
 ### 아침 요약 (Morning summary)
 **만든 것** — 예전 단일 HTML 대시보드를 codex-lb 기반 React 대시보드로 완전히 교체했습니다(A–H, 커밋 13개, push 안 함).
 - 페이지: 대시보드(지표·추이·5h/7d 용량 도넛·주간 속도·API 키 지출·계정 카드·모델별 사용량·요청 로그/대화 보기),
@@ -905,12 +918,12 @@ after. `ruff check`/`ruff format --check` clean; `pytest` **607 passed**. Fronte
 **알아둘 한계**
 - README 상단 스크린샷(docs/dashboard-*.png)은 아직 예전 대시보드 — 새 스크린샷으로 바꿔야 합니다.
 - 중국어(zh-CN)는 일부만 번역(나머지는 영어로 표시). 서버 오류 메시지는 영어.
-- Postgres 경로 미검증, 일부 수치(한도·대화)는 요청 로그 보존 기간에 묶임, 세션 고정·방화벽 캐시·자동화 스케줄러는
+- 일부 수치(한도·대화)는 요청 로그 보존 기간에 묶임, 세션 고정·방화벽 캐시·자동화 스케줄러는
   프로세스별(워커 1개 권장).
 
 **다음 단계 제안**
 1. 새 스크린샷으로 README 이미지 교체 → 릴리스(0.7.0) 준비.
-2. Postgres로 통합 테스트 한 번(대시보드 집계 SQL).
+2. ~~Postgres로 통합 테스트 한 번~~ — 완료(Log의 "Postgres verification" 참고).
 3. 게스트에게 방화벽 항목도 숨길지 결정, 백엔드 오류 메시지 i18n(오류 코드 반환) 검토.
 4. recharts 청크 분리, `npm audit` 정리.
 

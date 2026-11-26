@@ -114,7 +114,7 @@ class TestSchemaUpgrade:
             await conn.execute(
                 text(
                     f"INSERT INTO request_logs VALUES ('old1', '{created}', NULL, NULL,"
-                    " '/v1/messages', 'claude-opus-5', 200, 0, 900, 1, 10, 20, 0, 0, 0.5, NULL)"
+                    " '/v1/messages', 'claude-opus-5', 200, false, 900, 1, 10, 20, 0, 0, 0.5, NULL)"
                 )
             )
 

@@ -44,6 +44,10 @@ async def fresh_database() -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    # Drop the pooled connections so the test starts with none. asyncpg connections
+    # are bound to the loop that opened them, and a sync test that drives the CLI runs
+    # its own asyncio.run(); reusing this pool there fails ("attached to a different loop").
+    await dispose_db()
     yield
     await dispose_db()
 
