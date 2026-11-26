@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-26
+
 ### Added
 - **Subscription pooling** (`codex-lb` parity):
   - Plan tiers (`free`, `pro`, `max`, `max_5x`, `max_20x`, `team`, `enterprise`, `api`) with capacity credits and per-account `routing_policy` (`burn_first`, `normal`, `preserve`).
@@ -184,7 +186,8 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - Initial release: key pooling, rate-limit-aware routing, failover, `clb_` client keys with
   budgets, usage and cost tracking, SSE passthrough, and the dashboard.
 
-[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/softkleenex/claude-lb/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/softkleenex/claude-lb/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/softkleenex/claude-lb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/softkleenex/claude-lb/compare/v0.4.0...v0.5.0
