@@ -303,3 +303,44 @@ async def test_switching_transport_clears_model_blocks():
     assert body["transport"] == "claude_code"
     assert body["blocked_models"] == []
     assert body["model_blocks"] == []
+
+
+def test_doctor_fails_when_native_account_lacks_claude_cli(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from claude_lb import cli
+    from claude_lb.core import config as config_mod
+    from claude_lb.db.session import dispose_db, init_db
+
+    monkeypatch.setenv("CLAUDE_LB_DATA_DIR", str(tmp_path))
+    config_mod.get_settings.cache_clear()
+    import asyncio
+
+    async def _seed():
+        await dispose_db()
+        await init_db()
+        async with session_scope() as session:
+            session.add(
+                Account(
+                    id="doc-1",
+                    name="sub-doc",
+                    provider="oauth",
+                    encrypted_credential=encrypt("sk-ant-oat-doc"),
+                    credential_hint=mask_secret("sk-ant-oat-doc"),
+                    auth_scheme="bearer",
+                    transport="claude_code",
+                    plan_type="max_5x",
+                )
+            )
+        await dispose_db()
+
+    asyncio.run(_seed())
+    monkeypatch.setattr(native_claude, "claude_cli", lambda: None)
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert result.exit_code == 1
+    assert "Claude Code CLI" in result.output
+
+    monkeypatch.setattr(native_claude, "claude_cli", lambda: "/usr/local/bin/claude")
+    ok = CliRunner().invoke(cli.app, ["doctor"])
+    assert ok.exit_code == 0
+    assert "/usr/local/bin/claude" in ok.output

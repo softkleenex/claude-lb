@@ -28,7 +28,9 @@ from claude_lb.modules.proxy.quota import (
     effective_secondary_used,
 )
 
-app = typer.Typer(help="Anthropic API key load balancer & proxy.", no_args_is_help=True)
+app = typer.Typer(
+    help="Self-hosted gateway for Claude subscriptions and Anthropic API keys.", no_args_is_help=True
+)
 account_app = typer.Typer(help="Manage upstream Anthropic accounts.", no_args_is_help=True)
 
 
@@ -46,7 +48,7 @@ def _main(
         False, "--version", "-V", callback=_print_version, is_eager=True, help="Show the version and exit."
     ),
 ) -> None:
-    """Anthropic API key load balancer & proxy."""
+    """Self-hosted gateway for Claude subscriptions and Anthropic API keys."""
 
 
 key_app = typer.Typer(help="Manage locally issued proxy API keys.", no_args_is_help=True)
@@ -214,6 +216,67 @@ def config() -> None:
     table.add_row("[dim]database[/dim]", settings.resolved_database_url)
     table.add_row("[dim]strategies[/dim]", ", ".join(STRATEGIES))
     console.print(table)
+
+
+@app.command()
+def doctor() -> None:
+    """Check local runtime prerequisites, configured accounts, and server health."""
+    settings = get_settings()
+    cli_path = native_claude.claude_cli()
+
+    async def _inspect() -> list[Account]:
+        async with session_scope() as session:
+            result = await session.execute(select(Account).order_by(Account.name))
+            return list(result.scalars())
+
+    accounts = _run(_inspect())
+    native_accounts = [a for a in accounts if a.transport == native_claude.TRANSPORT_CLAUDE_CODE]
+    available_accounts = [a for a in accounts if is_available(a)]
+
+    table = Table(title="claude-lb doctor")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+
+    table.add_row(
+        "Data directory",
+        "[green]ok[/green]" if settings.data_dir.exists() else "[yellow]missing[/yellow]",
+        str(settings.data_dir),
+    )
+    if cli_path:
+        table.add_row("Claude Code CLI", "[green]ok[/green]", cli_path)
+    elif native_accounts:
+        table.add_row(
+            "Claude Code CLI",
+            "[red]missing[/red]",
+            "Required by claude_code accounts: npm install -g @anthropic-ai/claude-code",
+        )
+    else:
+        table.add_row(
+            "Claude Code CLI",
+            "[dim]not installed[/dim]",
+            "Only needed for claude_code subscription transport",
+        )
+    table.add_row(
+        "Accounts",
+        "[green]ok[/green]" if available_accounts else "[yellow]none available[/yellow]",
+        f"{len(available_accounts)}/{len(accounts)} available ({len(native_accounts)} claude_code)",
+    )
+
+    host = "127.0.0.1" if settings.host in ("0.0.0.0", "::") else settings.host
+    health_url = f"http://{host}:{settings.port}/health"
+    try:
+        resp = httpx.get(health_url, timeout=1.5)
+        if resp.status_code == 200:
+            table.add_row("Server", "[green]running[/green]", health_url)
+        else:
+            table.add_row("Server", f"[yellow]HTTP {resp.status_code}[/yellow]", health_url)
+    except httpx.HTTPError:
+        table.add_row("Server", "[dim]not running[/dim]", f"Start with `claude-lb serve` ({health_url})")
+
+    console.print(table)
+    if native_accounts and not cli_path:
+        raise typer.Exit(1)
 
 
 @account_app.command("add")

@@ -5,6 +5,16 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-11-27
+
+### Added
+- `claude-lb doctor` command to inspect data directory, Claude Code CLI availability, configured accounts, and local server health.
+- Frontend CI job (`typecheck`, `lint`, and `vitest`) in `.github/workflows/ci.yml`.
+- README section comparing `claude-lb` against generic LLM gateways and IDE plugins.
+
+### Fixed
+- Request-log pagination controls now wrap cleanly on narrow mobile viewports (390px).
+
 ## [0.7.0] — 2026-11-26
 
 ### Added
@@ -186,7 +196,8 @@ and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: a minor
 - Initial release: key pooling, rate-limit-aware routing, failover, `clb_` client keys with
   budgets, usage and cost tracking, SSE passthrough, and the dashboard.
 
-[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/softkleenex/claude-lb/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/softkleenex/claude-lb/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/softkleenex/claude-lb/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/softkleenex/claude-lb/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/softkleenex/claude-lb/compare/v0.5.0...v0.6.0
