@@ -44,6 +44,15 @@ docker run --rm -p 2457:2457 ghcr.io/softkleenex/claude-lb demo
 Point Claude Code at it with one command (`claude-lb setup claude-code`). The same goes for
 the Anthropic SDKs and anything else that takes a base URL.
 
+### How is this different from LiteLLM or generic LLM proxies?
+
+Most multi-provider gateways treat Anthropic like just another OpenAI-shaped backend. `claude-lb` is built specifically around Anthropic's API and Claude subscriptions:
+
+- **Prompt-cache affinity**: Hashes the cacheable conversation prefix to pin turns to the account holding the warm cache (0.025–0.1× reads instead of 1.25× re-writes) and calculates exact dollars saved per model.
+- **5h / 7d unified quota math**: Parses `anthropic-ratelimit-unified-*` headers with EWMA burn-rate depletion forecasting, `burn_first` / `normal` / `preserve` policy tiers, and per-account `spend_cap_usd` failover between subscriptions and Console API keys.
+- **Native Claude Code transport (no spoofed OAuth)**: Subscription accounts run through isolated mode-`0700` profiles of Anthropic's unmodified `claude` CLI (tokens passed via env only, built-in tools disabled so client tools round-trip cleanly as `tool_use`).
+- **Self-contained single install**: Ships a prebuilt React dashboard inside the Python package and runs on SQLite or PostgreSQL — no Node, Redis, or multi-container stack required (`uvx claude-lb demo` works in 10 seconds).
+
 Inspired by [codex-lb](https://github.com/Soju06/codex-lb), rebuilt for the Anthropic API.
 
 > **Credentials are yours to supply.** claude-lb ships no OAuth client constants for
